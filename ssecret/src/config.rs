@@ -1,27 +1,71 @@
+use std::{fs::File, io::BufReader, net::{IpAddr as IPAddr, Ipv4Addr}, path::{Path, PathBuf}};
+use std::error::Error;
+use serde::{Deserialize};
+use clap::{Parser};
 
-pub struct Config {
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+pub struct Cli {
+    /// Sets a custom config file
+    #[arg(short = 'c', long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// directory to scan
+    #[arg(short = 'd', long, value_name = "DIRECTORY")]
+    directory: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]pub struct Config {
     pub folder_to_scan: String,
-    max_thread: u32,
+    pub max_thread: usize,
+    server_ip: IPAddr,
+    server_port: u16,
+}
+
+fn read_config_from_file<P: AsRef<Path>>(path: P) -> Result<Config, Box<dyn Error>> {
+    // Open the file in read-only mode with buffer.
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    // Read the JSON contents of the file as an instance of `User`.
+    let u = serde_json::from_reader(reader)?;
+
+    // Return the `User`.
+    Ok(u)
 }
 
 impl Config {
-    pub fn build_config(args: Vec<String>) -> Result<Config, &'static str> {
-        if args.len() < 2 {
-            return Err("Not enough arguments!");
-        }
+    pub fn build_config(cli : Cli) -> Config 
+    {
+        let mut config= Config {
+            folder_to_scan : String::from(""),
+            max_thread : 1,
+            server_ip : IPAddr::V4(Ipv4Addr::new(127,0,0,1)),
+            server_port : 8082,
+        };
 
-        Ok(Config { folder_to_scan: args[1].clone(), max_thread: 1 })
+        if let Some(config) = cli.config{
+            let config = read_config_from_file(config).expect("error while parsing config file");
+            return config;
+        } else if let Some(directory) = cli.directory {
+            config.folder_to_scan = directory.as_os_str().to_str().unwrap().to_string();
+        } else {
+            panic!("Required directory to scan!");
+        }
+        config
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use crate::Config;
+
+    use crate::{config::Cli, Config};
     #[test]
     fn test_build_config() {
-        let args: Vec<String> = vec!["hello".to_string(), "/mnt/test".to_string()];
-        let config : Config = Config::build_config(args).unwrap();
+        let config : Config = Config::build_config();
 
         assert_eq!(config.folder_to_scan, "/mnt/test");
         assert_eq!(config.max_thread, 1);
