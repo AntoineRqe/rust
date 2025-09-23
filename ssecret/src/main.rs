@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::{env, process, thread};
 use std::fs;
+use std::path::PathBuf;
+use clap::Parser;
 
-use crate::{analyser::TextAnalysis, config::Config};
+
+use crate::{analyser::TextAnalysis, config::{Config, Cli}};
 use inotify::{Events, Inotify, WatchMask};
 use std::io::ErrorKind;
 
@@ -36,10 +39,13 @@ fn run (config: &Config, stop: &Arc<AtomicBool>) {
 
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
 
+    rayon::ThreadPoolBuilder::new().num_threads(config.max_thread).build_global().unwrap();
+    let pool = rayon_core::ThreadPoolBuilder::default().build().unwrap();
+
+
      let mut inotify = Inotify::init()
         .expect("Error while initializing inotify instance");
 
-    println!("{0}",config.folder_to_scan);
     // Watch for modify and close events.
     inotify
         .watches()
@@ -65,7 +71,7 @@ fn run (config: &Config, stop: &Arc<AtomicBool>) {
     };
 
     for handle in handles {
-        handle.join().unwrap();
+        handle.join().expect("Failed to stop some threads");
     }
 }
  
@@ -74,19 +80,16 @@ fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
 
-
     let _ = ctrlc::set_handler( move|| {
         
         println!("Received end of program");
         stop.store(true, Ordering::Relaxed);
     });
 
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
+    let config : Config = Config::build_config(cli);
 
-    let config : Config = Config::build_config(args).unwrap_or_else(|err| {
-        eprintln!("Error happened : {err}");
-        process::exit(1);
-    });
+    println!("{config:?}");
 
     run(&config, &stop_clone);
 }
