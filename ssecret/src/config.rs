@@ -20,8 +20,8 @@ pub struct Cli {
 #[serde(rename_all = "camelCase")]pub struct Config {
     pub folder_to_scan: String,
     pub max_thread: usize,
-    server_ip: IPAddr,
-    server_port: u16,
+    pub server_ip: IPAddr,
+    pub server_port: u16,
 }
 
 fn read_config_from_file<P: AsRef<Path>>(path: P) -> Result<Config, Box<dyn Error>> {
@@ -61,11 +61,13 @@ impl Config {
 #[cfg(test)]
 mod tests {
 
+    use clap::Parser;
 
     use crate::{config::Cli, Config};
     #[test]
     fn test_build_config() {
-        let config : Config = Config::build_config();
+        let cli = Cli::parse();
+        let config : Config = Config::build_config(cli);
 
         assert_eq!(config.folder_to_scan, "/mnt/test");
         assert_eq!(config.max_thread, 1);

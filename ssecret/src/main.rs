@@ -1,47 +1,47 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::{env, process, thread};
 use std::fs;
-use std::path::PathBuf;
-use clap::Parser;
+use std::net::TcpStream;
+use clap::{Parser};
 
 
 use crate::{analyser::TextAnalysis, config::{Config, Cli}};
 use inotify::{Events, Inotify, WatchMask};
-use std::io::ErrorKind;
+use std::io::{Write, ErrorKind};
 
 pub mod analyser;
 pub mod config;
 
-fn process_event(events: Events<'_>, handles: &mut Vec<JoinHandle<()>>, folder_to_scan: &str) {
+fn process_event(events: Events<'_>, pool: &mut rayon_core::ThreadPool, config: &Config) {
     for event in events {
         // Handle event
         let Some(filename) = event.name else {
             continue;
         };
 
-        let full_path = folder_to_scan.to_string() + filename.to_str().unwrap();
+        let full_path = config.folder_to_scan.to_string() + filename.to_str().unwrap();
         let full_path = fs::canonicalize(full_path).unwrap();
 
-        let handle = thread::spawn(move || {
+        pool.install(move || {
             let mut my_analyser = TextAnalysis::new(full_path.clone().to_str().unwrap()).unwrap();
             my_analyser.analyse_file().unwrap();
-            println!("{0}", my_analyser.build_json());
-
+            
+            if let Ok(mut stream) = TcpStream::connect((config.server_ip, config.server_port)) {
+                stream.write_all(my_analyser.build_json().as_bytes())
+                .unwrap_or_else(|err| {
+                    eprintln!("Could not send parsing information for {} -> {}", full_path.to_string_lossy(), err);
+                });
+            } else {
+                eprintln!("Could not send parsing information for {0}", full_path.to_string_lossy());
+            }
         });
-
-        handles.push(handle);
     }
 }
 
 fn run (config: &Config, stop: &Arc<AtomicBool>) {
 
-    let mut handles: Vec<JoinHandle<()>> = Vec::new();
-
     rayon::ThreadPoolBuilder::new().num_threads(config.max_thread).build_global().unwrap();
-    let pool = rayon_core::ThreadPoolBuilder::default().build().unwrap();
-
+    let mut pool = rayon_core::ThreadPoolBuilder::default().build().unwrap();
 
      let mut inotify = Inotify::init()
         .expect("Error while initializing inotify instance");
@@ -67,12 +67,9 @@ fn run (config: &Config, stop: &Arc<AtomicBool>) {
             }
         };
 
-        process_event(events, &mut handles, &config.folder_to_scan);
+        process_event(events, &mut pool, config);
     };
 
-    for handle in handles {
-        handle.join().expect("Failed to stop some threads");
-    }
 }
  
 fn main() {
