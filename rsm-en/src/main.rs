@@ -1,17 +1,59 @@
 mod balances;
 mod system;
+mod support;
+mod proof_of_existence;
+
+use crate::{support::Dispatch, types::{AccountId, Balance}};
 
 mod types {
+    use crate::{support};
+
     pub type AccountId = String;
     pub type Balance = u128;
     pub type BlockNumber = u32;
-    pub type Nonce = u32;
+    pub type Nonce = u32;   
+    pub type Extrinsic = support::Extrinsic<AccountId, crate::RuntimeCall>;
+    pub type Header = support::Header<BlockNumber>;
+    pub type Block = support::Block<Header, Extrinsic>;
+}
+
+pub enum RuntimeCall {
+    Balances(balances::Call<Runtime>),
+}
+
+impl system::Config for Runtime {
+    type AccountId = String;
+    type BlockNumber = u32;
+    type Nonce = u32;
+}
+
+impl balances::Config for Runtime {
+    type Balance = u128;
 }
 
 #[derive(Debug)]
 pub struct Runtime {
-    balances: balances::Pallet<types::AccountId, types::Balance>,
-    system: system::Pallet<types::AccountId, types::BlockNumber, types::Nonce>,
+    balances: balances::Pallet<Runtime>,
+    system: system::Pallet<Runtime>,
+}
+
+impl crate::support::Dispatch for Runtime {
+    type Caller = <Runtime as system::Config>::AccountId;
+    type Call = RuntimeCall;
+    
+    fn dispatch(
+        &mut self,
+        caller: Self::Caller,
+        runtime_call: Self::Call) -> support::DispatchResult
+    {
+        match runtime_call {
+            RuntimeCall::Balances(call) => {
+                self.balances.dispatch(caller, call)?;
+            },
+        }
+
+        Ok(())
+    }
 }
 
 impl Runtime {
@@ -21,6 +63,24 @@ impl Runtime {
             system: system::Pallet::new(),
         }
     }
+
+    fn execute_block(&mut self, block: types::Block) -> support::DispatchResult {
+        self.system.inc_block();
+
+        if self.system.get_block_number() != block.header.block_number {
+            return Err("block number mismatch");
+        }
+
+        for (i, support::Extrinsic {caller, call}) in block.extrinsics.into_iter().enumerate() {
+            self.system.inc_nonce(&caller);
+            let _ = self.dispatch(caller, call).map_err(|e| {
+                eprintln!("Extrinsic Error\n\tBlockNumber: {}\n\tExtrinsic number: {}\n\tError: {}",
+                block.header.block_number, i, e);
+            });            
+        }
+
+        Ok(())
+    }   
 }
 
 fn main() {
@@ -31,26 +91,22 @@ fn main() {
  
     runner.balances.set_balance(&alice, 100);
 
-    runner.system.inc_block();
-    runner.system.inc_nonce(&alice);
+    let block1 = types::Block {
+        header: types::Header { block_number: 1 },
+        extrinsics: vec![
+            types::Extrinsic {
+                caller: alice.clone(),
+                call: RuntimeCall::Balances(balances::Call::Transfer { to: bob.clone(), amount: 30 }),
+            },
+            types::Extrinsic {
+                caller: bob.clone(),
+                call: RuntimeCall::Balances(balances::Call::Transfer { to: charlie.clone(), amount: 20 }),
+            },
+        ],
+    };
 
-    assert!(runner.system.get_block_number() == 1);
-    assert!(runner.system.get_nonce(&alice) == 1);
 
-    let _ = runner.balances
-        .transfer(&alice, &bob, 30)
-        .map_err(|e| println!("Transfer failed: {}", e));
-
-    assert!(runner.balances.get_balance(&alice) == 70);
-    assert!(runner.balances.get_balance(&bob) == 30);
-
-    let _ = runner.balances
-        .transfer(&alice, &charlie, 50)
-        .map_err(|e| println!("Transfer failed: {}", e));
-
-    assert!(runner.balances.get_balance(&alice) == 20);
-    assert!(runner.balances.get_balance(&charlie) == 50);
-    assert!(runner.balances.get_balance(&bob) == 30);
+    let _ = runner.execute_block(block1);
 
     println!("{:?}", runner);
 }

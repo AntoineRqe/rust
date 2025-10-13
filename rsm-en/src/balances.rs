@@ -2,15 +2,38 @@ use std::{collections::BTreeMap, fmt::Debug};
 use std::fmt::Display;
 use num::{CheckedAdd, CheckedSub, Zero};
 
-#[derive(Debug)]
-pub struct Pallet<AccountId, Balance> {
-    balances: BTreeMap<AccountId, Balance>,
+use crate::support::Dispatch;
+use crate::system;
+
+pub trait Config : system::Config {
+    type Balance: Copy + Display + CheckedAdd + CheckedSub + Zero + Debug;    
 }
 
-impl<AccountId, Balance> Pallet<AccountId, Balance>
-where
-    AccountId: Clone + Ord,
-    Balance: Copy + Display + CheckedAdd + CheckedSub + Zero + Debug,
+#[derive(Debug)]
+pub struct Pallet<T: Config> {
+    balances: BTreeMap<T::AccountId, T::Balance>,
+}
+
+pub enum Call<T: Config> {
+    Transfer { to: T::AccountId, amount: T::Balance },
+}
+
+impl <T: Config> crate::support::Dispatch for Pallet<T> {
+    type Caller = T::AccountId;
+    type Call = Call<T>;
+
+    fn dispatch(&mut self, caller: Self::Caller, call: Self::Call) -> crate::support::DispatchResult {
+        match call {
+            Call::Transfer { to, amount } => {
+                self.transfer(&caller, &to, amount)?;
+            },
+        }
+
+        Ok(())
+    }
+    
+}
+impl<T: Config> Pallet<T>
 {
     pub fn new() -> Self {
         Self {
@@ -18,15 +41,15 @@ where
         }
     }
 
-    pub fn set_balance(&mut self, account: &AccountId, amount: Balance) {
+    pub fn set_balance(&mut self, account: &T::AccountId, amount: T::Balance) {
         self.balances.insert(account.clone(), amount);
     }
 
-    pub fn get_balance(&self, account: &AccountId) -> Balance {
-        *self.balances.get(account).unwrap_or(&Balance::zero())
+    pub fn get_balance(&self, account: &T::AccountId) -> T::Balance {
+        *self.balances.get(account).unwrap_or(&T::Balance::zero())
     }
 
-    pub fn transfer(&mut self, from: &AccountId, to: &AccountId, amount: Balance) -> Result<(), &'static str> {
+    pub fn transfer(&mut self, from: &T::AccountId, to: &T::AccountId, amount: T::Balance) -> Result<(), &'static str> {
         let from_balance = self.get_balance(from);
         let to_balance = self.get_balance(to);
 
@@ -47,12 +70,23 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{AccountId, Balance};
+
+    struct TestConfig;
+
+    impl system::Config for TestConfig {
+        type AccountId = String;
+        type BlockNumber = u32;
+        type Nonce = u32;        
+    }
+
+    impl super::Config for TestConfig {
+        type Balance = u128;
+    }
 
     use super::*;
     #[test]
     fn test_balances() {
-        let mut pallet = Pallet::new();
+        let mut pallet = Pallet::<TestConfig>::new();
         pallet.set_balance(&"Alice".to_string(), 1000);
         assert_eq!(pallet.get_balance(&"Alice".to_string()), 1000);
         assert_eq!(pallet.get_balance(&"Bob".to_string()), 0);
@@ -60,7 +94,7 @@ mod tests {
 
     #[test]
     fn test_transfer() {
-        let mut pallet: Pallet<AccountId, Balance> = Pallet::new();
+        let mut pallet: Pallet<TestConfig> = Pallet::new();
         pallet.set_balance(&"Alice".to_string(), 1000);
         pallet.set_balance(&"Bob".to_string(), 500);
         assert!(pallet.transfer(&"Alice".to_string(), &"Bob".to_string(), 300).is_ok());
