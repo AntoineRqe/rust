@@ -15,10 +15,12 @@ mod types {
     pub type Extrinsic = support::Extrinsic<AccountId, crate::RuntimeCall>;
     pub type Header = support::Header<BlockNumber>;
     pub type Block = support::Block<Header, Extrinsic>;
+    pub type Content = &'static str;
 }
 
 pub enum RuntimeCall {
     Balances(balances::Call<Runtime>),
+    ProofOfExistence(proof_of_existence::Call<Runtime>),
 }
 
 impl system::Config for Runtime {
@@ -31,10 +33,15 @@ impl balances::Config for Runtime {
     type Balance = u128;
 }
 
+impl proof_of_existence::Config for Runtime {
+    type Content = types::Content;
+}
+
 #[derive(Debug)]
 pub struct Runtime {
     balances: balances::Pallet<Runtime>,
     system: system::Pallet<Runtime>,
+    proof_of_existence: proof_of_existence::Pallet<Runtime>,
 }
 
 impl crate::support::Dispatch for Runtime {
@@ -50,6 +57,9 @@ impl crate::support::Dispatch for Runtime {
             RuntimeCall::Balances(call) => {
                 self.balances.dispatch(caller, call)?;
             },
+            RuntimeCall::ProofOfExistence(call) => {
+                self.proof_of_existence.dispatch(caller, call)?;
+            },
         }
 
         Ok(())
@@ -61,6 +71,7 @@ impl Runtime {
         Self {
             balances: balances::Pallet::new(),
             system: system::Pallet::new(),
+            proof_of_existence: proof_of_existence::Pallet::new(),
         }
     }
 
@@ -69,7 +80,7 @@ impl Runtime {
 
         if self.system.get_block_number() != block.header.block_number {
             return Err("block number mismatch");
-        }
+        } 
 
         for (i, support::Extrinsic {caller, call}) in block.extrinsics.into_iter().enumerate() {
             self.system.inc_nonce(&caller);
@@ -105,8 +116,23 @@ fn main() {
         ],
     };
 
-
     let _ = runner.execute_block(block1);
+
+    let block2 = types::Block {
+        header: types::Header { block_number: 2 },
+        extrinsics: vec![
+            types::Extrinsic {
+                caller: alice.clone(),
+                call: RuntimeCall::ProofOfExistence(proof_of_existence::Call::CreateClaim { claim: "Alice documents!" }),
+            },
+            types::Extrinsic {
+                caller: bob.clone(),
+                call: RuntimeCall::ProofOfExistence(proof_of_existence::Call::CreateClaim { claim: "Bob documents!" }),
+            },
+        ],
+    };
+
+    let _ = runner.execute_block(block2);
 
     println!("{:?}", runner);
 }
