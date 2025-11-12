@@ -40,6 +40,28 @@ fn merge_two_lists(mut list1: Option<Box<ListNode>>, mut list2: Option<Box<ListN
     new_head
 }
 
+pub fn delete_duplicates(mut head: Option<Box<ListNode>>) -> Option<Box<ListNode>> {
+    if head.is_none() { return None; }
+
+    let mut current = head.as_mut();
+
+    while let Some(node) = current {
+        while let Some(next_node) = node.next.as_mut() {
+            if node.val == next_node.val {
+                node.next = next_node.next.take();
+            }
+            else {
+                break;
+            }
+        }
+
+        current = node.next.as_mut();
+
+    }
+
+    head
+}
+
 fn create_list(items: Vec<i32>) -> Option<Box<ListNode>> {
     if items.is_empty() {
         return None;
