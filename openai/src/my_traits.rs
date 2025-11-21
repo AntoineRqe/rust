@@ -1,10 +1,37 @@
-pub trait Output {
-    type Data;
-    fn write(&mut self, data: &Self::Data) -> Result<(), Box<dyn std::error::Error>>;
+use crate::statistics::Statistics;
+use std::path::PathBuf;
+
+pub struct Infos {
+    pub filename: PathBuf,
+    pub title: String,
+    pub header: String,
+    pub footer: String,
+    pub levels_count: usize,
 }
 
-pub trait Input {
-    type Output;
-    fn parse(&mut self) -> Result<Self::Output, Box<dyn std::error::Error>>;
+impl Infos {
+    pub fn new(filename: &PathBuf, title: &str, header: &str, footer: &str, levels_count: usize) -> Self {
+        Infos {
+            filename: filename.to_path_buf(),
+            title: title.to_string(),
+            header: header.to_string(),
+            footer: footer.to_string(),
+            levels_count,
+        }
+    }
+}
+
+pub trait Output {
+    fn write(&mut self, data: &dyn std::any::Any, infos: &Infos) -> Result<(), Box<dyn std::error::Error>>;
+    fn new(filename: &PathBuf) -> Self
+    where
+        Self: Sized;
+}
+
+pub trait Input{
+    fn parse(&mut self, stats: &mut Statistics) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>>;
+    fn new(filename: &PathBuf) -> Self
+    where
+        Self: Sized;
 }
 

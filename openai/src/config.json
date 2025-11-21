@@ -1,0 +1,18 @@
+{
+    "support_multithread": false,
+    "support_csv": {
+        "input": true,
+        "output": true
+    },
+    "support_html": {
+        "input": false,
+        "output": true
+    },
+    "max_concurrent_requests": 3,
+    "model": [
+        "gemini-2.5-flash",
+        "Qwen2.5-Coder-32B-Instruct-AWQ",
+        "Mistral-Small",
+        "claude-sonnet-4"
+    ]
+}

@@ -2,7 +2,6 @@ use std::{collections::BTreeMap, fmt::Debug};
 use std::fmt::Display;
 use num::{CheckedAdd, CheckedSub, Zero};
 
-use crate::support::Dispatch;
 use crate::system;
 
 pub trait Config : system::Config {
