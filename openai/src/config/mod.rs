@@ -11,8 +11,10 @@ pub struct Config {
     pub support_multithread: bool,
     pub support_csv: SupportedFormat,
     pub support_html: SupportedFormat,
-    pub max_concurrent_requests: usize,
+    pub max_domain_propositions: usize,
     pub model: Vec<String>,
+    pub chunk_size: usize,
+    pub use_internal_replacement: bool,
 }
 
 impl Default for Config {
@@ -21,8 +23,10 @@ impl Default for Config {
             support_multithread: false,
             support_csv: SupportedFormat { input: true, output: true },
             support_html: SupportedFormat { input: false, output: true },
-            max_concurrent_requests: 3,
+            max_domain_propositions: 3,
             model: vec!["Qwen2.5-Coder-32B-Instruct-AWQ".to_string()],
+            chunk_size: 100,
+            use_internal_replacement: false,
         }
     }
 }
@@ -55,8 +59,10 @@ mod tests {
         assert!(config.support_csv.output);
         assert!(!config.support_html.input);
         assert!(config.support_html.output);
-        assert_eq!(config.max_concurrent_requests, 3);
-        assert_eq!(config.model, vec!["".to_string()]);
+        assert_eq!(config.max_domain_propositions, 3);
+        assert_eq!(config.model, vec!["Qwen2.5-Coder-32B-Instruct-AWQ".to_string()]);
+        assert_eq!(config.chunk_size, 100);
+        assert!(!config.use_internal_replacement);
     }
 
     #[test]
@@ -68,10 +74,12 @@ mod tests {
         assert!(config.support_csv.output);
         assert!(!config.support_html.input);
         assert!(config.support_html.output);
-        assert_eq!(config.max_concurrent_requests, 3);
+        assert_eq!(config.max_domain_propositions, 3);
         assert_eq!(config.model[0], "Qwen2.5-Coder-32B-Instruct-AWQ".to_string());
         assert_eq!(config.model[1], "Mistral-Small".to_string());
         assert_eq!(config.model[2], "claude-sonnet-4".to_string());
         assert_eq!(config.model[3], "gemini-2.5-flash".to_string());
+        assert_eq!(config.chunk_size, 50);
+        assert!(config.use_internal_replacement);
     }
 }

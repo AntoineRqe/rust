@@ -9,6 +9,8 @@
         "output": true
     },
     "max_concurrent_requests": 3,
+    "chunk_size": 50,
+    "use_internal_replacement": true,
     "model": [
         "Qwen2.5-Coder-32B-Instruct-AWQ",
         "Mistral-Small",

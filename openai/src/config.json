@@ -8,7 +8,9 @@
         "input": false,
         "output": true
     },
-    "max_concurrent_requests": 3,
+    "max_domain_propositions": 3,
+    "chunk_size": 5,
+    "use_internal_replacement": false,
     "model": [
         "gemini-2.5-flash",
         "Qwen2.5-Coder-32B-Instruct-AWQ",

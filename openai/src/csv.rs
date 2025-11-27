@@ -34,10 +34,10 @@ impl Input for MyCSVInput {
             let record = result?;
             let domain = record.get(0).unwrap().trim();
 
-            let olfeo_cat = record.get(*headers.get("old_category").unwrap()).unwrap().trim();
-            let expected_category = record.get(*headers.get("exptected_category_manual").unwrap()).unwrap().trim();
+            let olfeo_cat = record.get(*headers.get("old_category").expect("Old category header not found")).unwrap().trim();
+            let expected_category = record.get(*headers.get("categories_manual").expect("Expected category manual header not found")).expect("Could not find expected category manual header").trim();
             
-            if olfeo_cat == expected_category {
+            if expected_category.contains(olfeo_cat) {
                 stats.increment_olfeo_match_count();
             }
             // Assuming the first column is the domain and the fourth column is the expected category

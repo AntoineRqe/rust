@@ -1,12 +1,6 @@
 use std::collections::HashMap;
 
-pub fn get_prioritized_category(domain: &str, primary_category: &str, optionnal_categories: &Vec<String>) -> Option<String> {
-
-    for optional_category in optionnal_categories {
-      if HIGH_PRIORITY_CATEGORIES.contains(optional_category) {
-          return Some (optional_category.to_string());
-      }
-    }
+pub fn get_prioritized_category(primary_category: &str, optionnal_categories: &Vec<String>) -> Option<String> {
 
     let category_priorities: HashMap<&str, Vec<&str>> = HashMap::from([
         ("E-Commerce / Enchères", vec!["Intérêts / Loisirs"]),
@@ -31,7 +25,6 @@ pub fn get_prioritized_category(domain: &str, primary_category: &str, optionnal_
     if let Some(priorities) = category_priorities.get(primary_category) {
         for optional_category in optionnal_categories {
             if priorities.contains(&optional_category.as_str()) {
-                println!("Prioritized category found for domain {}: {} over {}", domain, optional_category, primary_category);
                 return Some(optional_category.to_string());
             }
         }
@@ -39,7 +32,7 @@ pub fn get_prioritized_category(domain: &str, primary_category: &str, optionnal_
     None
 }
 
-pub const HIGH_PRIORITY_CATEGORIES: &str = r#"
+pub const _HIGH_PRIORITY_CATEGORIES: &str = r#"
     [
         "Armes / Explosifs",
         "Religion",
