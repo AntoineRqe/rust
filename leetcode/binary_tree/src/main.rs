@@ -168,6 +168,36 @@ pub fn is_symmetric(root: Option<Rc<RefCell<TreeNode>>>) -> bool {
     queue.is_empty()
 }
 
+pub fn sorted_array_to_bst(nums: Vec<i32>) -> Option<Rc<RefCell<TreeNode>>> {
+    if nums.is_empty() { return None; }
+
+    let len = nums.len() as i32;
+    let mut queue = std::collections::VecDeque::new();
+    let root = Rc::new(RefCell::new(TreeNode::new(0)));
+
+    queue.push_back((0, len-1, Rc::clone(&root)));
+
+    while !queue.is_empty() {
+        let (start, end, node) = queue.pop_front().unwrap();
+
+        let mid = start + (end - start) / 2;
+        node.borrow_mut().val = nums[mid as usize];
+    
+        if start <= mid - 1 {
+            let left = Rc::new(RefCell::new(TreeNode::new(0)));
+            node.borrow_mut().left = Some(Rc::clone(&left));
+            queue.push_back((start, mid - 1, Rc::clone(&left)));
+        } 
+
+        if mid +1 <= end {
+            let right = Rc::new(RefCell::new(TreeNode::new(0)));
+            node.borrow_mut().right = Some(Rc::clone(&right));
+            queue.push_back((mid + 1, end, Rc::clone(&right)));
+        }
+    }
+
+    Some(root)
+}
 
 fn main() {
     let test = vec![Some(1),Some(2),Some(3),Some(4),Some(5),Some(6),Some(7),Some(8)];
