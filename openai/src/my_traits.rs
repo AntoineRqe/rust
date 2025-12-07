@@ -2,7 +2,6 @@ use crate::statistics::Statistics;
 use std::path::PathBuf;
 
 pub struct Infos {
-    pub filename: PathBuf,
     pub title: String,
     pub header: String,
     pub footer: String,
@@ -10,9 +9,8 @@ pub struct Infos {
 }
 
 impl Infos {
-    pub fn new(filename: &PathBuf, title: &str, header: &str, footer: &str, levels_count: usize) -> Self {
+    pub fn new(title: &str, header: &str, footer: &str, levels_count: usize) -> Self {
         Infos {
-            filename: filename.to_path_buf(),
             title: title.to_string(),
             header: header.to_string(),
             footer: footer.to_string(),
@@ -21,17 +19,30 @@ impl Infos {
     }
 }
 
-pub trait Output {
+pub trait Output: Send + Sync {
+    fn clone_box(&self) -> Box<dyn Output>;
     fn write(&mut self, data: &dyn std::any::Any, infos: &Infos) -> Result<(), Box<dyn std::error::Error>>;
     fn new(filename: &PathBuf) -> Self
     where
         Self: Sized;
 }
 
-pub trait Input{
+impl Clone for Box<dyn Output> {
+    fn clone(&self) -> Box<dyn Output> {
+        self.clone_box()
+    }
+}
+
+pub trait Input: Send + Sync {
+    fn clone_box(&self) -> Box<dyn Input>;
     fn parse(&mut self, stats: &mut Statistics) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>>;
     fn new(filename: &PathBuf) -> Self
     where
         Self: Sized;
 }
 
+impl Clone for Box<dyn Input> {
+    fn clone(&self) -> Box<dyn Input> {
+        self.clone_box()
+    }
+}

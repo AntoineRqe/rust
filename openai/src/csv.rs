@@ -13,6 +13,13 @@ pub struct MyCSVInput {
 
 impl Input for MyCSVInput {
 
+    fn clone_box(&self) -> Box<dyn Input> {
+        Box::new(Self {
+            filename: self.filename.clone(),
+            headers: self.headers.clone(),
+        })
+    }
+
     fn parse(&mut self, stats: &mut Statistics) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>> {
         let file: File = match File::open(&self.filename) {
             Err(e) => {
@@ -80,6 +87,13 @@ pub struct MyCSVOutput {
 }
 
 impl Output for MyCSVOutput {
+
+    fn clone_box(&self) -> Box<dyn Output> {
+        Box::new(Self {
+            filename: self.filename.clone(),
+            original_header: self.original_header.clone(),
+        })
+    }
 
     fn write(&mut self, data : &dyn std::any::Any, infos: &Infos) -> Result<(), Box<dyn std::error::Error>> {
         let mut wtr = csv::WriterBuilder::new()

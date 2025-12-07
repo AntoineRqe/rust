@@ -6,6 +6,7 @@ use crate::csv::{MyCSVInput, MyCSVOutput};
 use crate::html;
 use crate::my_traits;
 
+#[derive(Clone)]
 pub struct Ctx
 {   
     input_path: std::path::PathBuf,
@@ -44,7 +45,7 @@ impl Ctx
 
         if ctx.config.support_csv.output {
             println!("CSV output is enabled.");
-            let output = MyCSVOutput::new(&ctx.output_path.join(ctx.input_path.file_name().unwrap()).with_extension(format!("{}_{}.csv", ctx.config.model[0], "csv")));
+            let output = MyCSVOutput::new(&ctx.output_path.join(ctx.input_path.file_name().unwrap()).with_extension(format!("{}-chunk_{}-thinking_{}.{}", ctx.config.model[0], ctx.config.chunk_size, ctx.config.thinking_budget, "csv")));
             ctx.outputs.push(Box::new(output));
         }
         
@@ -54,7 +55,7 @@ impl Ctx
 
         if ctx.config.support_html.output {
             println!("HTML output is enabled.");
-            let output = html::HTMLGenerator::new(&ctx.output_path.join(ctx.input_path.file_name().unwrap()).with_extension(format!("{}_{}.html", ctx.config.model[0], "html")));
+            let output = html::HTMLGenerator::new(&ctx.output_path.join(ctx.input_path.file_name().unwrap()).with_extension(format!("{}-chunk_{}-thinking_{}.{}", ctx.config.model[0], ctx.config.chunk_size, ctx.config.thinking_budget, "html")));
             ctx.outputs.push(Box::new(output));
         }
 
@@ -62,9 +63,7 @@ impl Ctx
     }
 
     pub fn write(&mut self, data: &dyn std::any::Any) -> Result<(), Box<dyn std::error::Error>> {
-        let infos = my_traits::Infos::new(
-            
-            &self.output_path.join("my_reference_").join(self.config.model[0].as_str()).join(self.config.chunk_size.to_string()).with_extension("html"),
+        let infos = my_traits::Infos::new(            
             &(self.config.model[0].clone() + " LLM Classification Results for " + &self.input_path.to_string_lossy()),
             &self.stats.generate_output_summary(),
             &self.prompt,

@@ -11,6 +11,12 @@ pub struct HTMLGenerator{
 
 impl crate::my_traits::Output for HTMLGenerator {
 
+    fn clone_box(&self) -> Box<dyn crate::my_traits::Output> {
+        Box::new(Self {
+            filename: self.filename.clone(),
+        })
+    }
+
     fn write(&mut self, data: &dyn std::any::Any, infos: &Infos) -> Result<(), Box<dyn std::error::Error>> {
         let data = data.downcast_ref::<IndexMap<String, Vec<String>>>().ok_or("Failed to downcast data to IndexMap<String, Vec<String>>")?;
         generate_html_table(data, infos, &self.filename)?;

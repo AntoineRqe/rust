@@ -1,6 +1,21 @@
 use std::fmt::Display;
 
-#[derive(Debug)]
+fn seconds_to_pretty(total_seconds: u64) -> Option<String> {
+
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if days > 0 {
+        Some(format!("{days} days {:02}:{:02}:{:02}", hours, minutes, seconds))
+    } else {
+        Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds))
+    }
+}
+
+
+#[derive(Debug, Clone)]
 pub struct Statistics {
     domaine_count: usize,
     olfeo_match_count : usize,
@@ -8,6 +23,12 @@ pub struct Statistics {
     priorized_done_count : usize,
     prioritized_match_count : usize,
     prioritized_done_success: usize,
+    cost : f64,
+    retried : usize,
+    failed : usize,
+    chunk_size: usize,
+    thinking_budget: i64,
+    pub elapsed_time: std::time::Duration,
 }
 
 impl Statistics {
@@ -19,6 +40,12 @@ impl Statistics {
             priorized_done_count: 0,
             prioritized_match_count: 0,
             prioritized_done_success: 0,
+            cost: 0.0,
+            retried: 0,
+            failed: 0,
+            chunk_size: 0,
+            thinking_budget: 0,
+            elapsed_time: std::time::Duration::new(0, 0),
         }
     }
 
@@ -89,6 +116,14 @@ impl Statistics {
         }
     }
 
+    pub fn update_llm_statistics(&mut self, cost: f64, retried: usize, failed: usize, chunk_size: usize, thinking_budget: i64) {
+        self.cost += cost;
+        self.retried += retried;
+        self.failed += failed;
+        self.chunk_size = chunk_size;
+        self.thinking_budget = thinking_budget;
+    }
+
     pub fn generate_output_summary(&self) -> String {
         let mut summary = String::new();
         summary.push_str(&format!("Statistics with {} domains\n", self.domaine_count));
@@ -98,9 +133,30 @@ impl Statistics {
         }
         let total_percentage: usize = self.llm_level_match_count.iter().sum();
         summary.push_str(&format!("\t Total LLM match percentage: {:.2} %\n", (total_percentage as f64 / self.domaine_count as f64) * 100.0));
-        summary.push_str(&format!("\t Prioritized match percentage: {:.2} %\n", self.process_prioritized_matches_percentage()));
-        summary.push_str(&format!("\t Priorized done percentage: {:.2} %\n", self.process_priorized_done_percentage()));
-        summary.push_str(&format!("\t Prioritized done success percentage: {:.2} %\n", self.process_prioritized_done_success_percentage()));
+        summary.push_str(&format!("\t LLM cost: {:.6}\n", self.cost));
+        summary.push_str(&format!("\t LLM retried: {}\n", self.retried));
+        summary.push_str(&format!("\t LLM failed: {}\n", self.failed));
+        summary.push_str(&format!("\t LLM chunk size: {}\n", self.chunk_size));
+        summary.push_str(&format!("\t LLM thinking budget: {}\n", self.thinking_budget));
+        summary.push_str(&format!("\t Elapsed time : {}\n", seconds_to_pretty(self.elapsed_time.as_secs()).unwrap_or_else(|| format!("{:?}", self.elapsed_time))));
+        summary.push_str("\t Estimated cost for 4000000 domains: ");
+        let estimated_cost = if self.domaine_count > 0 {
+            (4000000.0 / self.domaine_count as f64) * self.cost
+        } else {
+            0.0
+        };
+        summary.push_str(&format!("{:.6}\n", estimated_cost));
+
+        summary.push_str("\t Estimated time for 4000000 domains: ");
+        let estimated_time = if self.domaine_count > 0 {
+            self.elapsed_time.mul_f64(4000000.0 / self.domaine_count as f64)
+        } else {
+            std::time::Duration::new(0, 0)
+        };
+        summary.push_str(&format!("{}\n", seconds_to_pretty(estimated_time.as_secs()).unwrap_or_else(|| format!("{:?}", estimated_time))));
+
+
+
         summary
     }
 }
@@ -118,6 +174,12 @@ impl Display for Statistics {
         write!(f, "\n\t Prioritized match percentage: {:.2} %", self.process_prioritized_matches_percentage())?;
         write!(f, "\n\t Priorized done percentage: {:.2} %", self.process_priorized_done_percentage())?;
         write!(f, "\n\t Prioritized done success percentage: {:.2} %", self.process_prioritized_done_success_percentage())?;
+        write!(f, "\n\t LLM cost: {:.2}", self.cost)?;
+        write!(f, "\n\t LLM retried: {}", self.retried)?;
+        write!(f, "\n\t LLM failed: {}", self.failed)?;
+        write!(f, "\n\t LLM chunk size: {}", self.chunk_size)?;
+        write!(f, "\n\t LLM thinking budget: {}", self.thinking_budget)?;
+        write!(f, "\n\t Elapsed time: {:?}", self.elapsed_time)?;
 
         Ok(())
 
@@ -181,8 +243,9 @@ mod tests {
         assert!(summary.contains("Level 1 match percentage: 100.00 %"));
         assert!(summary.contains("Level 2 match percentage: 0.00 %"));
         assert!(summary.contains("Total LLM match percentage: 100.00 %"));
-        assert!(summary.contains("Prioritized match percentage: 100.00 %"));
-        assert!(summary.contains("Priorized done percentage: 100.00 %"));
-        assert!(summary.contains("Prioritized done success percentage: 0.00 %"));
+        assert!(summary.contains("LLM cost: 0.000000"));
+        assert!(summary.contains("LLM retried: 0"));
+        assert!(summary.contains("LLM failed: 0"));
+        assert!(summary.contains("Elapsed time: 0s"));
     }
 }

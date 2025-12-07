@@ -1,5 +1,5 @@
 {
-    "support_multithread": false,
+    "max_threads": 1,
     "support_csv": {
         "input": true,
         "output": true
@@ -8,9 +8,14 @@
         "input": false,
         "output": true
     },
-    "max_concurrent_requests": 3,
+    "max_domain_propositions": 3,
     "chunk_size": 50,
+    "thinking_budget": 2048,
     "use_internal_replacement": true,
+    "use_gemini_caching": true,
+    "use_gemini_url_context": true,
+    "use_gemini_google_search": true,
+    "use_gemini_custom_cache_duration": "3600s",
     "model": [
         "Qwen2.5-Coder-32B-Instruct-AWQ",
         "Mistral-Small",

@@ -1,0 +1,1 @@
+error: could not find `Cargo.toml` in `/home/anr-cv/project/Perso/rust` or any parent directory

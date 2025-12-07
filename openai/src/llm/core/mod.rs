@@ -1,158 +1,217 @@
-use std::{collections::{HashMap}};
+use std::{collections::HashMap, sync::Arc};
 use std::error::Error;
 use tokio::runtime::Runtime;
 
-use crate::gemini::{GeminiResult, async_gemini_fetch_chat_completion};
-use crate::category::{CATEGORIES, SUB_CATEGORIES_JSON};
+use crate::category::CATEGORIES;
 use crate::ctx::Ctx;
+
+use crate::llm::providers::gemini::generating::{async_gemini_fetch_chat_completion, GeminiResult, async_gemini_handle_cached_content};
+
 
 enum LLMResult {
     Gemini(GeminiResult),
 }
 
-pub fn parse_llm_output(domains: &[String], content: &str, nb_propositions: usize) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
-    let content = content.trim().to_string();
+pub type DomainCategories = HashMap<String, Vec<String>>;
 
-    let mut llm_categories: HashMap<String, Vec<String>> = HashMap::new();
-    let mut consumed_domains = domains.len() as i32;
 
-    for (index, domain_line) in content.lines().enumerate() {
-        let mut parts = domain_line.split(';');
-        let domain = parts.next().unwrap_or("").trim().to_string();
+pub fn parse_llm_output(domains: &[String], content: &str) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+    let content = content.trim();
 
-        if !domains.contains(&domain) {
-            println!("Warning: domain mismatch. Expected: {}, Got: {}", domains[index], domain);
-            return Err("Domain mismatch in response".into());
-        }
+    let domain_categories: DomainCategories = serde_json::from_str(&content)?;
 
-        let mut tmp_propositions = Vec::new();
-
-        for _ in 0..nb_propositions {
-            if let Some(category) = parts.next() {
-                let cat_trimmed = category.trim().to_string();
-                tmp_propositions.push(cat_trimmed.clone());
-            } else {
-                tmp_propositions.push("".to_string());
-            }
-        }
-
-        llm_categories.insert(domain, tmp_propositions);
-
-        consumed_domains -= 1;
+    if domain_categories.len() != domains.len() {
+        println!("Warning: Expected {} domains, but got {} domains in response.", domains.len(), domain_categories.len());
+        return Err("Domain count mismatch in response".into());
     }
 
-    match consumed_domains {
-        0 => Ok(llm_categories),
-        _ => {
-            println!("Warning: Not all domains were processed. Remaining: {}", consumed_domains);
-            Err("Not all domains processed".into())
+    for category_list in domain_categories.values() {
+        if category_list.len() == 0 {
+            println!("Warning: One of the domains has no categories assigned in the LLM response.");
+            return Err("Empty category list in response".into());
         }
     }
+
+    for domain in domains {
+        if !domain_categories.contains_key(domain) {
+            println!("Warning: Domain '{}' not found in LLM response.", domain);
+            return Err(format!("Domain '{}' missing in response", domain).into());
+        }
+    }
+
+
+
+    Ok(domain_categories)
 }
 
-
-async fn async_llm_classify_domains(domains: &[String], ctx: &Ctx) -> Result<LLMResult, Box<dyn Error>> {
+async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_name: Arc<Option<String>>, id: usize) -> Result<LLMResult, Box<dyn Error + Send + Sync>> {
     let mut gemini_result = GeminiResult {
         failed: 0,
         retried: 0,
         cost: 0.0,
+        cache_saving: 0.0,
         categories: HashMap::new(),
     };
 
-    for domain_chunk in domains.chunks(ctx.config.chunk_size) {
-        let mut retries_chunk = 0;
-        loop {
-            if retries_chunk == 3 {
-                eprintln!("Failed to get LLM response after 3 attempts for chunk starting with domain: {}", domain_chunk[0]);
-                gemini_result.failed += 1;
-                break;
-            }
+    let mut retries_chunk = 0;
     
-            match async_gemini_fetch_chat_completion(domain_chunk, &ctx.config.model[0], ctx.config.max_domain_propositions, gemini_result.clone()).await {
-                Ok(result) => {
-                    gemini_result = result;
-                    break;
-                },
-                Err(e) => {
-                    eprintln!("Error during LLM request (attempt {}): {}", retries_chunk + 1, e);
-                    retries_chunk += 1;
-                }
-            };
+    loop {
+        if retries_chunk == 3 {
+            eprintln!("Thread {} Failed to get LLM response after 3 attempts for chunk starting with domain: {}", id, domains[0]);
+            gemini_result.failed += domains.len();
+            break;
         }
+
+        match async_gemini_fetch_chat_completion(domains, &ctx, (*cache_name).clone(), &mut gemini_result).await {
+            Ok(()) => {
+                println!("Thread {} Successfully processed chunk starting with domain: {}", id, domains[0]);
+                break;
+            },
+            Err(e) => {
+                eprintln!("Thread {} Error during LLM request (attempt {}): {}", id, retries_chunk + 1, e);
+                retries_chunk += 1;
+                gemini_result.retried += 1;
+            }
+        };
     }
 
-    println!("Final Gemini Result: {}", gemini_result);
+    println!("Thread {} Final Gemini Result: {}", id, gemini_result);
+
     Ok(LLMResult::Gemini(GeminiResult {
         retried: gemini_result.retried,
         failed: gemini_result.failed,
         cost: gemini_result.cost,
+        cache_saving: gemini_result.cache_saving,
         categories: gemini_result.categories,
     }))
 }
 
-async fn llm_runtime(domains: &[String], ctx: &Ctx) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>>{
-    let mut handles = vec![];
-    println!("Starting {} LLM runtime on {}...", if ctx.config.support_multithread { "with multithreading" } else { "without multithreading" }, ctx.config.model[0]);
+type DynError = Box<dyn std::error::Error + Send + Sync>;
 
-    match async_llm_classify_domains(domains, ctx).await {
-        Ok(LLMResult::Gemini(gemini_result)) => {
-            handles.push(tokio::spawn(async move {
-                gemini_result
-            }));
-        },
-        Err(e) => {
-            eprintln!("Error during LLM classification: {}", e);
+async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, DynError> {
+
+    let mut chunks = domains.chunks(ctx.config.chunk_size);
+    let mut end = false;
+    let mut processed_domains = 0;
+    let total_domains = domains.len();
+
+    // Aggregate results
+    let mut final_gemini_result = GeminiResult {
+        failed: 0,
+        retried: 0,
+        cost: 0.0,
+        cache_saving: 0.0,
+        categories: HashMap::new(),
+    };
+
+    while !end {
+        let mut handles = vec![];
+
+        let cache_contents = async_gemini_handle_cached_content(&ctx).await?;
+        let cache_name = Arc::new(cache_contents);
+
+        for id in 0..ctx.config.max_threads {
+            
+            if let Some(chunk) = chunks.next() {
+                let domains = chunk.to_vec();
+                let arc_ctx = ctx.clone();
+                let cache_name = cache_name.clone();
+
+                processed_domains += domains.len();
+            
+                println!("Starting {} LLM runtime on {} with chunk size [{}-{}]/{}",
+                    ctx.config.max_threads, ctx.config.model[0], processed_domains - domains.len(), processed_domains, total_domains
+                );
+
+                let handle = tokio::spawn(async move {
+                    async_llm_classify_domains(&domains, arc_ctx, cache_name, id).await
+                });
+        
+                handles.push(handle);
+            }
+            else {
+                end = true;
+                break;
+            }
         }
-    }
 
-    // Wait for all tasks to complete
-    let futures_results: Vec<_> = futures::future::join_all(handles)
-    .await
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()
-    .unwrap();
+        // Wait for all tasks to complete
+        let futures_results: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|res| res.expect("Task panicked"))
+        .collect::<Vec<_>>();
+
+
+        for result in futures_results {
+            match result {
+                Ok(LLMResult::Gemini(gemini_result)) => {
+                    final_gemini_result.failed += gemini_result.failed;
+                    final_gemini_result.retried += gemini_result.retried;
+                    final_gemini_result.cost += gemini_result.cost;
+                    final_gemini_result.cache_saving += gemini_result.cache_saving;
+                    final_gemini_result.categories.extend(gemini_result.categories);
+                },
+                Err(e) => {
+                    eprintln!("Error in LLM classification task: {}", e);
+                }
+            }
+        }
+
+    }
 
     println!("All tasks completed!");
 
-    Ok(futures_results.into_iter().fold(HashMap::new(), |mut acc, res| {
-        for (domain, categories) in res.categories {
-            acc.insert(domain, categories);
-        }
-        acc
-    }))
+    Ok(final_gemini_result)
+
 }
 
-pub fn sync_llm_runtime(domains: &[String], ctx: &Ctx) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+pub fn sync_llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, DynError> {
     // Create a new Tokio runtime
     let rt = Runtime::new().expect("Failed to create Tokio runtime");
+
+    let ctx = std::sync::Arc::new(ctx.clone());
+
 
     // Block on the async function
     rt.block_on(llm_runtime(domains, ctx))
 }
 
-pub fn generate_prompt(domains: &[String], nb_propositions: usize) -> String {
+pub fn generate_full_prompt(domains: &[String], nb_propositions: usize) -> String {
     let domains_str = domains.join("; ");
+    let prompt = format!("
+        Tu es un expert en catégorisation de sites web et domaines internet.
+Ta mission est d'analyser les domaines fournis et de les classer dans les catégories appropriées en suivant rigoureusement les règles ci-dessous.
 
-let prompt = format!(
-"Tu es un expert en catégorisation de sites web et domaines internet. Ta mission est d'analyser des domaines et de les classer dans les catégories appropriées en suivant strictement les règles ci-dessous.
+**CONTRAINTE MAJEURE :** Puisque l'accès direct aux URL n'est pas possible, tu dois **SIMULER cet accès en utilisant l'outil de recherche web** pour obtenir les informations sur le contenu réel. Si une information essentielle n'est pas trouvable via la recherche, indique clairement les informations exactes que tu aurais cherché.
 
 ## Méthodologie obligatoire
 
 Pour CHAQUE domaine :
 
-* Effectue une recherche web pour comprendre son contenu réel et son usage principal
-* Analyse le nom du domaine, le service principal, et le contexte d'utilisation
-* Applique les règles de catégorisation dans l'ordre de priorité
-* Attribue au maximum {nb_propositions} catégories distinctes, classé par ordre de pertinence décroissante.
-* Si une catégorie te semble très pertinente, ne cherche pas à en ajouter d'autres moins pertinentes.
+1.  **Génération des Requêtes :** Effectue impérativement les recherches web suivantes, sans aucune modification du nom de domaine fourni :
+    * **Requête Principale :** Utilise EXACTEMENT la requête \"Qu'est-ce que <domaine_entier>\" pour obtenir le contenu réel.
+    * **Requête Secondaire (si sous-domaine) :** Si le domaine contient un sous-domaine, exécute une seconde recherche avec \"Qu'est-ce que <domaine_principal_plus_tld>\".
+2.  **Source d'Analyse :** Base-toi EXCLUSIVEMENT sur le résultat des recherches web pour toute décision de catégorisation.
+3.  **Application des Règles :** Applique les règles de catégorisation dans l'ordre de priorité en fonction du contenu réel trouvé.
+4.  **Limitation de Catégories :** Attribue au maximum **{nb_propositions}** catégories distinctes, classées par ordre de pertinence décroissante.
+5.  **Pertinence :** Si une catégorie te semble très pertinente, ne cherche pas à en ajouter d'autres moins pertinentes.
 
-## Règles de Catégorisation par Catégorie
+## Règles de Catégorisation par Catégorie (Priorité et Descriptions)
+
+**Ordre de Priorité des Règles**
+
+* Flux financiers institutionnels → Banques
+* Spécialisation thématique > Généraliste (ex: blog auto → Voiture, pas Blog)
+* Produits d'une seule catégorie → Intérêts/Loisirs (sauf si catégorie dédiée existe)
+* Service principal > Infrastructure technique
+* Restaurants/Fast-food → TOUJOURS Voyage/Tourisme/Sortie
 
 ### Armes / Explosifs
 
 Sites de vente, information ou promotion d'armes à feu, munitions, explosifs
 Armureries en ligne ou physiques
-Clubs de tir avec vente d'équipement
+Clubs de tir, vente d'équipement
 Exemples : armurerie-lyon.fr, gunbroker.com, defense-shooting.com
 
 ### Banques / Services financiers / Investissement
@@ -170,7 +229,7 @@ EXCEPTION : Si le blog/forum est thématique spécialisé, privilégier la caté
 Forums de discussion généralistes
 Blogs personnels sans thématique dominante
 Plateformes communautaires multi-thèmes
-Exemples : reddit.com, jeuxvideo.com (partie forum), skyrock.com
+Exemples : reddit.com, skyrock.com
 
 ### Chat / Communication
 
@@ -199,7 +258,7 @@ Exemples : lacentrale-dubidou.com, vinatis.com, cigarworld.de, headshop.fr
 RÈGLE : Plateformes vendant des produits VARIÉS de différentes catégories
 Marketplaces généralistes
 Sites d'enchères multi-produits, site de commissaire priseurs
-ATTENTION : Si tous les produits sont dans UNE seule catégorie → \"Intérêts / Loisirs\"
+IMPORTANT : Si la majorité des produits sont dans UNE seule catégorie alors privilégie la catégorisation en te basant sur le type de produits vendus (exemple vêtements -> \"Intérêts / Loisirs\")
 Exemples : amazon.com, ebay.com, cdiscount.com, vinted.com
 
 ### Email
@@ -226,7 +285,7 @@ Exemples : coursera.org, openclassrooms.com, univ-paris.fr, skillshare.com
 ### Domaine technique
 
 RÈGLE : CDN, DNS, APIs, infrastructure GÉNÉRIQUE utilisable par tous
-EXCEPTION : Si le domaine technique sert UN SEUL service identifiable → catégorie du service
+IMPORTANT : Privilégie la catégorisation du domaine principal si ce dernier est identifiable plutôt que d'utiliser le sous-domaine technique
 Services cloud génériques, hébergement technique
 Exemples : cloudflare.com, akamai.net, amazonaws.com (si générique)
 Contre-exemples : tiktokcdn.com → Réseaux sociaux
@@ -268,6 +327,7 @@ Exemples : openai.com, midjourney.com, perplexity.ai, anthropic.com
 ### Intérêts / Loisirs
 
 RÈGLE MAJEURE : Sites spécialisés vendant des produits d'UNE SEULE catégorie thématique
+Préfère cette catégorie plutôt que E-Commerce / Enchères pour les sites de ventes ayant un accent thématique
 Sports, hobbies, collections, bricolage
 Blogs/médias spécialisés dans un loisir spécifique
 Météo, jardinage, photographie, musique (outils/équipement)
@@ -276,7 +336,7 @@ Exemples : decathlon.com, thomann.de, marcopolo-expert.fr, modelisme.com
 ### Jeux d'argent
 
 Paris sportifs, casinos en ligne, poker
-Loteries, jeux d'argent réglementés
+Loteries, jeux d'argent
 Exemples : betclic.fr, pokerstars.com, fdj.fr, unibet.fr
 
 ### Moteur de recherche
@@ -348,6 +408,7 @@ Exemples : anydesk.com, teamviewer.com, parsec.app
 
 Régies publicitaires
 Plateformes d'affichage de publicités
+Sondages rémunérés
 Exemples : doubleclick.net, taboola.com, adroll.com
 
 ### Religion
@@ -432,34 +493,24 @@ Exemples : booking.com, tripadvisor.com, mcdonalds.fr, parc-asterix.fr
 Uniquement si aucune catégorie ne correspond après analyse approfondie
 À utiliser en dernier recours
 
-Ordre de Priorité des Règles
-
-Recherche web obligatoire pour chaque domaine
-Flux financiers institutionnels → Banques
-Spécialisation thématique > Généraliste (ex: blog auto → Voiture, pas Blog)
-Produits d'une seule catégorie → Intérêts/Loisirs (sauf si catégorie dédiée existe)
-Sous-domaines techniques → Privilégier l'usage du service parent si identifiable
-Service principal > Infrastructure technique
-Restaurants/Fast-food → TOUJOURS Voyage/Tourisme/Sortie
+DOMAINES À CLASSER :
+{domains_str}
 
 CATÉGORIES DISPONIBLES :
 {CATEGORIES}
 
-Pour aider la classification, voici une liste des sous catégories pour déterminer la catégorie principale à choisir en format JSON :
-{SUB_CATEGORIES_JSON}
+## FORMAT DE RÉPONSE
 
-DOMAINES À CLASSER :
-{domains_str}
+Classifie chaque nom de domaine dans un unique dictionnaire JSON plat.
+La sortie doit être exactement un bloc délimité par \"```json\" et \"```\" et contenant uniquement ce dictionnaire : chaque domaine en clé, une seule catégorie en valeur.
+Aucune variante de catégories : uniquement les libellés prédéfinis.
+Aucun texte dans le bloc.
+Le dictionnaire doit contenir tous les domaines donnés dans le prompt d'entrée, vérifie bien ce point, N'OUBLIE PAS DE DOMAINES.
 
-Tu DOIS utiliser les outils suivants :
-
-url_context – permet de récupérer le contenu d’URLs
-google_search – permet d’effectuer une recherche pour identifier des catégories
-
-Seul résultat accepté :
-
-Une ligne CSV par domaine, sous la forme exacte
-domaine;cat1;cat2;cat3
+Exemple:
+```json
+{{\"www.renault.fr\": [\"Voitures / Mécaniques\"], \"twitter.com\": [\"Réseaux sociaux\"]}}
+```
 
 Interdictions absolues :
 
@@ -469,32 +520,63 @@ PAS de commentaires
 PAS de paragraphes supplémentaires
 PAS de citations ou mise en forme
 ");
+    prompt
+}
+
+pub fn generate_prompt_with_cached_content(domains: &[String]) -> String {
+    let domains_str = domains.join("; ");
+
+let prompt = format!(
+
+"
+N'utilise aucune réponse que tu as donnée auparavant.
+Utilise seulement les instructions contenues dans cached_content.
+
+Voici les domaines à classer :
+{domains_str}
+
+");
 
     prompt
 }
 
-pub fn _generate_cached_prompt(nb_propositions: usize) -> String {
+pub fn generate_cached_prompt(nb_propositions: usize) -> String {
 
 let prompt = format!(
-"Tu es un expert en catégorisation de sites web et domaines internet. Ta mission est d'analyser des domaines et de les classer dans les catégories appropriées en suivant strictement les règles ci-dessous.
+
+"
+Tu es un expert en catégorisation de sites web et domaines internet.
+Ta mission est d'analyser les domaines fournis et de les classer dans les catégories appropriées en suivant rigoureusement les règles ci-dessous.
+
+Tu as accès au contenu réel des sites web via un outil de recherche web GoogleSearch. Utilise cet outil pour obtenir les informations nécessaires à la catégorisation.
 
 ## Méthodologie obligatoire
 
 Pour CHAQUE domaine :
 
-* Effectue une recherche web pour comprendre son contenu réel et son usage principal
-* Analyse le nom du domaine, le service principal, et le contexte d'utilisation
-* Applique les règles de catégorisation dans l'ordre de priorité
-* Attribue au maximum {nb_propositions} catégories distinctes, classé par ordre de pertinence décroissante.
-* Si une catégorie te semble très pertinente, ne cherche pas à en ajouter d'autres moins pertinentes.
+1.  **Génération des Requêtes :** Effectue impérativement les recherches web suivantes, sans aucune modification du nom de domaine fourni :
+    * **Requête Principale :** Utilise EXACTEMENT la requête \"Qu'est-ce que <domaine_entier>\" pour obtenir le contenu réel.
+    * **Requête Secondaire (si sous-domaine) :** Si le domaine contient un sous-domaine, exécute une seconde recherche avec \"Qu'est-ce que <domaine_principal_plus_tld>\".
+2.  **Source d'Analyse :** Base-toi EXCLUSIVEMENT sur le résultat des recherches web pour toute décision de catégorisation.
+3.  **Application des Règles :** Applique les règles de catégorisation dans l'ordre de priorité en fonction du contenu réel trouvé.
+4.  **Limitation de Catégories :** Attribue au maximum **{nb_propositions}** catégories distinctes, classées par ordre de pertinence décroissante.
+5.  **Pertinence :** Si une catégorie te semble très pertinente, ne cherche pas à en ajouter d'autres moins pertinentes.
 
-## Règles de Catégorisation par Catégorie
+## Règles de Catégorisation par Catégorie (Priorité et Descriptions)
+
+**Ordre de Priorité des Règles**
+
+* Flux financiers institutionnels → Banques
+* Spécialisation thématique > Généraliste (ex: blog auto → Voiture, pas Blog)
+* Produits d'une seule catégorie → Intérêts/Loisirs (sauf si catégorie dédiée existe)
+* Service principal > Infrastructure technique
+* Restaurants/Fast-food → TOUJOURS Voyage/Tourisme/Sortie
 
 ### Armes / Explosifs
 
 Sites de vente, information ou promotion d'armes à feu, munitions, explosifs
 Armureries en ligne ou physiques
-Clubs de tir avec vente d'équipement
+Clubs de tir, vente d'équipement
 Exemples : armurerie-lyon.fr, gunbroker.com, defense-shooting.com
 
 ### Banques / Services financiers / Investissement
@@ -512,7 +594,7 @@ EXCEPTION : Si le blog/forum est thématique spécialisé, privilégier la caté
 Forums de discussion généralistes
 Blogs personnels sans thématique dominante
 Plateformes communautaires multi-thèmes
-Exemples : reddit.com, jeuxvideo.com (partie forum), skyrock.com
+Exemples : reddit.com, skyrock.com
 
 ### Chat / Communication
 
@@ -541,7 +623,7 @@ Exemples : lacentrale-dubidou.com, vinatis.com, cigarworld.de, headshop.fr
 RÈGLE : Plateformes vendant des produits VARIÉS de différentes catégories
 Marketplaces généralistes
 Sites d'enchères multi-produits, site de commissaire priseurs
-ATTENTION : Si tous les produits sont dans UNE seule catégorie → \"Intérêts / Loisirs\"
+IMPORTANT : Si la majorité des produits sont dans UNE seule catégorie alors privilégie la catégorisation en te basant sur le type de produits vendus (exemple vêtements -> \"Intérêts / Loisirs\")
 Exemples : amazon.com, ebay.com, cdiscount.com, vinted.com
 
 ### Email
@@ -568,7 +650,7 @@ Exemples : coursera.org, openclassrooms.com, univ-paris.fr, skillshare.com
 ### Domaine technique
 
 RÈGLE : CDN, DNS, APIs, infrastructure GÉNÉRIQUE utilisable par tous
-EXCEPTION : Si le domaine technique sert UN SEUL service identifiable → catégorie du service
+IMPORTANT : Privilégie la catégorisation du domaine principal si ce dernier est identifiable plutôt que d'utiliser le sous-domaine technique
 Services cloud génériques, hébergement technique
 Exemples : cloudflare.com, akamai.net, amazonaws.com (si générique)
 Contre-exemples : tiktokcdn.com → Réseaux sociaux
@@ -610,6 +692,7 @@ Exemples : openai.com, midjourney.com, perplexity.ai, anthropic.com
 ### Intérêts / Loisirs
 
 RÈGLE MAJEURE : Sites spécialisés vendant des produits d'UNE SEULE catégorie thématique
+Préfère cette catégorie plutôt que E-Commerce / Enchères pour les sites de ventes ayant un accent thématique
 Sports, hobbies, collections, bricolage
 Blogs/médias spécialisés dans un loisir spécifique
 Météo, jardinage, photographie, musique (outils/équipement)
@@ -618,7 +701,7 @@ Exemples : decathlon.com, thomann.de, marcopolo-expert.fr, modelisme.com
 ### Jeux d'argent
 
 Paris sportifs, casinos en ligne, poker
-Loteries, jeux d'argent réglementés
+Loteries, jeux d'argent
 Exemples : betclic.fr, pokerstars.com, fdj.fr, unibet.fr
 
 ### Moteur de recherche
@@ -690,6 +773,7 @@ Exemples : anydesk.com, teamviewer.com, parsec.app
 
 Régies publicitaires
 Plateformes d'affichage de publicités
+Sondages rémunérés
 Exemples : doubleclick.net, taboola.com, adroll.com
 
 ### Religion
@@ -774,31 +858,21 @@ Exemples : booking.com, tripadvisor.com, mcdonalds.fr, parc-asterix.fr
 Uniquement si aucune catégorie ne correspond après analyse approfondie
 À utiliser en dernier recours
 
-Ordre de Priorité des Règles
-
-Recherche web obligatoire pour chaque domaine
-Flux financiers institutionnels → Banques
-Spécialisation thématique > Généraliste (ex: blog auto → Voiture, pas Blog)
-Produits d'une seule catégorie → Intérêts/Loisirs (sauf si catégorie dédiée existe)
-Sous-domaines techniques → Privilégier l'usage du service parent si identifiable
-Service principal > Infrastructure technique
-Restaurants/Fast-food → TOUJOURS Voyage/Tourisme/Sortie
-
 CATÉGORIES DISPONIBLES :
 {CATEGORIES}
 
-Pour aider la classification, voici une liste des sous catégories pour déterminer la catégorie principale à choisir en format JSON :
-{SUB_CATEGORIES_JSON}
+## FORMAT DE RÉPONSE
 
-Tu DOIS utiliser les outils suivants :
+Classifie chaque nom de domaine dans un unique dictionnaire JSON plat.
+La sortie doit être exactement un bloc délimité par \"```json\" et \"```\" et contenant uniquement ce dictionnaire : chaque domaine en clé, une seule catégorie en valeur.
+Aucune variante de catégories : uniquement les libellés prédéfinis.
+Aucun texte dans le bloc.
+Le dictionnaire doit contenir tous les domaines donnés dans le prompt d'entrée, vérifie bien ce point, N'OUBLIE PAS DE DOMAINES.
 
-url_context – permet de récupérer le contenu d’URLs
-google_search – permet d’effectuer une recherche pour identifier des catégories
-
-Seul résultat accepté :
-
-Une ligne CSV par domaine, sous la forme exacte
-domaine;cat1;cat2;cat3
+Exemple:
+```json
+{{\"www.renault.fr\": [\"Voitures / Mécaniques\"], \"twitter.com\": [\"Réseaux sociaux\"]}}
+```
 
 Interdictions absolues :
 

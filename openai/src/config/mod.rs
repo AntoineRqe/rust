@@ -8,25 +8,35 @@ pub struct SupportedFormat {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
-    pub support_multithread: bool,
+    pub max_threads: usize,
     pub support_csv: SupportedFormat,
     pub support_html: SupportedFormat,
     pub max_domain_propositions: usize,
     pub model: Vec<String>,
     pub chunk_size: usize,
+    pub thinking_budget: i64,
     pub use_internal_replacement: bool,
+    pub use_gemini_caching: bool,
+    pub use_gemini_url_context: bool,
+    pub use_gemini_google_search: bool,
+    pub use_gemini_custom_cache_duration: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            support_multithread: false,
+            max_threads: 1,
             support_csv: SupportedFormat { input: true, output: true },
             support_html: SupportedFormat { input: false, output: true },
             max_domain_propositions: 3,
             model: vec!["Qwen2.5-Coder-32B-Instruct-AWQ".to_string()],
             chunk_size: 100,
+            thinking_budget: 1024,
             use_internal_replacement: false,
+            use_gemini_caching: false,
+            use_gemini_url_context: false,
+            use_gemini_google_search: false,
+            use_gemini_custom_cache_duration: None,
         }
     }
 }
@@ -54,7 +64,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert!(!config.support_multithread);
+        assert_eq!(config.max_threads, 1);
         assert!(config.support_csv.input);
         assert!(config.support_csv.output);
         assert!(!config.support_html.input);
@@ -63,13 +73,18 @@ mod tests {
         assert_eq!(config.model, vec!["Qwen2.5-Coder-32B-Instruct-AWQ".to_string()]);
         assert_eq!(config.chunk_size, 100);
         assert!(!config.use_internal_replacement);
+        assert_eq!(config.thinking_budget, 1024);
+        assert!(!config.use_gemini_caching);
+        assert!(!config.use_gemini_url_context);
+        assert!(!config.use_gemini_google_search);
+        assert!(config.use_gemini_custom_cache_duration.is_none());
     }
 
     #[test]
     fn test_load_config_from_file() {
         let test_config_path = PathBuf::from("src/config/test/config.json");
         let config = Config::load_from_file(test_config_path);
-        assert!(!config.support_multithread);
+        assert_eq!(config.max_threads, 1);
         assert!(config.support_csv.input);
         assert!(config.support_csv.output);
         assert!(!config.support_html.input);
@@ -81,5 +96,10 @@ mod tests {
         assert_eq!(config.model[3], "gemini-2.5-flash".to_string());
         assert_eq!(config.chunk_size, 50);
         assert!(config.use_internal_replacement);
+        assert_eq!(config.thinking_budget, 2048);
+        assert!(config.use_gemini_caching);
+        assert!(config.use_gemini_url_context);
+        assert!(config.use_gemini_google_search);
+        assert_eq!(config.use_gemini_custom_cache_duration.unwrap(), "30s".to_string());
     }
 }

@@ -89,7 +89,7 @@ pub const CATEGORIES: &str = r#"
 "#;
 
 
-pub const SUB_CATEGORIES_JSON : &str = r#"
+pub const _SUB_CATEGORIES_JSON : &str = r#"
 {
   "Armes / Explosifs": [
     "Armes, Chasse, Equipement de Sécurité",
