@@ -60,13 +60,12 @@ use chrono::{DateTime, Utc, Duration};
 fn is_expired_within_threshold(expire_time_str: &str, minutes: i64) -> Result<bool, chrono::ParseError> {
     let current_time: DateTime<Utc> = Utc::now();
     let expire_time: DateTime<Utc> = DateTime::parse_from_rfc3339(expire_time_str)?.with_timezone(&Utc);
-    let zero_duration: Duration = Duration::zero();
 
     let threshold: Duration = Duration::minutes(minutes);
 
-    let time_difference: Duration = current_time.signed_duration_since(expire_time);
+    let time_difference: Duration = expire_time.signed_duration_since(current_time);
 
-    let need_refresh = time_difference < zero_duration || time_difference < threshold;
+    let need_refresh = time_difference < threshold;
     println!("Current time: {}", current_time);
     println!("Expire time: {}", expire_time);
     println!("Time difference (in minutes): {}", time_difference.num_minutes());
@@ -74,20 +73,21 @@ fn is_expired_within_threshold(expire_time_str: &str, minutes: i64) -> Result<bo
     Ok(need_refresh)
 }
 
-pub async fn async_gemini_handle_cached_content(ctx: &Ctx) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
-    if ctx.config.use_gemini_caching {
+pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut f64) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    if ctx.config.use_gemini_explicit_caching {
         let cache_contents = caching::list_cached_contents().await?;
         let cache_content_name = match cache_contents.cached_contents {
             Some(cached_list) => {
                 let cache = cached_list.first().unwrap();
                 println!("Retrieved cached contents with name : {}.", cache.name);
                 if let Some(expire_time) = &cache.expire_time {
-                    if is_expired_within_threshold(expire_time, 5)? {
-                        println!("Cached content {} expired within threshold. Creating new cached content.", cache.name);
+                    if is_expired_within_threshold(expire_time, 1)? {
+                        println!("Cached content {} expired within threshold. Updating cached content.", cache.name);
                         let cache_content = caching::async_gemini_update_cached_content_ttl(&cache.name, ctx.config.use_gemini_custom_cache_duration.as_ref().unwrap().clone()).await?;
                         let cache_cost = billing::CacheCostResult::new(cache_content.usage.unwrap()).compute_cost();
+                        *cost += cache_cost.eur;
                         println!("{}", cache_cost);
-                        println!("Created cached contents with name : {}.", cache_content.name);
+                        println!("Updated cached contents with name : {}.", cache_content.name);
                         return Ok(Some(cache_content.name));
                     } else {
                         println!("Cached content {} is still valid (expires at {}).", cache.name, expire_time);
@@ -98,6 +98,7 @@ pub async fn async_gemini_handle_cached_content(ctx: &Ctx) -> Result<Option<Stri
             None => {
                 let cache_content = caching::async_gemini_create_cached_content(&ctx.config.model[0], ctx.config.max_domain_propositions, ctx.config.use_gemini_custom_cache_duration.clone()).await?;
                 let cache_cost = billing::CacheCostResult::new(cache_content.usage.unwrap()).compute_cost();
+                *cost += cache_cost.eur;
                 println!("{}", cache_cost);
                 println!("Created cached contents with name : {}.", cache_content.name);
                 cache_content.name.clone()

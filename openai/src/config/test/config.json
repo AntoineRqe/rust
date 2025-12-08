@@ -12,7 +12,7 @@
     "chunk_size": 50,
     "thinking_budget": 2048,
     "use_internal_replacement": true,
-    "use_gemini_caching": true,
+    "use_gemini_explicit_caching": true,
     "use_gemini_url_context": true,
     "use_gemini_google_search": true,
     "use_gemini_custom_cache_duration": "3600s",

@@ -16,24 +16,57 @@ mod llm;
 
 use llm::core::{generate_full_prompt, generate_prompt_with_cached_content, sync_llm_runtime};
 
+#[derive(Debug, Clone)]
+pub struct CatVisionData {
+    pub category_olfeo: Option<String>,
+    pub categories_manual: Option<String>,
+    pub categories_llm: Option<Vec<String>>,
+    pub prioritized_category: Option<String>,
+    pub appsite_name: Option<String>,
+}
+
+impl CatVisionData {
+    pub fn new(category_olfeo: Option<String>, categories_manual: Option<String>, categories_llm: Option<Vec<String>>, prioritized_category: Option<String>, appsite_name: Option<String>) -> Self {
+        CatVisionData {
+            category_olfeo,
+            categories_manual,
+            categories_llm,
+            prioritized_category,
+            appsite_name,
+        }
+    }
+}
+
 fn aggregate_data(
-    original_data: &indexmap::IndexMap<String, Vec<String>>,
+    original_data: &indexmap::IndexMap<String, CatVisionData>,
     llm_data: &std::collections::HashMap<String, Vec<String>>,
     stats: &mut Statistics,
     use_internal_replacement: bool,
     nb_propositions: usize,
-) -> indexmap::IndexMap<String, Vec<String>> {
+) -> indexmap::IndexMap<String, CatVisionData> {
     let mut aggregated = indexmap::IndexMap::new();
 
     for (domain, original_categories) in original_data {
         stats.increment_domain_count();
-        let expected_category = &original_categories[0];
 
         // Start with original categories
-        let mut tmp_categories = original_categories.clone();
+        let mut tmp_categories: CatVisionData = CatVisionData::new(
+            original_categories.category_olfeo.clone(),
+            original_categories.categories_manual.clone(),
+            None,
+            None,
+            original_categories.appsite_name.clone(),
+        );
 
         if let Some(categories) = llm_data.get(domain) {
             // Process LLM categories
+            let mut llm_categories = vec![];
+
+            let expected_category = match &original_categories.categories_manual {
+                Some(cat) => cat,
+                None => "",
+            };
+        
             for level in 0..nb_propositions {
                 let cat_to_push = match categories.get(level) {
                     Some(cat) => {
@@ -45,8 +78,10 @@ fn aggregate_data(
                     None => "".to_string(),
                 };
 
-                tmp_categories.push(cat_to_push);
+                llm_categories.push(cat_to_push);
             }
+
+            tmp_categories.categories_llm = if llm_categories.is_empty() { None } else { Some(llm_categories) };
 
             // Determine prioritized category
             let mut prioritized_cat = if use_internal_replacement {
@@ -75,7 +110,7 @@ fn aggregate_data(
                 stats.increment_prioritized_match_count();
             }
 
-            tmp_categories.push(prioritized_cat);
+            tmp_categories.prioritized_category = Some(prioritized_cat);
         }
 
         aggregated.insert(domain.clone(), tmp_categories);
@@ -105,11 +140,12 @@ fn main() -> io::Result<()> {
     let start_time = std::time::Instant::now();
 
     let domains = ctx.parse().expect("Failed to parse input CSV");
-    let domains = domains.downcast_ref::<IndexMap<String, Vec<String>>>().expect("Failed to downcast parsed data to IndexMap<String, Vec<String>>");
+
+    let domains = domains.downcast_ref::<IndexMap<String, CatVisionData>>().expect("Failed to downcast parsed data to IndexMap<String, Vec<CatVisionData>>");
     
     let domains_name = domains.keys().cloned().collect::<Vec<String>>();
     
-    ctx.prompt = if ctx.config.use_gemini_caching {
+    ctx.prompt = if ctx.config.use_gemini_explicit_caching {
         generate_prompt_with_cached_content(&domains_name)
     } else {
         generate_full_prompt(&domains_name, ctx.config.max_domain_propositions)

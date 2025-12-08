@@ -107,7 +107,7 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
     while !end {
         let mut handles = vec![];
 
-        let cache_contents = async_gemini_handle_cached_content(&ctx).await?;
+        let cache_contents = async_gemini_handle_cached_content(&ctx, &mut final_gemini_result.cost).await?;
         let cache_name = Arc::new(cache_contents);
 
         for id in 0..ctx.config.max_threads {

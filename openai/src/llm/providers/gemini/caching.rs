@@ -191,7 +191,7 @@ pub async fn async_gemini_create_cached_content(model_id: &String, nb_propositio
         .await?;
 
     let body = resp.text().await?;
-    println!("Cache creation response body: {}", body);
+    //println!("Cache creation response body: {}", body);
     let resp: CacheResponse = serde_json::from_str(&body)?;
 
     Ok(resp)
@@ -264,7 +264,7 @@ pub async fn async_gemini_update_cached_content_ttl(cache_name: &String, ttl: St
         .await?;
 
     let body = resp.text().await?;
-    println!("Cache update response body: {}", body);
+    //println!("Cache update response body: {}", body);
     let resp: CacheResponse = serde_json::from_str(&body)?;
 
     Ok(resp)

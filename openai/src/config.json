@@ -2,7 +2,7 @@
     "max_threads": 3,
     "support_csv": {
         "input": true,
-        "output": false
+        "output": true
     },
     "support_html": {
         "input": false,
@@ -12,10 +12,10 @@
     "chunk_size": 100,
     "thinking_budget": 0,
     "use_internal_replacement": false,
-    "use_gemini_caching": true,
+    "use_gemini_explicit_caching": true,
     "use_gemini_url_context": false,
     "use_gemini_google_search": false,
-    "use_gemini_custom_cache_duration": "120s",
+    "use_gemini_custom_cache_duration": "3600s",
     "model": [
         "gemini-2.5-flash",
         "Qwen2.5-Coder-32B-Instruct-AWQ",

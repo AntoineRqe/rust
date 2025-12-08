@@ -16,7 +16,7 @@ pub struct Config {
     pub chunk_size: usize,
     pub thinking_budget: i64,
     pub use_internal_replacement: bool,
-    pub use_gemini_caching: bool,
+    pub use_gemini_explicit_caching: bool,
     pub use_gemini_url_context: bool,
     pub use_gemini_google_search: bool,
     pub use_gemini_custom_cache_duration: Option<String>,
@@ -33,7 +33,7 @@ impl Default for Config {
             chunk_size: 100,
             thinking_budget: 1024,
             use_internal_replacement: false,
-            use_gemini_caching: false,
+            use_gemini_explicit_caching: false,
             use_gemini_url_context: false,
             use_gemini_google_search: false,
             use_gemini_custom_cache_duration: None,
@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(config.chunk_size, 100);
         assert!(!config.use_internal_replacement);
         assert_eq!(config.thinking_budget, 1024);
-        assert!(!config.use_gemini_caching);
+        assert!(!config.use_gemini_explicit_caching);
         assert!(!config.use_gemini_url_context);
         assert!(!config.use_gemini_google_search);
         assert!(config.use_gemini_custom_cache_duration.is_none());
@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(config.chunk_size, 50);
         assert!(config.use_internal_replacement);
         assert_eq!(config.thinking_budget, 2048);
-        assert!(config.use_gemini_caching);
+        assert!(config.use_gemini_explicit_caching);
         assert!(config.use_gemini_url_context);
         assert!(config.use_gemini_google_search);
         assert_eq!(config.use_gemini_custom_cache_duration.unwrap(), "30s".to_string());

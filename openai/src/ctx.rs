@@ -46,7 +46,7 @@ impl Ctx
         if ctx.config.support_csv.output {
             println!("CSV output is enabled.");
             let output = MyCSVOutput::new(&ctx.output_path.join(ctx.input_path.file_name().unwrap()).with_extension(format!("{}-chunk_{}-thinking_{}.{}", ctx.config.model[0], ctx.config.chunk_size, ctx.config.thinking_budget, "csv")));
-            ctx.outputs.push(Box::new(output));
+            ctx.outputs.push(Box::new(output.unwrap()));
         }
         
         if ctx.config.support_html.input {
@@ -56,7 +56,7 @@ impl Ctx
         if ctx.config.support_html.output {
             println!("HTML output is enabled.");
             let output = html::HTMLGenerator::new(&ctx.output_path.join(ctx.input_path.file_name().unwrap()).with_extension(format!("{}-chunk_{}-thinking_{}.{}", ctx.config.model[0], ctx.config.chunk_size, ctx.config.thinking_budget, "html")));
-            ctx.outputs.push(Box::new(output));
+            ctx.outputs.push(Box::new(output.unwrap()));
         }
 
         return ctx;
@@ -79,9 +79,18 @@ impl Ctx
     }
 
     pub fn parse(&mut self) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>> {
-        for input in &mut self.inputs {
-            return input.parse(&mut self.stats);
+        let input = self.inputs.first_mut().ok_or("No input defined")?;
+        let res = input.parse(&mut self.stats);
+
+        let csv_input = input
+            .as_any()
+            .downcast_ref::<MyCSVInput>()
+            .ok_or("Input is not a MyCSVInput")?;
+
+        for output in &mut self.outputs {
+            output.create_output_header(&csv_input.headers, self.config.max_domain_propositions);
         }
-        Err("No input available".into())
+
+        res
     }
 }

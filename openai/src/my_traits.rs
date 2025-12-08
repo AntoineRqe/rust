@@ -1,5 +1,6 @@
 use crate::statistics::Statistics;
 use std::path::PathBuf;
+use std::any::Any;
 
 pub struct Infos {
     pub title: String,
@@ -22,7 +23,8 @@ impl Infos {
 pub trait Output: Send + Sync {
     fn clone_box(&self) -> Box<dyn Output>;
     fn write(&mut self, data: &dyn std::any::Any, infos: &Infos) -> Result<(), Box<dyn std::error::Error>>;
-    fn new(filename: &PathBuf) -> Self
+    fn create_output_header(&mut self, input_headers: &std::collections::HashMap<String, usize>, levels_count: usize);
+    fn new(filename: &PathBuf) -> Result<Self, Box<dyn std::error::Error>>
     where
         Self: Sized;
 }
@@ -39,6 +41,9 @@ pub trait Input: Send + Sync {
     fn new(filename: &PathBuf) -> Self
     where
         Self: Sized;
+    
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 impl Clone for Box<dyn Input> {
