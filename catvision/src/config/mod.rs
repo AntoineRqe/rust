@@ -96,6 +96,6 @@ mod tests {
         assert!(config.use_gemini_explicit_caching);
         assert!(config.use_gemini_url_context);
         assert!(config.use_gemini_google_search);
-        assert_eq!(config.use_gemini_custom_cache_duration.unwrap(), "30s".to_string());
+        assert_eq!(config.use_gemini_custom_cache_duration.unwrap(), "3600s".to_string());
     }
 }

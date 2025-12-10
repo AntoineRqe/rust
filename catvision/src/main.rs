@@ -144,14 +144,11 @@ fn main() -> io::Result<()> {
 
     let aggregated = aggregate_data(&domains, &llm_results.categories, &mut ctx.stats, ctx.config.max_domain_propositions);
 
-    let duration = start_time.elapsed();
-    ctx.stats.elapsed_time = duration;
+    ctx.stats.elapsed_time = start_time.elapsed();
 
-    println!("Classification of {} domains finished in {:?} for {}€", domains.len(), duration, llm_results.cost);
+    println!("Classification of {} domains finished in {:?} for {}€", domains.len(), ctx.stats.elapsed_time, llm_results.cost);
 
     ctx.write(&aggregated).expect("Failed to write output data");
-
-
 
     Ok(())
 }

@@ -85,30 +85,6 @@ pub struct CacheResponse {
     pub usage: Option<CachedUsageMetadata>,
 }
 
-fn get_gcloud_access_token() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let output = Command::new("gcloud")
-        .args(["auth", "print-access-token"])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // You can match network-related messages here
-        if stderr.contains("Unable to reach the server")
-            || stderr.contains("Network error")
-            || stderr.contains("connection")
-            || stderr.contains("timed out")
-        {
-            return Err(format!("Network error from gcloud: {}", stderr).into());
-        }
-
-        return Err(format!("gcloud failed: {}", stderr).into());
-    }
-
-    let token = String::from_utf8(output.stdout)?.trim().to_string();
-    Ok(token)
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 #[warn(dead_code)]
 pub struct CachedContentList {
@@ -180,8 +156,33 @@ impl CachingRequest {
     }
 }
 
+const MODEL_ID: &str = "gemini-2.5-flash";
 const REGION: &str = "us-central1";
 const PROJECT_ID: &str = "ultra-evening-480109-i2";
+
+fn get_gcloud_access_token() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let output = Command::new("gcloud")
+        .args(["auth", "print-access-token"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // You can match network-related messages here
+        if stderr.contains("Unable to reach the server")
+            || stderr.contains("Network error")
+            || stderr.contains("connection")
+            || stderr.contains("timed out")
+        {
+            return Err(format!("Network error from gcloud: {}", stderr).into());
+        }
+
+        return Err(format!("gcloud failed: {}", stderr).into());
+    }
+
+    let token = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(token)
+}
 
  pub async fn list_cached_contents() -> 
  Result<CachedContentList, Box<dyn std::error::Error + Send + Sync>> {
@@ -347,15 +348,15 @@ pub async fn async_gemini_update_cached_content_ttl(cache_name: &String, ttl: St
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn test_async_gemini_create_cached_content() {
-        let model_id = "gemini-2.5-flash".to_string();
         let nb_propositions = 3;
-        let response = async_gemini_create_cached_content(&model_id, nb_propositions, Some("120s".into())).await;
+        let response = async_gemini_create_cached_content(&MODEL_ID.to_string(), nb_propositions, Some("120s".into())).await;
         match response {
             Ok(resp) => {
                 println!("Cache created successfully: {:?}", resp);
-                assert_eq!(resp.model, format!("projects/ultra-evening-480109-i2/locations/us-central1/publishers/google/models/{}", model_id));
+                assert_eq!(resp.model, format!("projects/ultra-evening-480109-i2/locations/us-central1/publishers/google/models/{}", MODEL_ID));
             },
             Err(e) => {
                 eprintln!("Error creating cache: {}", e);
@@ -366,6 +367,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_cached_contents() {
+        let nb_propositions = 3;
+        let _ = async_gemini_create_cached_content(&MODEL_ID.to_string(), nb_propositions, Some("120s".into())).await;
         let response = list_cached_contents().await;
         match response {
             Ok(info) => {
@@ -381,6 +384,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_async_gemini_delete_all_cached_contents() {
+        let nb_propositions = 3;
+        let _ = async_gemini_create_cached_content(&MODEL_ID.to_string(), nb_propositions, Some("120s".into())).await;
         let response = async_gemini_delete_all_cached_contents().await;
         match response {
             Ok(_) => {
@@ -408,9 +413,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_async_gemini_update_cached_content_ttl() {
-        let model_id = "gemini-2.5-flash".to_string();
         let nb_propositions = 3;
-        let create_response = async_gemini_create_cached_content(&model_id, nb_propositions, Some("60s".into())).await;
+        let create_response = async_gemini_create_cached_content(&MODEL_ID.to_string(), nb_propositions, Some("60s".into())).await;
         match create_response {
             Ok(resp) => {
                 println!("Cache created successfully for TTL update test: {:?}", resp);

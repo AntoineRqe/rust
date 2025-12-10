@@ -238,6 +238,7 @@ mod tests {
         stats.increment_priorized_done_count();
         stats.increment_prioritized_match_count();
         let summary = stats.generate_output_summary();
+        println!("{}", summary);
         assert!(summary.contains("Statistics with 1 domains"));
         assert!(summary.contains("Olfeo match percentage: 100.00 %"));
         assert!(summary.contains("Level 1 match percentage: 100.00 %"));
@@ -246,6 +247,8 @@ mod tests {
         assert!(summary.contains("LLM cost: 0.000000"));
         assert!(summary.contains("LLM retried: 0"));
         assert!(summary.contains("LLM failed: 0"));
-        assert!(summary.contains("Elapsed time: 0s"));
+        assert!(summary.contains("Elapsed time : 00:00:00"));
+        assert!(summary.contains("Estimated cost for 4000000 domains: 0.000000"));
+        assert!(summary.contains("Estimated time for 4000000 domains: 00:00:00"));
     }
 }
