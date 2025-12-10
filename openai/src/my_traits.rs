@@ -37,7 +37,7 @@ impl Clone for Box<dyn Output> {
 
 pub trait Input: Send + Sync {
     fn clone_box(&self) -> Box<dyn Input>;
-    fn parse(&mut self, stats: &mut Statistics) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>>;
+    fn parse(&mut self, stats: &mut Statistics, dict: Option<&std::collections::HashMap<String, String>>) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>>;
     fn new(filename: &PathBuf) -> Self
     where
         Self: Sized;

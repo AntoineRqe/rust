@@ -21,20 +21,20 @@ pub fn parse_llm_output(domains: &[String], content: &str) -> Result<HashMap<Str
     let domain_categories: DomainCategories = serde_json::from_str(&content)?;
 
     if domain_categories.len() != domains.len() {
-        println!("Warning: Expected {} domains, but got {} domains in response.", domains.len(), domain_categories.len());
+        eprintln!("Warning: Expected {} domains, but got {} domains in response.", domains.len(), domain_categories.len());
         return Err("Domain count mismatch in response".into());
     }
 
     for category_list in domain_categories.values() {
         if category_list.len() == 0 {
-            println!("Warning: One of the domains has no categories assigned in the LLM response.");
+            eprintln!("Warning: One of the domains has no categories assigned in the LLM response.");
             return Err("Empty category list in response".into());
         }
     }
 
     for domain in domains {
         if !domain_categories.contains_key(domain) {
-            println!("Warning: Domain '{}' not found in LLM response.", domain);
+            eprintln!("Warning: Domain '{}' not found in LLM response.", domain);
             return Err(format!("Domain '{}' missing in response", domain).into());
         }
     }
@@ -42,6 +42,25 @@ pub fn parse_llm_output(domains: &[String], content: &str) -> Result<HashMap<Str
 
 
     Ok(domain_categories)
+}
+
+fn write_domain_in_garbage_file(domains: &[String], id: usize) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let garbage_file = format!("garbage_domains_{}.txt", id);
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&garbage_file)
+        .unwrap_or_else(|_| panic!("Unable to open {}", garbage_file));
+
+    for domain in domains {
+        writeln!(file, "{}", domain)
+            .unwrap_or_else(|_| panic!("Unable to write to {}", garbage_file));
+        println!("Written garbage domain '{}' to {}", domain, garbage_file);
+    }
 }
 
 async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_name: Arc<Option<String>>, id: usize) -> Result<LLMResult, Box<dyn Error + Send + Sync>> {
@@ -59,7 +78,8 @@ async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_nam
         if retries_chunk == 3 {
             eprintln!("Thread {} Failed to get LLM response after 3 attempts for chunk starting with domain: {}", id, domains[0]);
             gemini_result.failed += domains.len();
-            break;
+            write_domain_in_garbage_file(domains, id);
+            return Err("Max retries reached for LLM request".into());
         }
 
         match async_gemini_fetch_chat_completion(domains, &ctx, (*cache_name).clone(), &mut gemini_result).await {
@@ -75,7 +95,7 @@ async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_nam
         };
     }
 
-    println!("Thread {} Final Gemini Result: {}", id, gemini_result);
+    // println!("Thread {} Final Gemini Result: {}", id, gemini_result);
 
     Ok(LLMResult::Gemini(GeminiResult {
         retried: gemini_result.retried,
@@ -107,7 +127,22 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
     while !end {
         let mut handles = vec![];
 
-        let cache_contents = async_gemini_handle_cached_content(&ctx, &mut final_gemini_result.cost).await?;
+        let cache_contents = match async_gemini_handle_cached_content(&ctx, &mut final_gemini_result.cost).await {
+            Ok(cache_name) => cache_name,
+            Err(e) => {
+                eprintln!("Error handling cached content: {}", e);
+                while let Some(chunk) = chunks.next() {
+                    processed_domains += chunk.len();
+                    println!("Skipping LLM runtime on {} with chunk size [{}-{}]/{} due to caching error",
+                        ctx.config.model[0], processed_domains - chunk.len(), processed_domains, total_domains
+                    );
+                    final_gemini_result.failed += chunk.len();
+                    write_domain_in_garbage_file(chunk, 666);
+                }
+                break;
+            }
+        };
+
         let cache_name = Arc::new(cache_contents);
 
         for id in 0..ctx.config.max_threads {
@@ -119,8 +154,8 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
 
                 processed_domains += domains.len();
             
-                println!("Starting {} LLM runtime on {} with chunk size [{}-{}]/{}",
-                    ctx.config.max_threads, ctx.config.model[0], processed_domains - domains.len(), processed_domains, total_domains
+                println!("Starting LLM runtime on {} with chunk size [{}-{}]/{}",
+                    ctx.config.model[0], processed_domains - domains.len(), processed_domains, total_domains
                 );
 
                 let handle = tokio::spawn(async move {
@@ -136,27 +171,31 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
         }
 
         // Wait for all tasks to complete
-        let futures_results: Vec<_> = futures::future::join_all(handles)
-        .await
-        .into_iter()
-        .map(|res| res.expect("Task panicked"))
-        .collect::<Vec<_>>();
+        let futures_results: Vec<_> = futures::future::join_all(handles).await;
 
-
-        for result in futures_results {
+        for (i, result) in futures_results.into_iter().enumerate() {
             match result {
-                Ok(LLMResult::Gemini(gemini_result)) => {
-                    final_gemini_result.failed += gemini_result.failed;
-                    final_gemini_result.retried += gemini_result.retried;
-                    final_gemini_result.cost += gemini_result.cost;
-                    final_gemini_result.cache_saving += gemini_result.cache_saving;
-                    final_gemini_result.categories.extend(gemini_result.categories);
-                },
-                Err(e) => {
-                    eprintln!("Error in LLM classification task: {}", e);
+                Err(join_err) => {
+                    eprintln!("Task {i} PANICKED: {join_err}");
                 }
+                Ok(task_result) => match task_result {
+                    Ok(LLMResult::Gemini(gemini_result)) => {
+                        final_gemini_result.failed += gemini_result.failed;
+                        final_gemini_result.retried += gemini_result.retried;
+                        final_gemini_result.cost += gemini_result.cost;
+                        final_gemini_result.cache_saving += gemini_result.cache_saving;
+                        final_gemini_result.categories.extend(gemini_result.categories);
+                    },
+                    Err(e) => {
+                        eprintln!("Error in LLM classification task: {}", e);
+                    }
+                },
             }
         }
+
+        println!("Currenly processed {}/{} with cost {}",
+            processed_domains, total_domains, final_gemini_result.cost
+        );
 
     }
 
@@ -171,7 +210,6 @@ pub fn sync_llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, D
     let rt = Runtime::new().expect("Failed to create Tokio runtime");
 
     let ctx = std::sync::Arc::new(ctx.clone());
-
 
     // Block on the async function
     rt.block_on(llm_runtime(domains, ctx))

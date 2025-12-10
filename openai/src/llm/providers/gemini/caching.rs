@@ -91,7 +91,18 @@ fn get_gcloud_access_token() -> Result<String, Box<dyn std::error::Error + Send 
         .output()?;
 
     if !output.status.success() {
-        return Err("Failed to get access token from gcloud".into());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // You can match network-related messages here
+        if stderr.contains("Unable to reach the server")
+            || stderr.contains("Network error")
+            || stderr.contains("connection")
+            || stderr.contains("timed out")
+        {
+            return Err(format!("Network error from gcloud: {}", stderr).into());
+        }
+
+        return Err(format!("gcloud failed: {}", stderr).into());
     }
 
     let token = String::from_utf8(output.stdout)?.trim().to_string();
@@ -122,26 +133,79 @@ pub struct CachedContentItem {
     pub display_name: Option<String>,
 }
 
+#[allow(dead_code)]
+pub enum CachingRequest {
+    List,
+    Create {
+        model_id: String,
+        nb_propositions: usize,
+        ttl: Option<String>,
+    },
+    DeleteAll,
+    UpdateTTL {
+        cache_name: String,
+        ttl: String,
+    },
+}
+
+#[allow(dead_code)]
+pub enum CachingResponse {
+    List(CachedContentList),
+    Create(CacheResponse),
+    DeleteAll,
+    UpdateTTL(CacheResponse),
+}
+
+#[allow(dead_code)]
+impl CachingRequest {
+    pub async fn execute(&self) -> Result<CachingResponse, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            CachingRequest::List => {
+                let cached_contents = list_cached_contents().await?;
+                Ok(CachingResponse::List(cached_contents))
+            }
+            CachingRequest::Create { model_id, nb_propositions, ttl } => {
+                let cache_response = async_gemini_create_cached_content(model_id, *nb_propositions, ttl.clone()).await?;
+                Ok(CachingResponse::Create(cache_response))
+            }
+            CachingRequest::DeleteAll => {
+                async_gemini_delete_all_cached_contents().await?;
+                Ok(CachingResponse::DeleteAll)
+            }
+            CachingRequest::UpdateTTL { cache_name, ttl } => {
+                let updated_cache = async_gemini_update_cached_content_ttl(cache_name, ttl.clone()).await?;
+                Ok(CachingResponse::UpdateTTL(updated_cache))
+            }
+        }
+    }
+}
+
+const REGION: &str = "us-central1";
+const PROJECT_ID: &str = "ultra-evening-480109-i2";
+
  pub async fn list_cached_contents() -> 
  Result<CachedContentList, Box<dyn std::error::Error + Send + Sync>> {
 
     let access_token = get_gcloud_access_token()?;
-    let region = "us-central1";
-    let project_id = "ultra-evening-480109-i2";
 
     let url = format!(
         "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/cachedContents",
-        region, project_id, region
+        REGION, PROJECT_ID, REGION
     );
 
     let client = Client::new();
 
-    let resp = client
+    let resp = match client
         .get(&url)
         .header("Authorization", format!("Bearer {}", access_token))
         .header("Content-Type", "application/json")
         .send()
-        .await?;
+        .await {
+            Err(e) => {
+                return Err(format!("Network error while listing cached contents: {}", e).into());
+            },
+            Ok(resp) => resp,
+        };
 
     let body = resp.text().await?;
     // println!("List cached contents response body: {}", body);
@@ -153,13 +217,11 @@ pub struct CachedContentItem {
 
 pub async fn async_gemini_create_cached_content(model_id: &String, nb_propositions: usize, ttl: Option<String>) -> Result<CacheResponse, Box<dyn Error + Send + Sync>> {
     let token = get_gcloud_access_token()?;
-    let region = "us-central1";
-    let project_id = "ultra-evening-480109-i2";
-    let real_model_path = format!("projects/{}/locations/{}/publishers/google/models/{}", project_id, region, model_id);
+    let real_model_path = format!("projects/{}/locations/{}/publishers/google/models/{}", PROJECT_ID, REGION, model_id);
 
     let url = format!(
         "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/cachedContents",
-        region, project_id, region
+        REGION, PROJECT_ID, REGION
     );
 
     let client: Client = Client::new();
@@ -182,13 +244,18 @@ pub async fn async_gemini_create_cached_content(model_id: &String, nb_propositio
         ttl: ttl,
     };
 
-    let resp = client
+    let resp = match client
         .post(url)
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
-        .await?;
+        .await {
+            Err(e) => {
+                return Err(format!("Network error while creating cached content: {}", e).into());
+            },
+            Ok(resp) => resp,
+        };
 
     let body = resp.text().await?;
     //println!("Cache creation response body: {}", body);
@@ -200,8 +267,6 @@ pub async fn async_gemini_create_cached_content(model_id: &String, nb_propositio
 #[allow(dead_code)]
 pub async fn async_gemini_delete_all_cached_contents() -> Result<(), Box<dyn Error + Send + Sync>> {
     let token = get_gcloud_access_token()?;
-    let region = "us-central1";
-    let _project_id = "ultra-evening-480109-i2";
 
     let cached_contents = list_cached_contents().await?;
 
@@ -211,15 +276,20 @@ pub async fn async_gemini_delete_all_cached_contents() -> Result<(), Box<dyn Err
         for content in contents {
             let url = format!(
                 "https://{}-aiplatform.googleapis.com/v1/{}",
-                region, content.name
+                REGION, content.name
             );
 
-            let resp = client
+            let resp = match client
                 .delete(&url)
                 .header("Authorization", format!("Bearer {}", token))
                 .header("Content-Type", "application/json")
                 .send()
-                .await?;
+                .await {
+                    Err(e) => {
+                        return Err(format!("Network error while deleting cached content: {}", e).into());
+                    },
+                    Ok(resp) => resp,
+                };
 
             if resp.status().is_success() {
                 println!("Deleted cached content: {}", content.name);
@@ -238,11 +308,10 @@ pub async fn async_gemini_delete_all_cached_contents() -> Result<(), Box<dyn Err
 #[allow(dead_code)]
 pub async fn async_gemini_update_cached_content_ttl(cache_name: &String, ttl: String) -> Result<CacheResponse, Box<dyn std::error::Error + Send + Sync>> {
     let token = get_gcloud_access_token()?;
-    let region: &str = "us-central1";
 
     let url = format!(
         "https://{}-aiplatform.googleapis.com/v1/{}",
-        region, cache_name
+        REGION, cache_name
     );
 
     let client: Client = Client::new();
@@ -255,13 +324,18 @@ pub async fn async_gemini_update_cached_content_ttl(cache_name: &String, ttl: St
         ttl: Some(ttl),
     };
 
-    let resp = client
+    let resp = match client
         .patch(url)
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
-        .await?;
+        .await {
+            Err(e) => {
+                return Err(format!("Network error while updating cached content TTL: {}", e).into());
+            },
+            Ok(resp) => resp,
+        };
 
     let body = resp.text().await?;
     //println!("Cache update response body: {}", body);

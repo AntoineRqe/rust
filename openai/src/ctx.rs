@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::my_traits::{Input, Output};
-use crate::Statistics;
-use crate::csv::{MyCSVInput, MyCSVOutput};
-use crate::html;
+use crate::{Statistics};
+use crate::format::csv::{MyCSVInput, MyCSVOutput};
+use crate::format::html;
 use crate::my_traits;
+use std::fs::File;
 
 #[derive(Clone)]
 pub struct Ctx
@@ -16,6 +18,7 @@ pub struct Ctx
     pub stats: Statistics,
     pub config: Config,
     pub prompt: String,
+    pub dict: Option<HashMap<String, String>>,
 }
 
 fn extract_directory_from_path(file_path: &Path) -> Option<PathBuf> {
@@ -24,7 +27,7 @@ fn extract_directory_from_path(file_path: &Path) -> Option<PathBuf> {
 
 impl Ctx
 {
-    pub fn new(input_path: &Path, config: Option<PathBuf>) -> Self {
+    pub fn new(input_path: &Path, config: Option<PathBuf>, dict: Option<PathBuf>) -> Self {
         let config = Config::new(config);
         
         let mut ctx = Ctx {
@@ -35,6 +38,7 @@ impl Ctx
             stats: Statistics::new(config.max_domain_propositions),
             config: config,
             prompt: String::from(""),
+            dict: None,
         };
 
         if ctx.config.support_csv.input {
@@ -59,7 +63,55 @@ impl Ctx
             ctx.outputs.push(Box::new(output.unwrap()));
         }
 
+        if dict.is_some() {
+            let dict_path = dict.unwrap();
+            let dict_map = ctx.load_dictionary(&dict_path);
+            ctx.dict = match dict_map {
+                Ok(d) => Some(d.clone()),
+                Err(e) => {
+                    eprintln!("Failed to load dictionary from {}: {}", dict_path.display(), e);
+                    None
+                }
+            };
+        }
+
         return ctx;
+    }
+
+    pub fn load_dictionary(&self, dict_path: &PathBuf) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+        let file: File = match File::open(dict_path) {
+            Err(e) => {
+                eprintln!("Error opening file {}: {}", dict_path.display(), e);
+                return Err(Box::new(e));
+            },
+            Ok(f) => f,
+        };
+
+        let mut rdr = csv::ReaderBuilder::new()
+            .delimiter(b';') // Set the delimiter to tab
+            .from_reader(file);
+
+        let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.trim().to_string()).collect();
+    
+        let mut header_map = HashMap::new();
+        
+        for (index, header) in headers.iter().enumerate() {
+            header_map.insert(header.clone(), index);
+        }
+        
+
+        let mut res: HashMap<String, String> = HashMap::new();
+
+        for record in rdr.records() {
+            let record = record?;
+            let domain = record.get(*header_map.get("domain").unwrap()).unwrap().trim();
+            let category = record.get(*header_map.get("llm_category_1").unwrap()).unwrap().trim();
+
+            // Assuming the first column is the domain and the fourth column is the expected category
+            res.insert(domain.to_string(), category.to_string());
+        }
+
+        Ok(res)
     }
 
     pub fn write(&mut self, data: &dyn std::any::Any) -> Result<(), Box<dyn std::error::Error>> {
@@ -80,7 +132,7 @@ impl Ctx
 
     pub fn parse(&mut self) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>> {
         let input = self.inputs.first_mut().ok_or("No input defined")?;
-        let res = input.parse(&mut self.stats);
+        let res = input.parse(&mut self.stats, self.dict.as_ref());
 
         let csv_input = input
             .as_any()

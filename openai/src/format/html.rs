@@ -122,14 +122,18 @@ pub fn generate_html_table(
     // Rows
     for (domain, categories) in data.iter().sorted_by_key(|(row, _)| *row) {
         html.push_str("<tr>");
-
         for (col_name, _) in columns.iter().sorted_by_key(|(_, idx)| *idx) {
             match col_name.as_str() {
                 "domain" => render_cell(&mut html, domain),
 
-                "appsite_name" => render_cell(
+                "appsite_name_by_olfeo" => render_cell(
                     &mut html,
-                    categories.appsite_name.as_deref().unwrap_or("")
+                    categories.appsite_name_by_olfeo.as_deref().unwrap_or("")
+                ),
+
+                "appsite_name_by_gemini" => render_cell(
+                    &mut html,
+                    categories.appsite_name_by_gemini.as_deref().unwrap_or("")
                 ),
 
                 "categories_manual" => render_cell(
@@ -137,14 +141,9 @@ pub fn generate_html_table(
                     categories.categories_manual.as_deref().unwrap_or("")
                 ),
 
-                "category_olfeo" => render_cell(
+                "category_by_olfeo" => render_cell(
                     &mut html,
                     categories.category_olfeo.as_deref().unwrap_or("")
-                ),
-
-                "prioritized_category" => render_cell(
-                    &mut html,
-                    categories.prioritized_category.as_deref().unwrap_or("")
                 ),
 
                 other if other.starts_with("llm_category_") => {

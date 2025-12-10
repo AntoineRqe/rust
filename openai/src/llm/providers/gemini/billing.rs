@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use super::generating::UsageMetadata;
+use super::network::UsageMetadata;
 use super::caching::CachedUsageMetadata;
 
 pub struct CostResult {

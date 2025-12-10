@@ -1,11 +1,12 @@
 use std::{collections::HashMap, fs::File, path::{PathBuf}};
-use crate::{my_traits::{Infos, Input, Output}, statistics::Statistics};
+use crate::{my_traits::{Infos, Input, Output}, statistics::Statistics, utils::trim_domain_by_llm};
 use csv::{Reader};
 use indexmap::IndexMap;
 use csv::StringRecord;
 use itertools::Itertools;
 use crate::CatVisionData;
 use std::any::Any;
+use crate::category::main_domain_for;
 
 
 #[derive(Debug)]
@@ -31,7 +32,7 @@ impl Input for MyCSVInput {
         self
     }
 
-    fn parse(&mut self, stats: &mut Statistics) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>> {
+    fn parse(&mut self, stats: &mut Statistics, dict: Option<&HashMap<String, String>>) -> Result<Box<dyn std::any::Any>, Box<dyn std::error::Error>> {
         let file: File = match File::open(&self.filename) {
             Err(e) => {
                 eprintln!("Error opening file {}: {}", self.filename.display(), e);
@@ -44,8 +45,15 @@ impl Input for MyCSVInput {
             .delimiter(b';') // Set the delimiter to tab
             .from_reader(file);
 
-        self.parse_header(&mut rdr)?;
+        let mut input_headers = self.parse_header(&mut rdr)?;
+
+        if dict.is_some() {
+            input_headers.insert("appsite_name_by_gemini".to_string(), input_headers.len());
+        }
+
+        self.headers = input_headers;
         let mut res: IndexMap<String, CatVisionData> = IndexMap::new();
+
 
         for record in rdr.records() {
 
@@ -53,11 +61,26 @@ impl Input for MyCSVInput {
             let mut new_data = CatVisionData::new(None, None, None, None, None);    
             let domain = record.get(*self.headers.get("domain").unwrap()).unwrap().trim();
 
-            match self.headers.get("appsite_name") {
+            if dict.is_some() {
+                let (appsite_name_by_gemini, _) = trim_domain_by_llm(dict.unwrap(), domain);
+                new_data.appsite_name_by_gemini = appsite_name_by_gemini;
+            }
+    
+            match self.headers.get("appsite_name_by_olfeo") {
                 Some(idx) => {
                     let appsite_name = record.get(*idx).unwrap().trim();
                     if !appsite_name.is_empty() {
-                        new_data.appsite_name = Some(appsite_name.to_string());
+                        new_data.appsite_name_by_olfeo = Some(appsite_name.to_string());
+                    }
+                },
+                None => {}
+            }
+
+            match self.headers.get("category_by_olfeo") {
+                Some(idx) => {
+                    let olfeo_category = record.get(*idx).unwrap().trim();
+                    if !olfeo_category.is_empty() {
+                        new_data.category_olfeo = main_domain_for(olfeo_category).map(|s| s.to_string());
                     }
                 },
                 None => {}
@@ -104,7 +127,7 @@ impl Input for MyCSVInput {
 }
 
 impl MyCSVInput {
-     fn parse_header(&mut self, rdr: &mut Reader<File>) -> Result<(), Box<dyn std::error::Error>> {
+     fn parse_header(&mut self, rdr: &mut Reader<File>) -> Result<HashMap<String, usize>, Box<dyn std::error::Error>> {
         let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.trim().to_string()).collect();
     
         let mut header_map = HashMap::new();
@@ -122,9 +145,7 @@ impl MyCSVInput {
             }
         }
 
-        self.headers = header_map;
-
-        Ok(())
+        Ok(header_map)
     }
 }
 
@@ -147,7 +168,7 @@ impl Output for MyCSVOutput {
 
     fn write(&mut self, data : &dyn std::any::Any, _infos: &Infos) -> Result<(), Box<dyn std::error::Error>> {
         let mut wtr = csv::WriterBuilder::new()
-            .delimiter(b'\t') // Set the delimiter to tab
+            .delimiter(b';') // Set the delimiter to semi colon
             .from_path(self.filename.clone())?;
 
         let headers = self.generate_header();
@@ -170,9 +191,16 @@ impl Output for MyCSVOutput {
                     "domain" => {
                         new_row.push_field(domain);
                     },
-                    "appsite_name" => {
-                        if let Some(ref appsite_name) = categories.appsite_name {
-                            new_row.push_field(appsite_name);
+                    "appsite_name_by_olfeo" => {
+                        if let Some(ref appsite_name_by_olfeo) = categories.appsite_name_by_olfeo {
+                            new_row.push_field(appsite_name_by_olfeo);
+                        } else {
+                            new_row.push_field("");
+                        }
+                    },
+                    "appsite_name_by_gemini" => {
+                        if let Some(ref appsite_name_by_gemini) = categories.appsite_name_by_gemini {
+                            new_row.push_field(appsite_name_by_gemini);
                         } else {
                             new_row.push_field("");
                         }
@@ -187,13 +215,6 @@ impl Output for MyCSVOutput {
                     "category_olfeo" => {
                         if let Some(ref olfeo_cat) = categories.category_olfeo {
                             new_row.push_field(olfeo_cat);
-                        } else {
-                            new_row.push_field("");
-                        }
-                    },
-                    "prioritized_category" => {
-                        if let Some(ref prioritized_cat) = categories.prioritized_category {
-                            new_row.push_field(prioritized_cat);
                         } else {
                             new_row.push_field("");
                         }

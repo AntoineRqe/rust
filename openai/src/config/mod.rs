@@ -15,7 +15,6 @@ pub struct Config {
     pub model: Vec<String>,
     pub chunk_size: usize,
     pub thinking_budget: i64,
-    pub use_internal_replacement: bool,
     pub use_gemini_explicit_caching: bool,
     pub use_gemini_url_context: bool,
     pub use_gemini_google_search: bool,
@@ -32,7 +31,6 @@ impl Default for Config {
             model: vec!["Qwen2.5-Coder-32B-Instruct-AWQ".to_string()],
             chunk_size: 100,
             thinking_budget: 1024,
-            use_internal_replacement: false,
             use_gemini_explicit_caching: false,
             use_gemini_url_context: false,
             use_gemini_google_search: false,
@@ -72,7 +70,6 @@ mod tests {
         assert_eq!(config.max_domain_propositions, 3);
         assert_eq!(config.model, vec!["Qwen2.5-Coder-32B-Instruct-AWQ".to_string()]);
         assert_eq!(config.chunk_size, 100);
-        assert!(!config.use_internal_replacement);
         assert_eq!(config.thinking_budget, 1024);
         assert!(!config.use_gemini_explicit_caching);
         assert!(!config.use_gemini_url_context);
@@ -95,7 +92,6 @@ mod tests {
         assert_eq!(config.model[2], "claude-sonnet-4".to_string());
         assert_eq!(config.model[3], "gemini-2.5-flash".to_string());
         assert_eq!(config.chunk_size, 50);
-        assert!(config.use_internal_replacement);
         assert_eq!(config.thinking_budget, 2048);
         assert!(config.use_gemini_explicit_caching);
         assert!(config.use_gemini_url_context);

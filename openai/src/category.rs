@@ -1,43 +1,6 @@
 use std::collections::HashMap;
-
-pub fn get_prioritized_category(primary_category: &str, optionnal_categories: &Vec<String>) -> Option<String> {
-
-    let category_priorities: HashMap<&str, Vec<&str>> = HashMap::from([
-        ("E-Commerce / Enchères", vec!["Intérêts / Loisirs"]),
-        ("Intérêts / Loisirs", vec!["Armes / Explosifs", "Streaming / Télévision / Radio"]),
-        ("Médias / Actualités", vec!["Intérêts / Loisirs", "Voyage / Tourisme / Sortie"]),
-        ("Domaine technique", vec![ "Réseaux sociaux",
-                                    "Immobilier",
-                                    "Banques / Services financiers / Investissement",
-                                    "Petites annonces",
-                                    "Hébergement de fichiers",
-                                    "VPNs / Filtres / Proxies / Redirection",
-                                    "Intérêts / Loisirs",
-                                    "Médias / Actualités"]),
-        ("Streaming / Télévision / Radio", vec!["Contenus pirates"]),
-        ("Gouvernement / Administration", vec!["Emploi"]),
-        ("Enseignement", vec!["Traduction"]),
-        ("Services / Sites d'entreprises", vec!["Politique / Droit / Social"]),
-        ("Streaming / Télévision / Radio", vec!["Médias / Actualités"]),
-        // ("Voyage / Tourisme / Sortie", vec!["Intérêts / Loisirs"]),
-    ]);
-  
-    if let Some(priorities) = category_priorities.get(primary_category) {
-        for optional_category in optionnal_categories {
-            if priorities.contains(&optional_category.as_str()) {
-                return Some(optional_category.to_string());
-            }
-        }
-    }
-    None
-}
-
-pub const _HIGH_PRIORITY_CATEGORIES: &str = r#"
-    [
-        "Armes / Explosifs",
-        "Religion",
-        "Enseignement",
-    ]"#;
+use serde_json::Value;
+use once_cell::sync::Lazy;
       
 pub const CATEGORIES: &str = r#"
     [
@@ -305,3 +268,32 @@ pub const _SUB_CATEGORIES_JSON : &str = r#"
   ]
 }
 "#;
+
+/// Reverse lookup table: subcategory -> main category.
+/// Built once on first access.
+static SUB_TO_MAIN: Lazy<HashMap<String, String>> = Lazy::new(|| {
+    let mut map = HashMap::new();
+
+    let parsed: Value =
+        serde_json::from_str(_SUB_CATEGORIES_JSON).expect("Invalid JSON categories");
+
+    let obj = parsed.as_object().expect("Top-level JSON must be an object");
+
+    for (main, subs) in obj {
+        if let Some(arr) = subs.as_array() {
+            for sub in arr {
+                if let Some(sub_name) = sub.as_str() {
+                    map.insert(sub_name.to_string(), main.to_string());
+                }
+            }
+        }
+    }
+
+    map
+});
+
+/// Returns the main domain corresponding to a subdomain.
+/// Example: "Forum, Wiki" → Some("Blogs / Forums")
+pub fn main_domain_for(sub: &str) -> Option<&'static str> {
+    SUB_TO_MAIN.get(sub).map(|s| s.as_str())
+}
