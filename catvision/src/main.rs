@@ -15,6 +15,7 @@ mod llm;
 mod utils;
 
 use llm::core::{generate_full_prompt, generate_prompt_with_cached_content, sync_llm_runtime};
+use utils::seconds_to_pretty;
 
 #[derive(Debug, Clone)]
 pub struct CatVisionData {
@@ -146,7 +147,7 @@ fn main() -> io::Result<()> {
 
     ctx.stats.elapsed_time = start_time.elapsed();
 
-    println!("Classification of {} domains finished in {:?} for {}€", domains.len(), ctx.stats.elapsed_time, llm_results.cost);
+    println!("Classification of {} domains finished in {:?} for {}€", llm_results.categories.len(), seconds_to_pretty(ctx.stats.elapsed_time.as_secs()), llm_results.cost);
 
     ctx.write(&aggregated).expect("Failed to write output data");
 

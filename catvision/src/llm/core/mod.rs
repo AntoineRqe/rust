@@ -39,8 +39,6 @@ pub fn parse_llm_output(domains: &[String], content: &str) -> Result<HashMap<Str
         }
     }
 
-
-
     Ok(domain_categories)
 }
 

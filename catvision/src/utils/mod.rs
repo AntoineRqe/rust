@@ -1,6 +1,20 @@
 use tldextract::{TldExtractor, TldOption, TldResult};
 use std::collections::HashMap;
 
+pub fn seconds_to_pretty(total_seconds: u64) -> Option<String> {
+
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if days > 0 {
+        Some(format!("{days} days {:02}:{:02}:{:02}", hours, minutes, seconds))
+    } else {
+        Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds))
+    }
+}
+
 pub fn trim_domain_by_llm(dict: &HashMap<String, String>, domain: &str) -> (Option<String>, Option<String>) {
     //Trim subdomains of the given domain with the Olfeo method.
     // The basic idea of the Olfeo method is the following. As input take a domain,

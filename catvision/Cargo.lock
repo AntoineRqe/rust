@@ -107,6 +107,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 
 [[package]]
+name = "catvision"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "csv",
+ "futures",
+ "indexmap",
+ "itertools",
+ "once_cell",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tldextract",
+ "tokio",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -860,25 +879,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "openai-olfeo"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "csv",
- "futures",
- "indexmap",
- "itertools",
- "once_cell",
- "rand",
- "reqwest",
- "serde",
- "serde_json",
- "tldextract",
- "tokio",
-]
 
 [[package]]
 name = "openssl"

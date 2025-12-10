@@ -156,6 +156,7 @@ impl CachingRequest {
     }
 }
 
+#[allow(dead_code)]
 const MODEL_ID: &str = "gemini-2.5-flash";
 const REGION: &str = "us-central1";
 const PROJECT_ID: &str = "ultra-evening-480109-i2";

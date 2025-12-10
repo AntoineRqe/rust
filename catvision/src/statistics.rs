@@ -1,18 +1,5 @@
 use std::fmt::Display;
-
-fn seconds_to_pretty(total_seconds: u64) -> Option<String> {
-
-    let days = total_seconds / 86_400;
-    let hours = (total_seconds % 86_400) / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-
-    if days > 0 {
-        Some(format!("{days} days {:02}:{:02}:{:02}", hours, minutes, seconds))
-    } else {
-        Some(format!("{:02}:{:02}:{:02}", hours, minutes, seconds))
-    }
-}
+use crate::utils::seconds_to_pretty;
 
 
 #[derive(Debug, Clone)]
