@@ -277,22 +277,18 @@ impl Output for MyCSVOutput {
 
     fn create_output_header(&mut self, input_headers: &HashMap<String, usize>, levels_count: usize) {
         let mut headers = input_headers.clone();
-        let mut offset = headers.len();
+        let offset = headers.len();
 
         for i in 0..levels_count {
             let key = format!("llm_category_{}", i + 1);
             headers.insert(key, offset + i);
         }
-
-        offset += levels_count;
     
-        headers.insert("prioritized_category".to_string(), offset);
-        self.headers = headers.clone();
+        self.headers = headers;
     }
 }
 
 impl MyCSVOutput {
-
 
     pub fn generate_header(&self) -> StringRecord {
         let mut new_header = StringRecord::new();
