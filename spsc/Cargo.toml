@@ -1,0 +1,14 @@
+[package]
+name = "spsc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+criterion = "0.8.1"
+crossbeam = "0.8.4"
+crossbeam-utils = "0.8.21"
+
+[[bench]]
+name = "spsc"
+harness = false
+path = "benches/spsc.rs"
