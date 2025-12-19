@@ -3,22 +3,45 @@ use crate::utils::seconds_to_pretty;
 
 
 #[derive(Debug, Clone)]
+/// Statistics for the CatVision application
 pub struct Statistics {
+    /// Number of domains processed
     domaine_count: usize,
+    /// Number of Olfeo matches found
     olfeo_match_count : usize,
+    /// Number of LLM matches found at each level
     llm_level_match_count : Vec<usize>,
+    /// Number of prioritized domains processed
     priorized_done_count : usize,
+    /// Number of prioritized matches found
     prioritized_match_count : usize,
+    /// Number of successful prioritized matches
     prioritized_done_success: usize,
+    /// Total cost incurred
     cost : f64,
+    /// Number of retries performed
     retried : usize,
+    /// Number of failed requests
     failed : usize,
+    /// LLM chunk size used
     chunk_size: usize,
+    /// LLM thinking budget used
     thinking_budget: i64,
+    /// Elapsed time for processing
     pub elapsed_time: std::time::Duration,
 }
 
+/// Methods for the Statistics struct
 impl Statistics {
+    /// Creates a new Statistics instance
+    ///
+    /// # Arguments
+    ///
+    /// * `levels` - Number of LLM levels.
+    ///
+    /// # Errors
+    ///
+    /// Panics if memory allocation fails.
     pub fn new(levels: usize) -> Self {
         Statistics {
             domaine_count: 0,
@@ -111,6 +134,15 @@ impl Statistics {
         self.thinking_budget = thinking_budget;
     }
 
+    /// Generates a summary of the statistics
+    ///
+    /// # Arguments
+    ///
+    /// * `levels` - Number of LLM levels.
+    ///
+    /// # Errors
+    ///
+    /// Panics if memory allocation fails.
     pub fn generate_output_summary(&self) -> String {
         let mut summary = String::new();
         summary.push_str(&format!("Statistics with {} domains\n", self.domaine_count));

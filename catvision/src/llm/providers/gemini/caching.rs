@@ -5,6 +5,7 @@ use std::error::Error;
 use std::process::Command;
 
 use crate::llm::core::generate_cached_prompt;
+use crate::utils::env::{get_project_id};
 
 //
 // Request structure for creating cached content
@@ -159,7 +160,6 @@ impl CachingRequest {
 #[allow(dead_code)]
 const MODEL_ID: &str = "gemini-2.5-flash";
 const REGION: &str = "us-central1";
-const PROJECT_ID: &str = "ultra-evening-480109-i2";
 
 fn get_gcloud_access_token() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let output = Command::new("gcloud")
@@ -192,7 +192,7 @@ fn get_gcloud_access_token() -> Result<String, Box<dyn std::error::Error + Send 
 
     let url = format!(
         "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/cachedContents",
-        REGION, PROJECT_ID, REGION
+        REGION, get_project_id(), REGION
     );
 
     let client = Client::new();
@@ -219,11 +219,11 @@ fn get_gcloud_access_token() -> Result<String, Box<dyn std::error::Error + Send 
 
 pub async fn async_gemini_create_cached_content(model_id: &String, nb_propositions: usize, ttl: Option<String>) -> Result<CacheResponse, Box<dyn Error + Send + Sync>> {
     let token = get_gcloud_access_token()?;
-    let real_model_path = format!("projects/{}/locations/{}/publishers/google/models/{}", PROJECT_ID, REGION, model_id);
+    let real_model_path = format!("projects/{}/locations/{}/publishers/google/models/{}", get_project_id(), REGION, model_id);
 
     let url = format!(
         "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/cachedContents",
-        REGION, PROJECT_ID, REGION
+        REGION, get_project_id(), REGION
     );
 
     let client: Client = Client::new();

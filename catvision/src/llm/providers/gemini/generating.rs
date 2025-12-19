@@ -24,7 +24,7 @@ impl Default for GeminiResult {
             retried: 0,
             cost: 0.0,
             cache_saving: 0.0,
-            categories: HashMap::new(),
+            categories: HashMap::with_capacity(4000000),
         }
     }
 }
@@ -48,7 +48,13 @@ impl std::fmt::Display for GeminiResult {
 
 use chrono::{DateTime, Utc, Duration};
 
-fn is_expired_within_threshold(expire_time_str: &str, minutes: i64) -> Result<bool, chrono::ParseError> {
+/// Checks if the cached content needs to be refreshed based on its expiration time
+/// # Arguments
+/// * `expire_time_str` - Expiration time as a string in RFC3339 format
+/// * `minutes` - Threshold in minutes to determine if refresh is needed
+/// # Returns
+/// * `Result<bool, chrono::ParseError>` - Ok(true) if refresh is needed, Ok(false) otherwise, or an error if parsing fails 
+fn check_cache_expire_time(expire_time_str: &str, minutes: i64) -> Result<bool, chrono::ParseError> {
     let current_time: DateTime<Utc> = Utc::now();
     let expire_time: DateTime<Utc> = DateTime::parse_from_rfc3339(expire_time_str)?.with_timezone(&Utc);
 
@@ -61,6 +67,12 @@ fn is_expired_within_threshold(expire_time_str: &str, minutes: i64) -> Result<bo
     Ok(need_refresh)
 }
 
+/// Handles cached content for Gemini asynchronously
+/// # Arguments
+/// * `ctx` - Reference to the context containing configuration
+/// * `cost` - Mutable reference to accumulate cost
+/// # Returns
+/// * `Result<Option<String>, Box<dyn Error + Send + Sync>>` - Ok(Some(cache_name)) if cached content is used or created, Ok(None) if not using caching, or an error
 pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut f64) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
     if ctx.config.use_gemini_explicit_caching {
         let cache_contents = caching::list_cached_contents().await?;
@@ -68,7 +80,7 @@ pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut f64) -> Re
             Some(cached_list) => {
                 let cache = cached_list.first().unwrap();
                 if let Some(expire_time) = &cache.expire_time {
-                    if is_expired_within_threshold(expire_time, 1)? {
+                    if check_cache_expire_time(expire_time, 1)? {
                         let cache_content = caching::async_gemini_update_cached_content_ttl(&cache.name, ctx.config.use_gemini_custom_cache_duration.as_ref().unwrap().clone()).await?;
                         let cache_cost = billing::CacheCostResult::new(cache_content.usage.unwrap()).compute_cost();
                         *cost += cache_cost.eur;
@@ -94,8 +106,20 @@ pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut f64) -> Re
     }
 }
 
-pub async fn async_gemini_fetch_chat_completion(domains: &[String], ctx: &Ctx, cache_name : Option<String>, my_result: &mut GeminiResult) -> Result<(), Box<dyn Error>> {
-
+/// Fetches chat completion from Gemini asynchronously
+/// # Arguments
+/// * `domains` - Slice of domain names to process
+/// * `ctx` - Reference to the context containing configuration
+/// * `cache_name` - Optional cache name for using cached content
+/// * `my_result` - Mutable reference to accumulate Gemini results
+/// # Returns
+/// * `Result<(), Box<dyn Error>>` - Ok(()) if successful, or an error
+pub async fn async_gemini_fetch_chat_completion(
+    domains: &[String],
+    ctx: &Ctx,
+    cache_name : Option<String>,
+    my_result: &mut GeminiResult
+) -> Result<(), Box<dyn Error>> {
 
     let user_prompt = if cache_name.is_some() {
         generate_prompt_with_cached_content(&domains)

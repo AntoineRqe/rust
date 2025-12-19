@@ -1,11 +1,13 @@
 use reqwest::Client;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap};
-use rand::prelude::*; // brings Rng and thread_rng into scope
+use rand::prelude::*;
+use crate::utils::env::get_api_key;
+
 use super::caching::CachingRequest;
 
 #[allow(dead_code)]
+/// Enum representing different Gemini API calls
 pub enum GeminiApiCall {
     Generate{
         model: String,
@@ -19,13 +21,10 @@ pub enum GeminiApiCall {
 }
     
 
-static API_KEY: Lazy<String> = Lazy::new(|| {
-    std::env::var("MY_GEMINI_API_KEY")
-        .expect("Set MY_GEMINI_API_KEY environment variable")
-});
 
 const API_ENDPOINT: &str = "aiplatform.googleapis.com";
 
+/// Generates a random seed for the LLM request
 pub fn generate_seed() -> i32 {
     let mut rng = rand::rng();
     rng.random()  // new API in rand 0.9
@@ -45,6 +44,21 @@ impl GeminiApiCall {
         }
     }
 
+    /// Generates a chat completion using the Gemini API
+    /// 
+    /// Arguments:
+    ///
+    /// * `client` - Reqwest HTTP client
+    /// * `model` - Model name to use
+    /// * `prompt` - User prompt
+    /// * `cache_name` - Optional cache name
+    /// * `use_url_context` - Whether to use URL context tool
+    /// * `use_google_search` - Whether to use Google search tool
+    /// * `thinking_budget` - Thinking budget for the request
+    /// 
+    /// Returns:
+    /// * `ApiResponse` - Parsed response from the Gemini API
+    ///
     async fn generate_chat_completion(&self,
         client: &Client,
         model: &str,
@@ -55,14 +69,12 @@ impl GeminiApiCall {
         thinking_budget: i64) 
         -> Result<ApiResponse, Box<dyn std::error::Error>> {
 
-        let generate_content_api = "generateContent";
 
         let url = format!(
-            "https://{}/v1/publishers/google/models/{}:{}?key={}",
+            "https://{}/v1/publishers/google/models/{}:generateContent?key={}",
             API_ENDPOINT,                    // e.g. "us-central1-aiplatform.googleapis.com"
             model,                           // e.g. "gemini-2.5-flash"
-            generate_content_api,            // "generateContent"
-            *API_KEY                         // Your API key
+            get_api_key()                    // Your API key
         );
     
         let mut tools = vec![];
@@ -84,6 +96,7 @@ impl GeminiApiCall {
             );
         }
 
+        /// Construct the Gemini API request
         let request = GeminiRequest {
             contents: vec![
                 Content {

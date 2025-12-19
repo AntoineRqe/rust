@@ -18,6 +18,7 @@ use llm::core::{generate_full_prompt, generate_prompt_with_cached_content, sync_
 use utils::seconds_to_pretty;
 
 #[derive(Debug, Clone)]
+/// Structure to hold various categories data for a domain
 pub struct CatVisionData {
     pub category_olfeo: Option<String>,
     pub categories_manual: Option<String>,
@@ -44,6 +45,18 @@ impl CatVisionData {
     }
 }
 
+/// Aggregates original data with LLM results into a single IndexMap
+///
+/// # Arguments
+///
+/// * `original_data` - Reference to the original data map
+/// * `llm_data` - Reference to the LLM results map
+/// * `stats` - Mutable reference to statistics object for updating stats
+/// * `nb_propositions` - Number of LLM category propositions to consider
+///
+/// # Returns
+/// * An IndexMap containing the aggregated data
+///
 fn aggregate_data(
     original_data: &indexmap::IndexMap<String, CatVisionData>,
     llm_data: &std::collections::HashMap<String, Vec<String>>,
@@ -110,29 +123,38 @@ struct Args {
 }
 
 fn main() -> io::Result<()> {
+    // Parse command-line arguments
     let args = Args::parse();
     let input_file = PathBuf::from(&args.input);
     let config_path = args.config.map(PathBuf::from);
     let dict = args.dict.map(PathBuf::from);
 
+    // Initialize context wihth input file and optional config and dictionary
     let mut ctx = ctx::Ctx::new(&input_file, config_path, dict);
 
     let start_time = std::time::Instant::now();
 
+    // Parse input data
     let domains = ctx
-    .parse()
-    .expect("Failed to parse input CSV")
-    .downcast::<IndexMap<String, CatVisionData>>()
-    .expect("Failed to downcast parsed data to IndexMap<String, CatVisionData>>");
+        .parse()
+        .expect("Failed to parse input CSV")
+        .downcast::<IndexMap<String, CatVisionData>>()
+        .expect("Failed to downcast parsed data to IndexMap<String, CatVisionData>>");
     
-    let domains_name = domains.keys().cloned().collect::<Vec<String>>();
+    // Create domais name list from input file
+    let domains_name = domains
+        .keys()
+        .map(|s| s.to_string())
+        .collect::<Vec<String>>();
  
+    // Generate prompt and call LLM based on caching configuration for Gemini
     ctx.prompt = if ctx.config.use_gemini_explicit_caching {
         generate_prompt_with_cached_content(&domains_name)
     } else {
         generate_full_prompt(&domains_name, ctx.config.max_domain_propositions)
     };
 
+    // Calling Gemini LLM synchronously to get categories
     let llm_results = match sync_llm_runtime(&domains_name, &ctx) {
         Ok(res) => res,
         Err(e) => {
@@ -141,14 +163,17 @@ fn main() -> io::Result<()> {
         }
     };
 
+    // Update statistics based on Gemini results
     ctx.stats.update_llm_statistics(llm_results.cost, llm_results.retried, llm_results.failed, ctx.config.chunk_size, ctx.config.thinking_budget);
 
+    // Aggregate original data with LLM results
     let aggregated = aggregate_data(&domains, &llm_results.categories, &mut ctx.stats, ctx.config.max_domain_propositions);
 
     ctx.stats.elapsed_time = start_time.elapsed();
 
     println!("Classification of {} domains finished in {} for {}€", llm_results.categories.len(), seconds_to_pretty(ctx.stats.elapsed_time.as_secs()).unwrap(), llm_results.cost);
 
+    // Write categories to output files (HTML, CSV, JSON...)
     ctx.write(&aggregated).expect("Failed to write output data");
 
     Ok(())

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 use std::error::Error;
+use serde_json::Value;
 use tokio::runtime::Runtime;
 
 use crate::category::CATEGORIES;
@@ -12,34 +13,46 @@ enum LLMResult {
     Gemini(GeminiResult),
 }
 
-pub type DomainCategories = HashMap<String, Vec<String>>;
+pub fn parse_llm_output(
+    domains: &[String],
+    content: &str,
+) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+    // Avoid unnecessary trim/allocation
+    let content = content.trim_start_matches(|c: char| c.is_whitespace())
+                         .trim_end_matches(|c: char| c.is_whitespace());
 
+    
+    let json: Value = serde_json::from_str(content)?;
+    let obj = json.as_object().ok_or("Expected top-level JSON object")?;
 
-pub fn parse_llm_output(domains: &[String], content: &str) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
-    let content = content.trim();
-
-    let domain_categories: DomainCategories = serde_json::from_str(&content)?;
-
-    if domain_categories.len() != domains.len() {
-        eprintln!("Warning: Expected {} domains, but got {} domains in response.", domains.len(), domain_categories.len());
-        return Err("Domain count mismatch in response".into());
-    }
-
-    for category_list in domain_categories.values() {
-        if category_list.len() == 0 {
-            eprintln!("Warning: One of the domains has no categories assigned in the LLM response.");
-            return Err("Empty category list in response".into());
-        }
-    }
+    // Pre allocate the result map for better performance
+    let mut result: HashMap<String, Vec<String>> = HashMap::with_capacity(domains.len());
 
     for domain in domains {
-        if !domain_categories.contains_key(domain) {
-            eprintln!("Warning: Domain '{}' not found in LLM response.", domain);
-            return Err(format!("Domain '{}' missing in response", domain).into());
+        let value = obj.get(domain)
+            .ok_or(format!("Domain '{}' not found in JSON", domain))?;
+
+        let arr = value.as_array()
+            .ok_or(format!("Expected array for domain '{}'", domain))?;
+
+        if arr.is_empty() {
+            return Err(format!("No categories found for domain '{}'", domain).into());
         }
+
+        // Collect categories as &str to avoid allocations
+        let categories: Vec<String> = arr.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect();
+
+        if categories.is_empty() {
+            return Err(format!("No valid string categories for domain '{}'", domain).into());
+        }
+
+        result.insert(domain.to_string(), categories);
     }
 
-    Ok(domain_categories)
+    Ok(result)
 }
 
 fn write_domain_in_garbage_file(domains: &[String], id: usize) {
@@ -109,7 +122,6 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, DynError> {
 
     let mut chunks = domains.chunks(ctx.config.chunk_size);
-    let mut end = false;
     let mut processed_domains = 0;
     let total_domains = domains.len();
 
@@ -119,14 +131,15 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
         retried: 0,
         cost: 0.0,
         cache_saving: 0.0,
-        categories: HashMap::new(),
+        categories: HashMap::with_capacity(4000000),
     };
 
-    while !end {
-        let mut handles = vec![];
+    while let Some(_) = chunks.clone().next() { // loop until no more chunks
+        let ctx = Arc::clone(&ctx);
+        let mut handles = Vec::with_capacity(ctx.as_ref().config.max_threads);
 
-        let cache_contents = match async_gemini_handle_cached_content(&ctx, &mut final_gemini_result.cost).await {
-            Ok(cache_name) => cache_name,
+        let cache_name = match async_gemini_handle_cached_content(&ctx, &mut final_gemini_result.cost).await {
+            Ok(cache_name) => Arc::new(cache_name),
             Err(e) => {
                 eprintln!("Error handling cached content: {}", e);
                 while let Some(chunk) = chunks.next() {
@@ -140,30 +153,31 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
                 break;
             }
         };
-
-        let cache_name = Arc::new(cache_contents);
-
-        for id in 0..ctx.config.max_threads {
-            
+    
+        for id in 0..ctx.as_ref().config.max_threads {
             if let Some(chunk) = chunks.next() {
-                let domains = chunk.to_vec();
-                let arc_ctx = ctx.clone();
-                let cache_name = cache_name.clone();
+                let ctx = Arc::clone(&ctx);
+                let domains_vec: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
+                let cache_name = Arc::clone(&cache_name);
 
-                processed_domains += domains.len();
+                processed_domains += domains_vec.len();
             
-                println!("Starting LLM runtime on {} with chunk size [{}-{}]/{}",
-                    ctx.config.model[0], processed_domains - domains.len(), processed_domains, total_domains
+                tracing::info!(
+                    "Starting LLM runtime on {} with chunk [{}-{}]/{}",
+                    ctx.config.model[0],
+                    processed_domains - domains_vec.len(),
+                    processed_domains,
+                    total_domains
                 );
 
-                let handle = tokio::spawn(async move {
-                    async_llm_classify_domains(&domains, arc_ctx, cache_name, id).await
+                let handle = tokio::spawn( {        
+                    async move {
+                        async_llm_classify_domains(&domains_vec, ctx, cache_name, id).await
+                    }
                 });
         
                 handles.push(handle);
-            }
-            else {
-                end = true;
+            } else {
                 break;
             }
         }
@@ -191,13 +205,21 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
             }
         }
 
-        println!("Currenly processed {}/{} with cost {}",
-            processed_domains, total_domains, final_gemini_result.cost
+        tracing::info!(
+            "Completed LLM runtime on {} with chunk size [{}-{}]/{}",
+            ctx.config.model[0],
+            processed_domains - ctx.config.chunk_size * ctx.config.max_threads,
+            processed_domains,
+            total_domains
         );
 
     }
 
-    println!("All tasks completed!");
+    tracing::info!(
+        "LLM runtime completed on {} for total domains: {}",
+        ctx.config.model[0],
+        total_domains
+    );
 
     Ok(final_gemini_result)
 

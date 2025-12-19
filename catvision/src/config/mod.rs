@@ -1,27 +1,44 @@
 use std::path::{PathBuf};
 
 #[derive(Debug, Clone, serde::Deserialize)]
+/// Supported format for input and output
 pub struct SupportedFormat {
+    /// Whether the format is supported for input
     pub input: bool,
+    /// Whether the format is supported for output
     pub output: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+/// Configuration for the CatVision application
 pub struct Config {
+    /// Maximum number of threads to use
     pub max_threads: usize,
+    /// Supported CSV format for input and output
     pub support_csv: SupportedFormat,
+    /// Supported HTML format for input and output
     pub support_html: SupportedFormat,
+    /// Maximum number of domain propositions to consider
     pub max_domain_propositions: usize,
+    /// Models to use for LLM classification
     pub model: Vec<String>,
+    /// Size of chunks to process
     pub chunk_size: usize,
+    /// Thinking budget for the LLM
     pub thinking_budget: i64,
+    /// Whether to use explicit caching for Gemini
     pub use_gemini_explicit_caching: bool,
+    /// Whether to use URL context for Gemini
     pub use_gemini_url_context: bool,
+    /// Whether to use Google search for Gemini
     pub use_gemini_google_search: bool,
+    /// Custom cache duration for Gemini
     pub use_gemini_custom_cache_duration: Option<String>,
 }
 
+/// Default configuration values
 impl Default for Config {
+    /// Provides default configuration settings
     fn default() -> Self {
         Self {
             max_threads: 1,
@@ -39,7 +56,18 @@ impl Default for Config {
     }
 }
 
+/// Methods for the Config struct
 impl Config {
+
+    /// Creates a new Config instance, loading from a file if provided
+    ///
+    /// # Arguments
+    ///
+    /// * `config_file` - Optional path to a JSON configuration file
+    ///
+    /// # Errors
+    ///
+    /// Panics if the configuration file cannot be read or parsed
     pub fn new(config_file: Option<PathBuf>) -> Self {
         match config_file {
             Some(path) => Self::load_from_file(path),
@@ -47,6 +75,15 @@ impl Config {
         }
     }
 
+    /// Loads configuration from a JSON file
+    ///
+    /// # Arguments
+    ///
+    /// * `config_file` - Path to JSON configuration file.
+    ///
+    /// # Errors
+    ///
+    /// Panics if the file cannot be read or parsed.
     fn load_from_file(config_file: PathBuf) -> Self {
         let config_data = std::fs::read_to_string(config_file)
             .expect("Failed to read config file");

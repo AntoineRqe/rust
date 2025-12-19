@@ -9,9 +9,9 @@
         "output": false
     },
     "max_domain_propositions": 1,
-    "chunk_size": 100,
-    "thinking_budget": 1024,
-    "use_gemini_explicit_caching": true,
+    "chunk_size": 1,
+    "thinking_budget": 1500,
+    "use_gemini_explicit_caching": false,
     "use_gemini_url_context": false,
     "use_gemini_google_search": false,
     "use_gemini_custom_cache_duration": "3600s",

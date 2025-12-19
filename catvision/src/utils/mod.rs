@@ -1,6 +1,13 @@
 use tldextract::{TldExtractor, TldOption, TldResult};
 use std::collections::HashMap;
 
+pub mod env;
+
+/// Converts a duration in seconds to a human-readable string format
+/// # Arguments
+/// * `total_seconds` - Duration in seconds
+/// # Returns
+/// * `Option<String>` - Formatted duration string or None if input is zero
 pub fn seconds_to_pretty(total_seconds: u64) -> Option<String> {
 
     let days = total_seconds / 86_400;
