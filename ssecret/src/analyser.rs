@@ -4,18 +4,26 @@ use std::fmt;
 use std::io::{Read};
 use json::{object};
 
-
- 
+/// Trim newline characters from the end of a string
+/// # Arguments
+/// * `input` - A string slice that may contain newline characters at the end
+/// # Returns
+/// A string slice without trailing newline characters
 fn trim_newline(input: &str) -> &str {
     input.strip_suffix("\r\n")
     .or(input.strip_suffix("\n"))
     .unwrap_or(input)
 }
 
+/// A struct to hold the analysis of a text file
 pub struct TextAnalysis {
+    /// Total word count in the file
     count: usize,
+    /// A hashmap containing each unique word and its frequency
     words: HashMap<String, u32>,
+    /// The path to the analyzed file
     file_path: String,
+    /// The contents of the file as a string
     contents: String
 }
 
@@ -26,6 +34,11 @@ impl fmt::Display for TextAnalysis {
 }
 
 impl TextAnalysis {
+    /// Create a new TextAnalysis instance by reading the contents of a file
+    /// # Arguments
+    /// * `file_path` - A string slice representing the path to the file
+    /// # Returns
+    /// A Result containing the TextAnalysis instance or an I/O error
     pub fn new(file_path : &str) -> Result<TextAnalysis, std::io::Error> {
         let mut data = TextAnalysis {
             count: 0,
@@ -40,11 +53,14 @@ impl TextAnalysis {
         Ok(data)
     }
 
+    /// Analyse the file contents to count words and their frequencies
+    /// # Returns
+    /// A Result indicating success or an I/O error
     pub fn analyse_file(&mut self) -> Result<(), std::io::Error>{
         let words : Vec<&str> = self.contents.split(' ')
         .filter(|s| !s.is_empty())
         .map(|s| trim_newline(s))
-        .collect();
+        .collect::<Vec<&str>>();
 
         self.count = words.len();
 
@@ -56,6 +72,9 @@ impl TextAnalysis {
         Ok(())
     }
 
+    /// Build a JSON representation of the analysis
+    /// # Returns
+    /// A String containing the JSON representation
     pub fn build_json(self: &TextAnalysis) -> String {
         let data = object! {
             file: self.file_path.clone(),

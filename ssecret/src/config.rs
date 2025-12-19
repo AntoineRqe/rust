@@ -17,13 +17,24 @@ pub struct Cli {
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]pub struct Config {
+#[serde(rename_all = "camelCase")]
+/// Configuration structure for the application
+pub struct Config {
+    /// The folder to scan
     pub folder_to_scan: String,
+    /// Maximum number of threads to use
     pub max_thread: usize,
+    /// Server IP address
     pub server_ip: IPAddr,
+    /// Server port number
     pub server_port: u16,
 }
 
+/// Reads the configuration from a JSON file
+/// # Arguments
+/// * `path` - A path to the configuration file
+/// # Returns
+/// A Result containing the Config instance or an error
 fn read_config_from_file<P: AsRef<Path>>(path: P) -> Result<Config, Box<dyn Error>> {
     // Open the file in read-only mode with buffer.
     let file = File::open(path)?;
@@ -37,6 +48,11 @@ fn read_config_from_file<P: AsRef<Path>>(path: P) -> Result<Config, Box<dyn Erro
 }
 
 impl Config {
+    /// Build configuration from command line arguments
+    /// # Arguments
+    /// * `cli` - The parsed command line arguments
+    /// # Returns
+    /// A Config instance
     pub fn build_config(cli : Cli) -> Config 
     {
         let mut config= Config {
@@ -60,10 +76,9 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-
     use clap::Parser;
-
     use crate::{config::Cli, Config};
+
     #[test]
     fn test_build_config() {
         let cli = Cli::parse();

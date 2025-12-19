@@ -1,1 +1,4 @@
 tests/
+target/
+*.log
+*.tmp
