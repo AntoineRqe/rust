@@ -1,7 +1,61 @@
 use std::collections::HashMap;
 use serde_json::Value;
 use once_cell::sync::Lazy;
-      
+
+const CATEGORIES_VEC: &[&str] = &[
+    "Armes / Explosifs",
+    "Autres",
+    "Banques / Services financiers / Investissement",
+    "Blogs / Forums",
+    "Chat / Communication",
+    "Contenus pirates",
+    "Discours violent / Incitation à la haine",
+    "Drogue alcool et tabac",
+    "E-Commerce / Enchères",
+    "Email",
+    "Emploi",
+    "Enseignement",
+    "Domaine technique",
+    "Fraude scolaire",
+    "Gouvernement / Administration",
+    "Hebergement web / FAI",
+    "Hébergement de fichiers",
+    "Immigration",
+    "Immobilier",
+    "Intelligence artificielle",
+    "Intérêts / Loisirs",
+    "Jeux d'argent",
+    "Moteur de recherche",
+    "Téléchargement de fichiers",
+    "Streaming / Télévision / Radio",
+    "Médias / Actualités",
+    "Itinéraires / Cartographie",
+    "Occulte / Secte",
+    "Petites annonces",
+    "Politique / Droit / Social",
+    "Pornographie / Nudité / Images à caractère sexuel",
+    "Prise de contrôle à distance",
+    "Publicité",
+    "Religion",
+    "Réseaux sociaux",
+    "Santé",
+    "Sites / Applications de rencontre",
+    "Services / Sites d'entreprises",
+    "Traduction",
+    "Téléphonie mobile",
+    "VPNs / Filtres / Proxies / Redirection",
+    "Virus / Piratage informatique",
+    "Voitures / Mécaniques",
+    "Voyage / Tourisme / Sortie"
+];
+
+pub fn check_category_validity(category: &str) -> Option<&'static str> {
+    match CATEGORIES_VEC.iter().find(|&&cat| cat == category) {
+        Some(&cat) => Some(cat),
+        None => None,
+    }
+}
+
 pub const CATEGORIES: &str = r#"
     [
         "Armes / Explosifs",

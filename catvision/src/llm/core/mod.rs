@@ -3,10 +3,9 @@ use std::error::Error;
 use async_scoped::TokioScope;
 use serde_json::Value;
 use tokio::runtime::{Runtime};
-use std::sync::atomic::{Ordering, AtomicUsize};
-use atomic_float::AtomicF64;
+use std::sync::atomic::{Ordering};
 
-use crate::category::CATEGORIES;
+use crate::category::{CATEGORIES, check_category_validity};
 use crate::ctx::Ctx;
 
 use crate::llm::providers::gemini::generating::{async_gemini_fetch_chat_completion, GeminiResult, async_gemini_handle_cached_content};
@@ -17,9 +16,9 @@ enum LLMResult {
 }
 
 pub fn parse_llm_output(
-    domains: &[String],
+    domains: &[&str],
     content: &str,
-) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+) -> Result<HashMap<String, Vec<&'static str>>, Box<dyn std::error::Error>> {
     // Avoid unnecessary trim/allocation
     let content = content.trim_start_matches(|c: char| c.is_whitespace())
                          .trim_end_matches(|c: char| c.is_whitespace());
@@ -29,10 +28,10 @@ pub fn parse_llm_output(
     let obj = json.as_object().ok_or("Expected top-level JSON object")?;
 
     // Pre allocate the result map for better performance
-    let mut result: HashMap<String, Vec<String>> = HashMap::with_capacity(domains.len());
+    let mut result: HashMap<String, Vec<&'static str>> = HashMap::with_capacity(domains.len());
 
     for domain in domains {
-        let value = obj.get(domain)
+        let value = obj.get(*domain)
             .ok_or(format!("Domain '{}' not found in JSON", domain))?;
 
         let arr = value.as_array()
@@ -52,13 +51,23 @@ pub fn parse_llm_output(
             return Err(format!("No valid string categories for domain '{}'", domain).into());
         }
 
-        result.insert(domain.to_string(), categories);
+        let mut categories_ref: Vec<&'static str> = Vec::with_capacity(categories.len());
+
+        for category in &categories {
+            if let Some(valid_category) = check_category_validity(category) {
+                categories_ref.push(valid_category);
+            } else {
+                return Err(format!("Invalid category '{}' for domain '{}'", category, domain).into());
+            }
+        }
+
+        result.insert(domain.to_string(), categories_ref);
     }
 
     Ok(result)
 }
 
-fn write_domain_in_garbage_file(domains: &[String], id: usize) {
+fn write_domain_in_garbage_file(domains: &[&str], id: usize) {
     use std::fs::OpenOptions;
     use std::io::Write;
 
@@ -78,19 +87,13 @@ fn write_domain_in_garbage_file(domains: &[String], id: usize) {
 }
 
 async fn async_llm_classify_domains(
-    domains: &[String],
+    domains: &[&str],
     ctx: &Ctx,
     cache_name: &Option<String>,
     id: usize
 ) -> Result<LLMResult, Box<dyn Error + Send + Sync>> {
 
-    let mut gemini_result = GeminiResult {
-        failed: AtomicUsize::new(0),
-        retried: AtomicUsize::new(0),
-        cost: AtomicF64::new(0.0),
-        cache_saving: AtomicF64::new(0.0),
-        categories: HashMap::with_capacity(domains.len()),
-    };
+    let mut gemini_result = GeminiResult::new();
 
     let mut retries_chunk = 0;
     
@@ -118,6 +121,7 @@ async fn async_llm_classify_domains(
     // println!("Thread {} Final Gemini Result: {}", id, gemini_result);
 
     Ok(LLMResult::Gemini(GeminiResult {
+        processed: gemini_result.processed,
         retried: gemini_result.retried,
         failed: gemini_result.failed,
         cost: gemini_result.cost,
@@ -128,7 +132,7 @@ async fn async_llm_classify_domains(
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
-async fn llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, DynError> {
+async fn llm_runtime(domains: &[&str], ctx: &Ctx) -> Result<GeminiResult, DynError> {
 
     let mut chunks = domains.chunks(ctx.config.chunk_size);
     let mut processed_domains = 0;
@@ -222,7 +226,7 @@ async fn llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, DynE
 
 }
 
-pub fn sync_llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, DynError> {
+pub fn sync_llm_runtime(domains: &[&str], ctx: &Ctx) -> Result<GeminiResult, DynError> {
     // Create a new Tokio runtime
     let rt = Runtime::new().expect("Failed to create Tokio runtime");
 
@@ -230,7 +234,7 @@ pub fn sync_llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, D
     rt.block_on(llm_runtime(domains, ctx))
 }
 
-pub fn generate_full_prompt(domains: &[String], nb_propositions: usize) -> String {
+pub fn generate_full_prompt(domains: &[&str], nb_propositions: usize) -> String {
     let domains_str = domains.join("; ");
     let prompt = format!("
         Tu es un expert en catégorisation de sites web et domaines internet.
@@ -576,7 +580,7 @@ PAS de citations ou mise en forme
     prompt
 }
 
-pub fn generate_prompt_with_cached_content(domains: &[String]) -> String {
+pub fn generate_prompt_with_cached_content(domains: &[&str]) -> String {
     let domains_str = domains.join("; ");
 
 let prompt = format!(

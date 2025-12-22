@@ -7,7 +7,7 @@ use atomic_float::AtomicF64;
 #[derive(Debug, Clone)]
 /// Statistics for the CatVision application
 pub struct Statistics {
-    /// Number of domains processed
+    /// Number of domains
     domaine_count: usize,
     /// Number of Olfeo matches found
     olfeo_match_count : usize,
@@ -21,6 +21,8 @@ pub struct Statistics {
     prioritized_done_success: usize,
     /// Total cost incurred
     pub cost : f64,
+    /// Number of domains processed
+    pub processed : usize,
     /// Number of retries performed
     retried : usize,
     /// Number of failed requests
@@ -53,6 +55,7 @@ impl Statistics {
             prioritized_match_count: 0,
             prioritized_done_success: 0,
             cost: 0.0,
+            processed: 0,
             retried: 0,
             failed: 0,
             chunk_size: 0,
@@ -129,12 +132,14 @@ impl Statistics {
     }
 
     pub fn update_llm_statistics(&mut self,
+        processed: AtomicUsize,
         cost: AtomicF64,
         retried: AtomicUsize,
         failed: AtomicUsize,
         chunk_size: usize,
         thinking_budget: i64
     ){
+        self.processed += processed.load(Ordering::Relaxed);
         self.cost += cost.load(Ordering::Relaxed);
         self.retried += retried.load(Ordering::Relaxed);
         self.failed += failed.load(Ordering::Relaxed);

@@ -190,7 +190,7 @@ pub fn generate_html_table(
                         .categories_llm
                         .as_ref()
                         .and_then(|v| v.get(level - 1))
-                        .map(|s| s.as_str())
+                        .map(|s| *s)
                         .unwrap_or("");
                     render_cell(&mut html, cell);
                 }

@@ -3,7 +3,8 @@ use indexmap::IndexMap;
 
 use crate::statistics::Statistics;
 use clap::Parser;
-use std::path::PathBuf;
+use std::{path::PathBuf};
+use std::collections::HashMap;
 
 mod category;
 pub mod my_traits;
@@ -20,18 +21,18 @@ use utils::seconds_to_pretty;
 #[derive(Debug, Clone)]
 /// Structure to hold various categories data for a domain
 pub struct CatVisionData {
-    pub category_olfeo: Option<String>,
-    pub categories_manual: Option<String>,
-    pub categories_llm: Option<Vec<String>>,
+    pub category_olfeo: Option<&'static str>,
+    pub categories_manual: Option<&'static str>,
+    pub categories_llm: Option<Vec<&'static str>>,
     pub appsite_name_by_olfeo: Option<String>,
     pub appsite_name_by_gemini: Option<String>,
 }
 
 impl CatVisionData {
     pub fn new(
-        category_olfeo: Option<String>,
-        categories_manual: Option<String>,
-        categories_llm: Option<Vec<String>>,
+        category_olfeo: Option<&'static str>,
+        categories_manual: Option<&'static str>,
+        categories_llm: Option<Vec<&'static str>>,
         appsite_name_by_olfeo: Option<String>,
         appsite_name_by_gemini: Option<String>) -> Self {
         
@@ -58,8 +59,8 @@ impl CatVisionData {
 /// * An IndexMap containing the aggregated data
 ///
 fn aggregate_data(
-    original_data: &indexmap::IndexMap<String, CatVisionData>,
-    llm_data: &std::collections::HashMap<String, Vec<String>>,
+    original_data: indexmap::IndexMap<String, CatVisionData>,
+    llm_data: HashMap<String, Vec<&'static str>>,
     stats: &mut Statistics,
     nb_propositions: usize,
 ) -> indexmap::IndexMap<String, CatVisionData> {
@@ -70,16 +71,16 @@ fn aggregate_data(
 
         // Start with original categories
         let mut tmp_categories: CatVisionData = CatVisionData::new(
-            original_categories.category_olfeo.clone(),
-            original_categories.categories_manual.clone(),
+            original_categories.category_olfeo,
+            original_categories.categories_manual,
             None,
-            original_categories.appsite_name_by_olfeo.clone(),
-            original_categories.appsite_name_by_gemini.clone(),
+            original_categories.appsite_name_by_olfeo,
+            original_categories.appsite_name_by_gemini,
         );
 
-        if let Some(categories) = llm_data.get(domain) {
+        if let Some(categories) = llm_data.get(domain.as_str()) {
             // Process LLM categories
-            let mut llm_categories = vec![];
+            let mut llm_categories = Vec::with_capacity(nb_propositions);
 
             let expected_category = match &original_categories.categories_manual {
                 Some(cat) => cat,
@@ -92,9 +93,9 @@ fn aggregate_data(
                         if expected_category.contains(cat) {
                             stats.increment_llm_level_match_count(level);
                         }
-                        cat.clone()
+                        *cat
                     }
-                    None => "".to_string(),
+                    None => "",
                 };
 
                 llm_categories.push(cat_to_push);
@@ -144,8 +145,8 @@ fn main() -> io::Result<()> {
     // Create domais name list from input file
     let domains_name = domains
         .keys()
-        .map(|s| s.to_string())
-        .collect::<Vec<String>>();
+        .map(|s| s.as_str())
+        .collect::<Vec<&str>>();
  
     // Generate prompt and call LLM based on caching configuration for Gemini
     ctx.prompt = if ctx.config.use_gemini_explicit_caching {
@@ -164,17 +165,24 @@ fn main() -> io::Result<()> {
     };
 
     // Update statistics based on Gemini results
-    ctx.stats.update_llm_statistics(llm_results.cost, llm_results.retried, llm_results.failed, ctx.config.chunk_size, ctx.config.thinking_budget);
+    ctx.stats.update_llm_statistics(
+        llm_results.processed,
+        llm_results.cost,
+        llm_results.retried,
+        llm_results.failed,
+        ctx.config.chunk_size,
+        ctx.config.thinking_budget
+    );
 
     // Aggregate original data with LLM results
-    let aggregated = aggregate_data(&domains, &llm_results.categories, &mut ctx.stats, ctx.config.max_domain_propositions);
+    let aggregated = aggregate_data(*domains, llm_results.categories, &mut ctx.stats, ctx.config.max_domain_propositions);
 
     ctx.stats.elapsed_time = start_time.elapsed();
 
     println!("Classification of {} domains finished in {} for {}€",
-    llm_results.categories.len(),
-    seconds_to_pretty(ctx.stats.elapsed_time.as_secs()).unwrap(),
-    ctx.stats.cost
+        ctx.stats.processed,
+        seconds_to_pretty(ctx.stats.elapsed_time.as_secs()).unwrap(),
+        ctx.stats.cost
     );
 
     // Write categories to output files (HTML, CSV, JSON...)

@@ -13,16 +13,18 @@ use atomic_float::AtomicF64;
 
 #[derive(Debug)]
 pub struct GeminiResult {
+    pub processed: AtomicUsize,
     pub failed: AtomicUsize,
     pub retried: AtomicUsize,
     pub cost: AtomicF64,
     pub cache_saving: AtomicF64,
-    pub categories: HashMap<String, Vec<String>>,
+    pub categories: HashMap<String, Vec<&'static str>>,
 }
 
 impl GeminiResult {
     pub fn new() -> Self {
         Self {
+            processed: AtomicUsize::new(0),
             failed: AtomicUsize::new(0),
             retried: AtomicUsize::new(0),
             cost: AtomicF64::new(0.0),
@@ -32,6 +34,7 @@ impl GeminiResult {
     }
 
     pub fn merge(&mut self, other: &GeminiResult) {
+        self.processed.fetch_add(other.processed.load(Ordering::Relaxed), Ordering::Relaxed);
         self.failed.fetch_add(other.failed.load(Ordering::Relaxed), Ordering::Relaxed);
         self.retried.fetch_add(other.retried.load(Ordering::Relaxed), Ordering::Relaxed);
         self.cost.fetch_add(other.cost.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -48,6 +51,7 @@ impl GeminiResult {
 impl Clone for GeminiResult {
     fn clone(&self) -> Self {
         Self {
+            processed: AtomicUsize::new(self.processed.load(Ordering::Relaxed)),
             failed: AtomicUsize::new(self.failed.load(Ordering::Relaxed)),
             retried: AtomicUsize::new(self.retried.load(Ordering::Relaxed)),
             cost: AtomicF64::new(self.cost.load(Ordering::Release)),
@@ -60,6 +64,7 @@ impl Clone for GeminiResult {
 impl Default for GeminiResult {
     fn default() -> Self {
         Self {
+            processed: AtomicUsize::new(0),
             failed: AtomicUsize::new(0),
             retried: AtomicUsize::new(0),
             cost: AtomicF64::new(0.0),
@@ -73,7 +78,8 @@ impl std::fmt::Display for GeminiResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "GeminiResult = failed: {}, retried: {}, cost: {}, cache_saving: {}",
+            "GeminiResult = processed: {}, failed: {}, retried: {}, cost: {}, cache_saving: {}",
+            self.processed.load(Ordering::Relaxed),
             self.failed.load(Ordering::Relaxed),
             self.retried.load(Ordering::Relaxed),
             self.cost.load(Ordering::Relaxed),
@@ -158,16 +164,16 @@ pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut AtomicF64)
 /// # Returns
 /// * `Result<(), Box<dyn Error>>` - Ok(()) if successful, or an error
 pub async fn async_gemini_fetch_chat_completion(
-    domains: &[String],
+    domains: &[&str],
     ctx: &Ctx,
     cache_name : &Option<String>,
     my_result: &mut GeminiResult
 ) -> Result<(), Box<dyn Error>> {
 
     let user_prompt = if cache_name.is_some() {
-        generate_prompt_with_cached_content(&domains)
+        generate_prompt_with_cached_content(domains)
     } else {
-        generate_full_prompt(&domains, ctx.config.max_domain_propositions)  
+        generate_full_prompt(domains, ctx.config.max_domain_propositions)  
     };
 
     let generating_api_call = GeminiApiCall::Generate{
@@ -181,7 +187,7 @@ pub async fn async_gemini_fetch_chat_completion(
 
     let result = generating_api_call.process_request().await?;
 
-    let cost = billing::CostResult::new(result.usage_metadata.clone()).compute_cost();
+    let cost = billing::CostResult::new(&result.usage_metadata).compute_cost();
     my_result.cost.fetch_add(cost.eur, Ordering::Relaxed);
     my_result.cache_saving.fetch_add(cost.cache_saving, Ordering::Relaxed);
 
@@ -194,6 +200,7 @@ pub async fn async_gemini_fetch_chat_completion(
                 match parse_llm_output(domains, content.text.as_deref().unwrap_or("")) {
                     Ok(categories) => {
                         my_result.categories.extend(categories);
+                        my_result.processed.fetch_add(domains.len(), Ordering::Relaxed);
                         Ok(())
                     },
                     Err(e) => {

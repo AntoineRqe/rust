@@ -1,5 +1,5 @@
 use std::{collections::HashMap, fs::File, path::PathBuf};
-use crate::{my_traits::{Infos, Input, Output}, statistics::Statistics, utils::trim_domain_by_llm};
+use crate::{category::check_category_validity, my_traits::{Infos, Input, Output}, statistics::Statistics, utils::trim_domain_by_llm};
 use csv::{Reader, StringRecord};
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -88,21 +88,21 @@ impl Input for MyCSVInput {
             if let Some(idx) = self.headers.get("category_by_olfeo") {
                 let olfeo_category = record.get(*idx).unwrap().trim();
                 if !olfeo_category.is_empty() {
-                    new_data.category_olfeo = main_domain_for(olfeo_category).map(|s| s.to_string());
+                    new_data.category_olfeo = main_domain_for(olfeo_category);
                 }
             }
 
             if let Some(idx) = self.headers.get("categories_manual") {
                 let expected_category = record.get(*idx).unwrap().trim();
                 if !expected_category.is_empty() {
-                    new_data.categories_manual = Some(expected_category.to_string());
+                    new_data.categories_manual = check_category_validity(expected_category);
                 }
             }
 
             if let Some(idx) = self.headers.get("old_category") {
                 let olfeo_cat = record.get(*idx).unwrap().trim();
                 if !olfeo_cat.is_empty() {
-                    new_data.category_olfeo = Some(olfeo_cat.to_string());
+                    new_data.category_olfeo = check_category_validity(olfeo_cat);
                     if let Some(ref expected_category) = new_data.categories_manual {
                         if expected_category.contains(olfeo_cat) {
                             stats.increment_olfeo_match_count();
@@ -223,7 +223,7 @@ impl Output for MyCSVOutput {
                         if let Ok(level) = level_str.parse::<usize>() {
                             let field = categories.categories_llm.as_ref()
                                 .and_then(|llm| llm.get(level - 1))
-                                .map(|s| s.as_str())
+                                .map(|s| *s)
                                 .unwrap_or("");
                             new_row.push_field(field);
                         } else {

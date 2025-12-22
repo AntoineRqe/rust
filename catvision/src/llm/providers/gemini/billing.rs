@@ -46,11 +46,11 @@ impl Display for CacheCostResult {
 }
 
 impl CostResult {
-    pub fn new(usage: UsageMetadata) -> Self {
+    pub fn new(usage: &UsageMetadata) -> Self {
         CostResult {
             usd: 0.0,
             eur: 0.0,
-            usage: usage,
+            usage: usage.clone(),
             eur_rate: 0.92,
             cache_saving: 0.0,
         }
