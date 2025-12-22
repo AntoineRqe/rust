@@ -30,6 +30,19 @@ impl GeminiResult {
             categories: HashMap::with_capacity(4000000),
         }
     }
+
+    pub fn merge(&mut self, other: &GeminiResult) {
+        self.failed.fetch_add(other.failed.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.retried.fetch_add(other.retried.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.cost.fetch_add(other.cost.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.cache_saving.fetch_add(other.cache_saving.load(Ordering::Relaxed), Ordering::Relaxed);
+
+        for (domain, categories) in &other.categories {
+            self.categories.entry(domain.clone())
+                .or_insert_with(Vec::new)
+                .extend(categories.iter().cloned());
+        }
+    }
 }
 
 impl Clone for GeminiResult {
@@ -147,7 +160,7 @@ pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut AtomicF64)
 pub async fn async_gemini_fetch_chat_completion(
     domains: &[String],
     ctx: &Ctx,
-    cache_name : Option<String>,
+    cache_name : &Option<String>,
     my_result: &mut GeminiResult
 ) -> Result<(), Box<dyn Error>> {
 
@@ -160,7 +173,7 @@ pub async fn async_gemini_fetch_chat_completion(
     let generating_api_call = GeminiApiCall::Generate{
         model: ctx.config.model[0].clone(),
         prompt: user_prompt,
-        cache_name,
+        cache_name: cache_name.clone(),
         use_url_context: ctx.config.use_gemini_url_context,
         use_google_search: ctx.config.use_gemini_google_search,
         thinking_budget: ctx.config.thinking_budget,

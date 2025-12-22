@@ -1,7 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap};
 use std::error::Error;
+use async_scoped::TokioScope;
 use serde_json::Value;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Runtime};
 use std::sync::atomic::{Ordering, AtomicUsize};
 use atomic_float::AtomicF64;
 
@@ -76,7 +77,13 @@ fn write_domain_in_garbage_file(domains: &[String], id: usize) {
     }
 }
 
-async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_name: Arc<Option<String>>, id: usize) -> Result<LLMResult, Box<dyn Error + Send + Sync>> {
+async fn async_llm_classify_domains(
+    domains: &[String],
+    ctx: &Ctx,
+    cache_name: &Option<String>,
+    id: usize
+) -> Result<LLMResult, Box<dyn Error + Send + Sync>> {
+
     let mut gemini_result = GeminiResult {
         failed: AtomicUsize::new(0),
         retried: AtomicUsize::new(0),
@@ -95,7 +102,7 @@ async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_nam
             return Err("Max retries reached for LLM request".into());
         }
 
-        match async_gemini_fetch_chat_completion(domains, &ctx, (*cache_name).clone(), &mut gemini_result).await {
+        match async_gemini_fetch_chat_completion(domains, &ctx, cache_name, &mut gemini_result).await {
             Ok(()) => {
                 println!("Thread {} Successfully processed chunk starting with domain: {}", id, domains[0]);
                 break;
@@ -121,21 +128,19 @@ async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_nam
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
-async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, DynError> {
+async fn llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, DynError> {
 
     let mut chunks = domains.chunks(ctx.config.chunk_size);
     let mut processed_domains = 0;
     let total_domains = domains.len();
 
-    // Aggregate results
     let mut final_gemini_result = GeminiResult::new();
 
-    while let Some(_) = chunks.clone().next() { // loop until no more chunks
-        let ctx = Arc::clone(&ctx);
-        let mut handles = Vec::with_capacity(ctx.as_ref().config.max_threads);
-
-        let cache_name = match async_gemini_handle_cached_content(&ctx, &mut final_gemini_result.cost).await {
-            Ok(cache_name) => Arc::new(cache_name),
+    // We want to make sure all chunks are processed
+    while chunks.len() > 0 {
+        // Handle cached content creation or update for the next batch of chunks
+        let cache_name = match async_gemini_handle_cached_content(ctx, &mut final_gemini_result.cost).await {
+            Ok(cache_name) => cache_name,
             Err(e) => {
                 eprintln!("Error handling cached content: {}", e);
                 while let Some(chunk) = chunks.next() {
@@ -144,74 +149,70 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
                         ctx.config.model[0], processed_domains - chunk.len(), processed_domains, total_domains
                     );
                     final_gemini_result.failed.fetch_add(chunk.len(), Ordering::Relaxed);
-                    write_domain_in_garbage_file(chunk, 666);
+                    write_domain_in_garbage_file(chunk, 666); // Using 666 as an arbitrary ID for skipped chunks
                 }
                 break;
             }
         };
     
-        for id in 0..ctx.as_ref().config.max_threads {
-            if let Some(chunk) = chunks.next() {
-                let ctx = Arc::clone(&ctx);
-                let domains_vec: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
-                let cache_name = Arc::clone(&cache_name);
+        let (_, results) = TokioScope::scope_and_block(|scope| {
+            for id in 0..ctx.config.max_threads {
+                if let Some(chunk) = chunks.next() {
 
-                processed_domains += domains_vec.len();
-            
-                tracing::info!(
-                    "Starting LLM runtime on {} with chunk [{}-{}]/{}",
-                    ctx.config.model[0],
-                    processed_domains - domains_vec.len(),
-                    processed_domains,
-                    total_domains
-                );
+                    processed_domains += chunk.len();
+                    println!("Starting LLM runtime on {} with chunk size [{}-{}]/{}",
+                        ctx.config.model[0],
+                        processed_domains - chunk.len(),
+                        processed_domains,
+                        total_domains
+                    );
 
-                let handle = tokio::spawn( {        
-                    async move {
-                        async_llm_classify_domains(&domains_vec, ctx, cache_name, id).await
-                    }
-                });
-        
-                handles.push(handle);
-            } else {
-                break;
-            }
-        }
+                    let cache_name = &cache_name;
 
-        // Wait for all tasks to complete
-        let futures_results: Vec<_> = futures::future::join_all(handles).await;
-
-        for (i, result) in futures_results.into_iter().enumerate() {
-            match result {
-                Err(join_err) => {
-                    eprintln!("Task {i} PANICKED: {join_err}");
+                    scope.spawn(async move {
+                        match async_llm_classify_domains(chunk, &ctx, cache_name, id).await {
+                            Ok(LLMResult::Gemini(gemini_result)) => {
+                                Ok(gemini_result)
+                            },
+                            Err(e) => {
+                                eprintln!("Thread {} LLM classification failed: {}", id, e);
+                                Err(e)
+                            }
+                        } 
+                    });
+                } else {
+                    break;
                 }
-                Ok(task_result) => match task_result {
-                    Ok(LLMResult::Gemini(gemini_result)) => {
-                        final_gemini_result.failed.fetch_add(gemini_result.failed.load(Ordering::Relaxed), Ordering::Relaxed);
-                        final_gemini_result.retried.fetch_add(gemini_result.retried.load(Ordering::Relaxed), Ordering::Relaxed);
-                        final_gemini_result.cost.fetch_add(gemini_result.cost.load(Ordering::Relaxed), Ordering::Relaxed);
-                        final_gemini_result.cache_saving.fetch_add(gemini_result.cache_saving.load(Ordering::Relaxed), Ordering::Relaxed);
-                        final_gemini_result.categories.extend(gemini_result.categories);
-                    },
-                    Err(e) => {
-                        eprintln!("Error in LLM classification task: {}", e);
-                    }
-                },
+            }
+        });
+
+        // Process the results
+        for result in results {
+            match result {
+                Ok(Ok(gemini_result)) => {
+                    // Successfully got a result
+                    final_gemini_result.merge(&gemini_result); // or whatever you want to do
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Task returned error: {}", e);
+                }
+                Err(join_error) => {
+                    eprintln!("Task panicked: {:?}", join_error);
+                }
             }
         }
 
-        tracing::info!(
+        println!(
             "Completed LLM runtime on {} with chunk size [{}-{}]/{}",
             ctx.config.model[0],
-            processed_domains - ctx.config.chunk_size * ctx.config.max_threads,
+            processed_domains.checked_sub(ctx.config.chunk_size * ctx.config.max_threads).unwrap_or(0),
             processed_domains,
             total_domains
         );
 
     }
 
-    tracing::info!(
+    println!(
         "LLM runtime completed on {} for total domains: {}",
         ctx.config.model[0],
         total_domains
@@ -224,8 +225,6 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
 pub fn sync_llm_runtime(domains: &[String], ctx: &Ctx) -> Result<GeminiResult, DynError> {
     // Create a new Tokio runtime
     let rt = Runtime::new().expect("Failed to create Tokio runtime");
-
-    let ctx = std::sync::Arc::new(ctx.clone());
 
     // Block on the async function
     rt.block_on(llm_runtime(domains, ctx))
