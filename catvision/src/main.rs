@@ -171,7 +171,11 @@ fn main() -> io::Result<()> {
 
     ctx.stats.elapsed_time = start_time.elapsed();
 
-    println!("Classification of {} domains finished in {} for {}€", llm_results.categories.len(), seconds_to_pretty(ctx.stats.elapsed_time.as_secs()).unwrap(), llm_results.cost);
+    println!("Classification of {} domains finished in {} for {}€",
+    llm_results.categories.len(),
+    seconds_to_pretty(ctx.stats.elapsed_time.as_secs()).unwrap(),
+    ctx.stats.cost
+    );
 
     // Write categories to output files (HTML, CSV, JSON...)
     ctx.write(&aggregated).expect("Failed to write output data");

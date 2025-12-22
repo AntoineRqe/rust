@@ -1,5 +1,7 @@
-use std::fmt::Display;
+use std::{fmt::Display, sync::atomic::{AtomicUsize, Ordering}};
 use crate::utils::seconds_to_pretty;
+use atomic_float::AtomicF64;
+
 
 
 #[derive(Debug, Clone)]
@@ -18,7 +20,7 @@ pub struct Statistics {
     /// Number of successful prioritized matches
     prioritized_done_success: usize,
     /// Total cost incurred
-    cost : f64,
+    pub cost : f64,
     /// Number of retries performed
     retried : usize,
     /// Number of failed requests
@@ -126,10 +128,16 @@ impl Statistics {
         }
     }
 
-    pub fn update_llm_statistics(&mut self, cost: f64, retried: usize, failed: usize, chunk_size: usize, thinking_budget: i64) {
-        self.cost += cost;
-        self.retried += retried;
-        self.failed += failed;
+    pub fn update_llm_statistics(&mut self,
+        cost: AtomicF64,
+        retried: AtomicUsize,
+        failed: AtomicUsize,
+        chunk_size: usize,
+        thinking_budget: i64
+    ){
+        self.cost += cost.load(Ordering::Relaxed);
+        self.retried += retried.load(Ordering::Relaxed);
+        self.failed += failed.load(Ordering::Relaxed);
         self.chunk_size = chunk_size;
         self.thinking_budget = thinking_budget;
     }

@@ -96,7 +96,7 @@ impl GeminiApiCall {
             );
         }
 
-        /// Construct the Gemini API request
+        // Construct the Gemini API request
         let request = GeminiRequest {
             contents: vec![
                 Content {

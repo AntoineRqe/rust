@@ -2,6 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 use std::error::Error;
 use serde_json::Value;
 use tokio::runtime::Runtime;
+use std::sync::atomic::{Ordering, AtomicUsize};
+use atomic_float::AtomicF64;
 
 use crate::category::CATEGORIES;
 use crate::ctx::Ctx;
@@ -76,11 +78,11 @@ fn write_domain_in_garbage_file(domains: &[String], id: usize) {
 
 async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_name: Arc<Option<String>>, id: usize) -> Result<LLMResult, Box<dyn Error + Send + Sync>> {
     let mut gemini_result = GeminiResult {
-        failed: 0,
-        retried: 0,
-        cost: 0.0,
-        cache_saving: 0.0,
-        categories: HashMap::new(),
+        failed: AtomicUsize::new(0),
+        retried: AtomicUsize::new(0),
+        cost: AtomicF64::new(0.0),
+        cache_saving: AtomicF64::new(0.0),
+        categories: HashMap::with_capacity(domains.len()),
     };
 
     let mut retries_chunk = 0;
@@ -88,7 +90,7 @@ async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_nam
     loop {
         if retries_chunk == 3 {
             eprintln!("Thread {} Failed to get LLM response after 3 attempts for chunk starting with domain: {}", id, domains[0]);
-            gemini_result.failed += domains.len();
+            gemini_result.failed.fetch_add(domains.len(), Ordering::Relaxed);
             write_domain_in_garbage_file(domains, id);
             return Err("Max retries reached for LLM request".into());
         }
@@ -101,7 +103,7 @@ async fn async_llm_classify_domains(domains: &[String], ctx: Arc<Ctx>, cache_nam
             Err(e) => {
                 eprintln!("Thread {} Error during LLM request (attempt {}): {}", id, retries_chunk + 1, e);
                 retries_chunk += 1;
-                gemini_result.retried += 1;
+                gemini_result.retried.fetch_add(1, Ordering::Relaxed);
             }
         };
     }
@@ -126,13 +128,7 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
     let total_domains = domains.len();
 
     // Aggregate results
-    let mut final_gemini_result = GeminiResult {
-        failed: 0,
-        retried: 0,
-        cost: 0.0,
-        cache_saving: 0.0,
-        categories: HashMap::with_capacity(4000000),
-    };
+    let mut final_gemini_result = GeminiResult::new();
 
     while let Some(_) = chunks.clone().next() { // loop until no more chunks
         let ctx = Arc::clone(&ctx);
@@ -147,7 +143,7 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
                     println!("Skipping LLM runtime on {} with chunk size [{}-{}]/{} due to caching error",
                         ctx.config.model[0], processed_domains - chunk.len(), processed_domains, total_domains
                     );
-                    final_gemini_result.failed += chunk.len();
+                    final_gemini_result.failed.fetch_add(chunk.len(), Ordering::Relaxed);
                     write_domain_in_garbage_file(chunk, 666);
                 }
                 break;
@@ -192,10 +188,10 @@ async fn llm_runtime(domains: &[String], ctx: Arc<Ctx>) -> Result<GeminiResult, 
                 }
                 Ok(task_result) => match task_result {
                     Ok(LLMResult::Gemini(gemini_result)) => {
-                        final_gemini_result.failed += gemini_result.failed;
-                        final_gemini_result.retried += gemini_result.retried;
-                        final_gemini_result.cost += gemini_result.cost;
-                        final_gemini_result.cache_saving += gemini_result.cache_saving;
+                        final_gemini_result.failed.fetch_add(gemini_result.failed.load(Ordering::Relaxed), Ordering::Relaxed);
+                        final_gemini_result.retried.fetch_add(gemini_result.retried.load(Ordering::Relaxed), Ordering::Relaxed);
+                        final_gemini_result.cost.fetch_add(gemini_result.cost.load(Ordering::Relaxed), Ordering::Relaxed);
+                        final_gemini_result.cache_saving.fetch_add(gemini_result.cache_saving.load(Ordering::Relaxed), Ordering::Relaxed);
                         final_gemini_result.categories.extend(gemini_result.categories);
                     },
                     Err(e) => {

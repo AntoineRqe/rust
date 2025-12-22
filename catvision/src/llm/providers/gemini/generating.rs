@@ -7,23 +7,50 @@ use crate::llm::core::{generate_prompt_with_cached_content, generate_full_prompt
 
 use crate::ctx::Ctx;
 use crate::llm::providers::gemini::network::{GeminiApiCall};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use atomic_float::AtomicF64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GeminiResult {
-    pub failed: usize,
-    pub retried: usize,
-    pub cost: f64,
-    pub cache_saving: f64,
+    pub failed: AtomicUsize,
+    pub retried: AtomicUsize,
+    pub cost: AtomicF64,
+    pub cache_saving: AtomicF64,
     pub categories: HashMap<String, Vec<String>>,
+}
+
+impl GeminiResult {
+    pub fn new() -> Self {
+        Self {
+            failed: AtomicUsize::new(0),
+            retried: AtomicUsize::new(0),
+            cost: AtomicF64::new(0.0),
+            cache_saving: AtomicF64::new(0.0),
+            categories: HashMap::with_capacity(4000000),
+        }
+    }
+}
+
+impl Clone for GeminiResult {
+    fn clone(&self) -> Self {
+        Self {
+            failed: AtomicUsize::new(self.failed.load(Ordering::Relaxed)),
+            retried: AtomicUsize::new(self.retried.load(Ordering::Relaxed)),
+            cost: AtomicF64::new(self.cost.load(Ordering::Release)),
+            cache_saving: AtomicF64::new(self.cache_saving.load(Ordering::Release)),
+            categories: self.categories.clone(),
+        }
+    }
 }
 
 impl Default for GeminiResult {
     fn default() -> Self {
         Self {
-            failed: 0,
-            retried: 0,
-            cost: 0.0,
-            cache_saving: 0.0,
+            failed: AtomicUsize::new(0),
+            retried: AtomicUsize::new(0),
+            cost: AtomicF64::new(0.0),
+            cache_saving: AtomicF64::new(0.0),
             categories: HashMap::with_capacity(4000000),
         }
     }
@@ -34,7 +61,10 @@ impl std::fmt::Display for GeminiResult {
         writeln!(
             f,
             "GeminiResult = failed: {}, retried: {}, cost: {}, cache_saving: {}",
-            self.failed, self.retried, self.cost, self.cache_saving
+            self.failed.load(Ordering::Relaxed),
+            self.retried.load(Ordering::Relaxed),
+            self.cost.load(Ordering::Relaxed),
+            self.cache_saving.load(Ordering::Relaxed)
         )?;
         for (category, items) in &self.categories {
             writeln!(f, "\nCategory: {}", category)?;
@@ -73,7 +103,7 @@ fn check_cache_expire_time(expire_time_str: &str, minutes: i64) -> Result<bool, 
 /// * `cost` - Mutable reference to accumulate cost
 /// # Returns
 /// * `Result<Option<String>, Box<dyn Error + Send + Sync>>` - Ok(Some(cache_name)) if cached content is used or created, Ok(None) if not using caching, or an error
-pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut f64) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut AtomicF64) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
     if ctx.config.use_gemini_explicit_caching {
         let cache_contents = caching::list_cached_contents().await?;
         let cache_content_name = match cache_contents.cached_contents {
@@ -83,7 +113,7 @@ pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut f64) -> Re
                     if check_cache_expire_time(expire_time, 1)? {
                         let cache_content = caching::async_gemini_update_cached_content_ttl(&cache.name, ctx.config.use_gemini_custom_cache_duration.as_ref().unwrap().clone()).await?;
                         let cache_cost = billing::CacheCostResult::new(cache_content.usage.unwrap()).compute_cost();
-                        *cost += cache_cost.eur;
+                        cost.fetch_add(cache_cost.eur, Ordering::Relaxed);
                         println!("Updated cached contents with name : {}.", cache_content.name);
                         return Ok(Some(cache_content.name));
                     } else {
@@ -95,7 +125,7 @@ pub async fn async_gemini_handle_cached_content(ctx: &Ctx, cost: &mut f64) -> Re
             None => {
                 let cache_content = caching::async_gemini_create_cached_content(&ctx.config.model[0], ctx.config.max_domain_propositions, ctx.config.use_gemini_custom_cache_duration.clone()).await?;
                 let cache_cost = billing::CacheCostResult::new(cache_content.usage.unwrap()).compute_cost();
-                *cost += cache_cost.eur;
+                cost.fetch_add(cache_cost.eur, Ordering::Relaxed);
                 println!("Created cached contents with name : {}.", cache_content.name);
                 cache_content.name.clone()
             }
@@ -139,8 +169,8 @@ pub async fn async_gemini_fetch_chat_completion(
     let result = generating_api_call.process_request().await?;
 
     let cost = billing::CostResult::new(result.usage_metadata.clone()).compute_cost();
-    my_result.cost += cost.eur;
-    my_result.cache_saving += cost.cache_saving;
+    my_result.cost.fetch_add(cost.eur, Ordering::Relaxed);
+    my_result.cache_saving.fetch_add(cost.cache_saving, Ordering::Relaxed);
 
     if let Some(candidate) = result.candidates.first() {
         match candidate.content.parts.first() {
