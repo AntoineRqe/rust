@@ -12,22 +12,23 @@ struct SpinLock<T> {
     data: UnsafeCell<T>
 }
 
+// As guard is a reference to SpinLock, its lifetime is tied to SpinLock
 pub struct Guard<'a, T> {
-    lock: &'a SpinLock<T>
+    lock: &'a SpinLock<T> // Need a lifetime parameter to tie Guard's lifetime to SpinLock
 }
 
 impl<T> Deref for Guard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // Safety: This Guard means the value is locked
+        // Safety: This Guard means the value is locked so we can get &T
         unsafe { & *self.lock.data.get() }
     }
 }
 
 impl<T> DerefMut for Guard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // Safety: This Guard means the value is locked
+        // Safety: This Guard means the value is locked so we can get &mut T
         unsafe { &mut *self.lock.data.get() }
     }
 }
@@ -38,7 +39,9 @@ impl<T> Drop for Guard<'_, T> {
     }
 }
 
+// Safety: As data can be accessed by only one thread at a time (thanks to the spin lock), SpinLock<T> is Sync if T is Send
 unsafe impl<T> Sync for SpinLock<T> where T: Send {}
+
 unsafe impl<T> Send for Guard<'_, T> where T: Send {}
 unsafe impl<T> Sync for Guard<'_, T> where T: Sync {}
 
@@ -50,10 +53,11 @@ impl<T> SpinLock<T> {
         }
     }
 
+    // Guard is alive as long as &self is alive
     pub fn lock<'a>(&'a self) -> Guard<'a, T> {
 
         while self.locked.compare_exchange(false, true, Acquire, Relaxed).is_err() {
-            std::hint::spin_loop();
+            std::hint::spin_loop(); // specom CPU pause instruction
         }
 
         Guard { lock: self }
