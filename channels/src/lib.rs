@@ -1,16 +1,16 @@
-use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed, Release}, fence};
+use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed, Release}};
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 pub use std::sync::Arc;
 
-pub struct Sender<T> {
-    channel: Arc<Channel<T>>,
+pub struct Sender<'a, T> {
+    channel: &'a Channel<T>,
 }
 
-pub struct Receiver<T> {
-    channel: Arc<Channel<T>>,
+pub struct Receiver<'a, T> {
+    channel: &'a Channel<T>,
 }
-struct Channel<T> {
+pub struct Channel<T> {
     message: UnsafeCell<MaybeUninit<T>>,
     ready: AtomicBool,
 }
@@ -18,7 +18,7 @@ struct Channel<T> {
 unsafe impl<T> Sync for Channel<T> where T: Send {}
 
 
-impl<T> Sender<T> {
+impl<'a, T> Sender<'a, T> {
     pub fn send(self, value: T) {
         unsafe {
             (*self.channel.message.get()).write(value);
@@ -27,7 +27,7 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Receiver<T> {
+impl<'a, T> Receiver<'a, T> {
     pub fn is_ready(&self) -> bool {
         self.channel.ready.load(Relaxed)
     }
@@ -50,15 +50,6 @@ impl<T> Drop for Channel<T> {
     }
 }
 
-pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let channel = Arc::new(Channel::new());
-    (
-        Sender {
-            channel: channel.clone(),
-        },
-        Receiver { channel },
-    )
-}
 
 impl<T> Channel<T> {
     pub fn new() -> Self {
@@ -67,20 +58,27 @@ impl<T> Channel<T> {
             ready: AtomicBool::new(false),
         }
     }
+
+    pub fn split<'a>(&'a mut self) -> (Sender<'a, T>, Receiver<'a, T>) {
+        *self = Self::new();
+        (Sender { channel: self }, Receiver { channel: self })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::thread;
+    use super::Channel;
 
-    use super::*;
 
     #[test]
     fn test_channel() {
         let t = thread::current();
 
+        let mut channel = Channel::new();
+
         thread::scope(|s| {
-            let (sender, receiver) = channel();
+            let (sender, receiver) = channel.split();
 
             s.spawn(|| {
                 sender.send("Hello, world!");
