@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::fs;
 use std::net::TcpStream;
+use std::thread::sleep;
 use clap::{Parser};
 
 
@@ -53,7 +54,7 @@ fn process_event(
                     eprintln!("Could not send parsing information for {} -> {}", full_path.to_string_lossy(), err);
                 });
             } else {
-                eprintln!("Could not send parsing information for {0}", full_path.to_string_lossy());
+                eprintln!("No server connection to send parsing information for {0}", full_path.to_string_lossy());
             }
         });
     }
@@ -63,7 +64,7 @@ fn process_event(
 /// # Arguments
 /// * `config` - A reference to the Config instance
 /// * `stop` - A reference to an AtomicBool used to signal stopping the process
-fn run (config: &Config, stop: &Arc<AtomicBool>) {
+fn run (config: Config, stop: Arc<AtomicBool>) {
 
     rayon::ThreadPoolBuilder::new().num_threads(config.max_thread).build_global().unwrap();
     let mut pool = rayon_core::ThreadPoolBuilder::default().build().unwrap();
@@ -71,7 +72,7 @@ fn run (config: &Config, stop: &Arc<AtomicBool>) {
     let mut inotify = Inotify::init()
         .expect("Error while initializing inotify instance");
 
-    // Watch for modify and close events.
+    // Watch for create events.
     inotify
         .watches()
         .add(
@@ -88,13 +89,16 @@ fn run (config: &Config, stop: &Arc<AtomicBool>) {
         let events=  {
             match inotify.read_events(&mut buffer) {
                 Ok(events) => events,
-                Err(error) if error.kind() == (ErrorKind::WouldBlock) => continue,
+                Err(error) if error.kind() == (ErrorKind::WouldBlock) => {
+                    sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
                 _ => panic!("Error while reading events"),
             }
         };
 
         // Process the received events (creation of new files)
-        process_event(events, &mut pool, config);
+        process_event(events, &mut pool, &config);
     };
 
 }
@@ -112,9 +116,18 @@ fn main() {
     });
 
     let cli = Cli::parse();
-    let config : Config = Config::build_config(cli);
 
-    println!("{config:?}");
 
-    run(&config, &stop_clone);
+    let config = match Config::build_config(cli) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Error building configuration: {}", e);
+            return;
+        }
+    };
+
+    println!("Starting fs_watcher with configuration:");
+    println!("{config}");
+
+    run(config, stop_clone);
 }

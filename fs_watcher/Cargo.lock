@@ -201,6 +201,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "fs_watcher"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctrlc",
+ "derive",
+ "inotify",
+ "json",
+ "rayon",
+ "rayon-core",
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -441,22 +457,6 @@ checksum = "233504af464074f9d066d7b5416c5f9b894a5862a6506e306f7b816cdd6f1807"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "ssecret"
-version = "0.1.0"
-dependencies = [
- "clap",
- "ctrlc",
- "derive",
- "inotify",
- "json",
- "rayon",
- "rayon-core",
- "serde",
- "serde_derive",
- "serde_json",
 ]
 
 [[package]]

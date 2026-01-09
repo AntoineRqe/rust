@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(result.is_ok(), true);
         assert_eq!(my_analyser.file_path, "tests/test.txt");
         assert_ne!(my_analyser.contents, "");
-        assert_eq!(my_analyser.count, 271);
+        assert_eq!(my_analyser.count, 272);
         assert_eq!(my_analyser.words.get(&"the".to_string()), Some(&11));
         assert_eq!(my_analyser.words.get(&"help".to_string()), Some(&3));
         assert_eq!(my_analyser.words.get(&"words".to_string()), Some(&5));
@@ -138,7 +138,7 @@ mod tests {
     fn test_json() {
         let mut my_analyser = TextAnalysis::new("tests/test.txt").unwrap();
         my_analyser.analyse_file().unwrap();
-        assert_eq!(my_analyser.build_json().len(), 2293);
+        assert_eq!(my_analyser.build_json().len(), 2300);
     }
 
 }

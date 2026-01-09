@@ -9,8 +9,8 @@ Its behavior is entirely controlled through a JSON configuration file, making it
 ## Pre requisites
 
 - Rust programming language (latest stable version)
-- MY_GEMINI_API_KEY environment variable set for Gemini model access
-- MY_GEMINI_PROJECT_ID environment variable set for Gemini project on google cloud
+- **MY_GEMINI_API_KEY** environment variable set for Gemini model access
+- **MY_GEMINI_PROJECT_ID** environment variable set for Gemini project on google cloud
 - gcloud CLI installed and authenticated for Google Cloud access
 
 ---

@@ -1,6 +1,7 @@
 #!/bin/bash
 
 DIR_PATH=$1
+SLEEP_DURATION=$2
 
 mkdir --verbose -p ${DIR_PATH}
 
@@ -24,5 +25,5 @@ In the Details overview you can see the average speaking and reading time for yo
 Disclaimer: We strive to make our tools as accurate as possible but we cannot guarantee it will always be so." >> ${DIR_PATH}/test_${count}.txt
     echo "generated file test_${count}.txt"
     ((count++))
-    sleep 5
+    sleep ${SLEEP_DURATION}
 done

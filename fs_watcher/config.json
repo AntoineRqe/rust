@@ -1,0 +1,6 @@
+{
+    "folder_to_scan": "./test/",
+    "max_thread": 5,
+    "server_ip": "127.0.0.1",
+    "server_port": 8082
+}
