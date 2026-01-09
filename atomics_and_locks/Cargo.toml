@@ -1,5 +1,5 @@
 [package]
-name = "channels"
+name = "atomics_and_locks"
 version = "0.1.0"
 edition = "2024"
 

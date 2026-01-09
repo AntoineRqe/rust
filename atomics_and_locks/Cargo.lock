@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "spin_lock"
+name = "atomics_and_locks"
 version = "0.1.0"
