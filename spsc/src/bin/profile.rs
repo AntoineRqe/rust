@@ -8,7 +8,7 @@ fn produce_single(rb: &RingBuffer<usize, 4096>, start: usize, count: usize) {
         let item = start + i;
         while rb.push(item).is_err() {
             // Buffer full, spin
-            std::hint::spin_loop();
+            std::thread::yield_now();
         }
         //println!("Produced: {}", item);
     }
@@ -25,7 +25,7 @@ fn consume_single(rb: &RingBuffer<usize, 4096>, total_count: usize) {
                 break;
             } else {
                 // Buffer empty, spin
-                std::hint::spin_loop();
+                std::thread::yield_now();
             }
         }
         assert_eq!(item, expected);
@@ -33,7 +33,7 @@ fn consume_single(rb: &RingBuffer<usize, 4096>, total_count: usize) {
     }
 }
 
-const BATCH_SIZE: usize = 100;
+const BATCH_SIZE: usize = 64;
 
 
 fn consume_batch(rb: &RingBuffer<usize, 4096>, total_count: usize) {
@@ -49,7 +49,7 @@ fn consume_batch(rb: &RingBuffer<usize, 4096>, total_count: usize) {
             let n = rb.pop_batch(&mut buffer[received..to_consume]);
             if n == 0 {
                 // Buffer empty, spin
-                std::hint::spin_loop();
+                std::thread::yield_now();
             } else {
                 received += n;
             }
@@ -83,7 +83,7 @@ fn produce_batch(rb: &RingBuffer<usize, 4096>, start: usize, count: usize) {
             let n = rb.push_batch(&batch[pushed..actual_batch_size]);
             if n == 0 {
                 // Buffer full, spin
-                std::hint::spin_loop();
+                std::thread::yield_now();
             } else {
                 pushed += n;
             }
@@ -99,7 +99,7 @@ fn main() {
 
 
     const BUFFER_SIZE: usize = 4096;
-    const NUM_ITEMS: usize = 10_000_000;
+    const NUM_ITEMS: usize = 500_000_000;
 
     let rb = Arc::new(RingBuffer::<usize, BUFFER_SIZE>::new());
     let rb_producer = rb.clone();
@@ -110,8 +110,8 @@ fn main() {
 
         let rb = rb_producer;
         move || {
-            // produce_single(&rb, 0, NUM_ITEMS);
-            produce_batch(&rb, 0, NUM_ITEMS);
+            produce_single(&rb, 0, NUM_ITEMS);
+            // produce_batch(&rb, 0, NUM_ITEMS);
         }
     });
 
@@ -119,8 +119,8 @@ fn main() {
         let _ = core_affinity::set_for_current(core_ids[1]);
         let rb = rb_consumer;
         move || {
-            // consume_single(&rb, NUM_ITEMS);
-            consume_batch(&rb, NUM_ITEMS);
+            consume_single(&rb, NUM_ITEMS);
+            // consume_batch(&rb, NUM_ITEMS);
         }
     });
 

@@ -6,13 +6,12 @@ use std::cell::UnsafeCell;
 pub struct CachePadded<T> (T);
 
 #[repr(align(64))]
-struct Slot<T>(MaybeUninit<T>);
-
+pub struct AlignedBuffer<T, const N: usize> ([MaybeUninit<T>; N]);
 
 pub struct RingBuffer<T, const N: usize> {
-    buffer: UnsafeCell<[Slot<T>; N]>,    // Circular buffer storage, Make the whole buffer UnsafeCell to allow interior mutability
     pub head: CachePadded<AtomicUsize>,
     pub tail: CachePadded<AtomicUsize>,
+    buffer: UnsafeCell<AlignedBuffer<T, N>>,    // Circular buffer storage, Make the whole buffer UnsafeCell to allow interior mutability
 }
 
 // Safety: The RingBuffer can be safely sent between threads as long as T is Send
@@ -31,8 +30,8 @@ impl<T, const N: usize> Drop for RingBuffer<T, N> {
                 self.buffer.get()
                     .as_mut()
                     .unwrap()
-                    .get_unchecked_mut(head)
                     .0
+                    .get_unchecked_mut(head)
                     .assume_init_drop();
             }
             head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
@@ -46,7 +45,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
     pub fn new() -> Self {
         assert!(N.is_power_of_two(), "N must be a power of 2");
 
-        let buffer : UnsafeCell<[Slot<T>; N]> = UnsafeCell::new(unsafe { MaybeUninit::uninit().assume_init() });
+        let buffer : UnsafeCell<AlignedBuffer<T, N>> = UnsafeCell::new(unsafe { MaybeUninit::uninit().assume_init() });
     
         Self {
             buffer,
@@ -58,13 +57,32 @@ impl<T, const N: usize> RingBuffer<T, N> {
     /// Pushes an item into the ring buffer.
     /// Returns Err(item) if the buffer is full.
     pub fn push(&self, item: T) -> Result<(), T> {
-        let head = self.head.0.load(Ordering::Acquire); // Relaxed is safe here because only the consumer modifies head
-        let tail = self.tail.0.load(Ordering::Relaxed); // Acquire to synchronize with consumer
-        let next_tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+        let head = self.head.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies head
+        let next_head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
 
-        if next_tail == head {
+        let tail = self.tail.0.load(Ordering::Acquire); // Acquire to synchronize with consumer
+
+        if next_head == tail {
             // Buffer is full
-            return Err(item);
+            let mut spin = 1;
+
+            loop {
+                for _ in 0..spin { std::hint::spin_loop(); }
+
+                let cached_tail = self.tail.0.load(Ordering::Acquire); // Acquire to synchronize with consumer
+
+                if next_head != cached_tail {
+                    // Space available
+                    break;
+                }
+
+                if spin < 64 {
+                    spin *= 2; // backoff
+                } else {
+                    return Err(item);
+                }
+            }
+            
         }
 
         // Synchronize with consumer to ensure we see the latest data, improve atomic load performance when buffer is not full
@@ -75,11 +93,58 @@ impl<T, const N: usize> RingBuffer<T, N> {
                 .get()
                 .as_mut()
                 .unwrap()
-                .get_unchecked_mut(tail) = Slot(MaybeUninit::new(item));
+                .0
+                .get_unchecked_mut(head) = MaybeUninit::new(item);
         }
 
-        self.tail.0.store(next_tail, Ordering::Release);
+        self.head.0.store(next_head, Ordering::Release);
         Ok(())
+    }
+
+    /// Pops an item from the ring buffer.
+    /// Returns None if the buffer is empty.
+    pub fn pop(&self) -> Option<T> {
+        let head = self.head.0.load(Ordering::Relaxed); // Acquire to synchronize with producer
+        let tail = self.tail.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies tail 
+    
+        if head == tail {
+            let mut spin = 1;
+
+            loop {
+                for _ in 0..spin { std::hint::spin_loop(); }
+
+                let cached_head = self.head.0.load(Ordering::Relaxed); // Acquire to synchronize with producer
+
+                if cached_head != tail {
+                    // Data available
+                    break;
+                }
+
+                if spin < 64 {
+                    spin *= 2; // backoff
+                } else {
+                    return None;
+                }
+            }
+        }
+
+
+        // Synchronize with producer to ensure we see the latest data, improve atomic load performance when buffer is not empty
+        fence(Ordering::Acquire);
+
+        let item = unsafe {
+            self.buffer.get()
+                .as_mut()
+                .unwrap()
+                .0
+                .get_unchecked_mut(tail)
+                .as_ptr()
+                .read()
+        };
+
+        let next_tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+        self.tail.0.store(next_tail, Ordering::Release);
+        Some(item)
     }
 
     /// Pushes a batch of items into the ring buffer.
@@ -89,13 +154,13 @@ impl<T, const N: usize> RingBuffer<T, N> {
     {
         let mut pushed = 0;
         
-        let head = self.head.0.load(Ordering::Acquire); // Relaxed is safe here because only the consumer modifies head
-        let mut tail = self.tail.0.load(Ordering::Relaxed); // Acquire to synchronize with consumer
+        let mut head = self.head.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies head
+        let tail = self.tail.0.load(Ordering::Acquire); // Acquire to synchronize with consumer
     
         for &item in items {
-            let next_tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
+            let next_head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
 
-            if next_tail == head {
+            if next_head == tail {
                 // Buffer is full
                 break;
             }
@@ -108,45 +173,17 @@ impl<T, const N: usize> RingBuffer<T, N> {
                     .get()
                     .as_mut()
                     .unwrap()
-                    .get_unchecked_mut(tail) = Slot(MaybeUninit::new(item));
+                    .0
+                    .get_unchecked_mut(head) = MaybeUninit::new(item);
             }
 
-            tail = next_tail;
+            head = next_head;
             pushed += 1;
         }
 
-        self.tail.0.store(tail, Ordering::Release);
+        self.head.0.store(head, Ordering::Release);
     
         pushed
-    }
-
-    /// Pops an item from the ring buffer.
-    /// Returns None if the buffer is empty.
-    pub fn pop(&self) -> Option<T> {
-        let head = self.head.0.load(Ordering::Relaxed);
-        let tail = self.tail.0.load(Ordering::Acquire); // 
-    
-        if head == tail {
-            // Buffer is empty
-            return None;
-        }
-
-        // Synchronize with producer to ensure we see the latest data, improve atomic load performance when buffer is not empty
-        //fence(Ordering::Acquire);
-
-        let item = unsafe {
-            self.buffer.get()
-                .as_mut()
-                .unwrap()
-                .get_unchecked_mut(head)
-                .0
-                .as_ptr()
-                .read()
-        };
-
-        let next_head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
-        self.head.0.store(next_head, Ordering::Release);
-        Some(item)
     }
 
     pub fn pop_batch(&self, items: &mut [T]) -> usize 
@@ -154,8 +191,8 @@ impl<T, const N: usize> RingBuffer<T, N> {
     {
         let mut popped = 0;
 
-        let mut head = self.head.0.load(Ordering::Relaxed);
-        let tail = self.tail.0.load(Ordering::Acquire);
+        let head = self.head.0.load(Ordering::Relaxed);
+        let mut tail = self.tail.0.load(Ordering::Acquire);
 
         while head != tail && popped < items.len() {
             // Synchronize with producer to ensure we see the latest data, improve atomic load performance when buffer is not empty
@@ -165,17 +202,17 @@ impl<T, const N: usize> RingBuffer<T, N> {
                 self.buffer.get()
                     .as_mut()
                     .unwrap()
-                    .get_unchecked_mut(head)
                     .0
+                    .get_unchecked_mut(tail)
                     .as_ptr()
                     .read()
             };
 
-            head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
+            tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
             popped += 1;
         }
 
-        self.head.0.store(head, Ordering::Release);
+        self.tail.0.store(tail, Ordering::Release);
         popped
     }
 
