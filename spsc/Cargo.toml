@@ -12,3 +12,12 @@ crossbeam-utils = "0.8.21"
 name = "spsc"
 harness = false
 path = "benches/spsc.rs"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+[[bin]]
+name = "profile"
+path = "src/bin/profile.rs"

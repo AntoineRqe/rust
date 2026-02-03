@@ -1,0 +1,6 @@
+{
+    "folderToScan": "./tests/watched_dir/",
+    "maxThread": 5,
+    "serverIp": "127.0.0.1",
+    "serverPort": 8082
+}

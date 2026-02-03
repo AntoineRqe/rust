@@ -9,11 +9,11 @@
         "output": false
     },
     "max_domain_propositions": 1,
-    "chunk_size": 10,
+    "chunk_size": 50,
     "thinking_budget": 4096,
-    "use_gemini_explicit_caching": false,
+    "use_gemini_explicit_caching": true,
     "use_gemini_url_context": false,
-    "use_gemini_google_search": true,
+    "use_gemini_google_search": false,
     "use_gemini_custom_cache_duration": "3600s",
     "model": [
         "gemini-2.5-flash",

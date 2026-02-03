@@ -9,8 +9,8 @@ Its behavior is entirely controlled through a JSON configuration file, making it
 ## Pre requisites
 
 - Rust programming language (latest stable version)
-- **MY_GEMINI_API_KEY** environment variable set for Gemini model access
-- **MY_GEMINI_PROJECT_ID** environment variable set for Gemini project on google cloud
+- MY_GEMINI_API_KEY environment variable set for Gemini model access
+- MY_GEMINI_PROJECT_ID environment variable set for Gemini project on google cloud
 - gcloud CLI installed and authenticated for Google Cloud access
 
 ---
@@ -44,6 +44,8 @@ cargo run --release -- --input ~/microsoft.csv --config configs/config-prod.json
 | `--config`  | Path to the JSON configuration file     | Yes      |
 | `--dict`    | Path to the dictionary file (optional)  | No       |
 | `--verbose` | Enable verbose logging (optional)       | No       |
+| `--command` | Command to execute (required) (e.g., classify or describe)          | Yes      |
+
 
 ---
 
@@ -101,35 +103,60 @@ linkedin.com,Professional social network
 │   ├── config-debug.json
 │   └── config-prod.json
 ├── README.md
-└── src
-    ├── category.rs
+├── crates
+    ├── cli
+    │   ├── Cargo.toml
+    │   └── src
+    │       └── main.rs
     ├── config
-    │   ├── mod.rs
-    │   └── test
-    │       └── config.json
-    ├── ctx.rs
+    │   ├── Cargo.toml
+    │   └── src
+    │       ├── lib.rs
+    │       └── test
+    │           └── config.json
+    ├── core
+    │   ├── Cargo.toml
+    │   └── src
+    │       └── lib.rs
     ├── format
-    │   ├── csv.rs
-    │   ├── html.rs
-    │   └── mod.rs
+    │   ├── Cargo.toml
+    │   └── src
+    │       ├── csv.rs
+    │       ├── html.rs
+    │       └── lib.rs
     ├── llm
-    │   ├── core
-    │   │   └── mod.rs
-    │   ├── mod.rs
-    │   └── providers
-    │       ├── gemini
-    │       │   ├── billing.rs
-    │       │   ├── caching.rs
-    │       │   ├── generating.rs
-    │       │   ├── mod.rs
-    │       │   └── network.rs
-    │       └── mod.rs
-    ├── main.rs
-    ├── my_traits.rs
-    ├── statistics.rs
+    │   ├── Cargo.toml
+    │   └── src
+    │       ├── core
+    │       │   ├── categorization.rs
+    │       │   ├── description.rs
+    │       │   ├── mod.rs
+    │       │   ├── prompt.rs
+    │       │   └── tools.rs
+    │       ├── lib.rs
+    │       └── providers
+    │           ├── gemini
+    │           │   ├── billing.rs
+    │           │   ├── caching.rs
+    │           │   ├── generating.rs
+    │           │   ├── mod.rs
+    │           │   └── network.rs
+    │           └── mod.rs
+    ├── statistics
+    │   ├── Cargo.toml
+    │   └── src
+    │       └── lib.rs
+    ├── trait
+    │   ├── Cargo.toml
+    │   └── src
+    │       └── lib.rs
     └── utils
-        ├── env.rs
-        └── mod.rs
+        ├── Cargo.toml
+        └── src
+            ├── category.rs
+            ├── env.rs
+            └── lib.rs
+
 ```
 
 ---
@@ -145,5 +172,5 @@ cargo build
 Run with example data:
 
 ```bash
-cargo run -- --input ./data/example.csv --config ./configs/config-prod.json
+cargo run -- --input ./data/example.csv --config ./configs/config-prod.json --command classify
 ```

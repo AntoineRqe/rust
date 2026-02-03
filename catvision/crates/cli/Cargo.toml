@@ -1,0 +1,19 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.56", features = ["derive"] }
+
+utils = { path = "../utils" }
+config ={ path = "../config"}
+format ={ path = "../format"}
+traits ={ path = "../trait"}
+llm = { path = "../llm"}
+statistics = { path = "../statistics"}
+core = { path = "../core"}
+
+futures = "0.3.31"
+indexmap = "2.13.0"
+serde_json.workspace = true

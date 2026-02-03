@@ -1,0 +1,10 @@
+{
+	"folders": [
+		{
+			"path": "spsc"
+		}
+	],
+	"settings": {
+		"rust-analyzer.checkOnSave": true
+	}
+}

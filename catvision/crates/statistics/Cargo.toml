@@ -1,0 +1,8 @@
+[package]
+name = "statistics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+atomic_float = "1.1.0"
+utils = { path = "../utils" }     # Likely needs core types

@@ -1,0 +1,20 @@
+[package]
+name = "hello_world"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "2.2.0"
+
+[dev-dependencies]
+litesvm = "0.6.1"
+solana-client = "2.2.0"
+solana-sdk = "2.2.0"
+tokio = { version = "1.48.0", features = ["full"] }
+
+[[example]]
+name = "client"
+path = "examples/client.rs"
