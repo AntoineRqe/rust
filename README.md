@@ -13,3 +13,5 @@ Each folder has its own README with details.
 ## 📌 Notes
 - Each folder is self-contained
 - See the linked README for setup and usage
+
+[Useful Rust command](./useful_command.md)
