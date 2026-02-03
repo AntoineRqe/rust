@@ -1,8 +1,0 @@
-[package]
-name = "rsm-en"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-num = "0.4.3"
-safe_math = "2.0.0-beta"
