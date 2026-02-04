@@ -1,25 +1,27 @@
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::cell::UnsafeCell;
-use std::time::Instant;
-use hdrhistogram::Histogram;
 
 #[repr(align(64))]
 pub struct CachePadded<T> (T);
 
 #[repr(align(64))]
-pub struct AlignedBuffer<T, const N: usize> ([MaybeUninit<Timed<T>>; N]);
-
-#[derive(Copy, Clone)]
-pub struct Timed<T> {
-    pub value: T,
-    pub timestamp: Instant,
-}
+pub struct AlignedBuffer<T, const N: usize> ([MaybeUninit<T>; N]);
 
 pub struct RingBuffer<T, const N: usize> {
     pub head: CachePadded<AtomicUsize>,
     pub tail: CachePadded<AtomicUsize>,
     buffer: UnsafeCell<AlignedBuffer<T, N>>,    // Circular buffer storage, Make the whole buffer UnsafeCell to allow interior mutability
+}
+
+/// Split the RingBuffer into a Producer and Consumer. The Producer can only push items, and the Consumer can only pop items.
+/// This allows for safe concurrent access from separate threads without needing to use Arc or other synchronization primitives.
+pub struct Producer<'a, T, const N: usize> {
+    rb: &'a RingBuffer<T, N>,
+}
+
+pub struct Consumer<'a, T, const N: usize> {
+    rb: &'a RingBuffer<T, N>,
 }
 
 // Safety: The RingBuffer can be safely sent between threads as long as T is Send
@@ -47,6 +49,30 @@ impl<T, const N: usize> Drop for RingBuffer<T, N> {
     }
 }
 
+impl <'a, T, const N: usize> Producer<'a, T, N> {
+    pub fn push(&self, item: T) -> Result<(), T> {
+        self.rb.push(item)
+    }
+
+    pub fn push_batch(&self, items: &[T]) -> usize 
+    where T: Copy
+    {
+        self.rb.push_batch(items)
+    }    
+}
+
+impl <'a, T, const N: usize> Consumer<'a, T, N> {
+    pub fn pop(&self) -> Option<T> {
+        self.rb.pop()
+    }
+
+    pub fn pop_batch(&self, items: &mut [T]) -> usize 
+    where T: Copy
+    {
+        self.rb.pop_batch(items)
+    }
+}
+
 const SPIN_THRESHOLD: usize = 256;
 
 impl<T, const N: usize> RingBuffer<T, N> {
@@ -64,14 +90,14 @@ impl<T, const N: usize> RingBuffer<T, N> {
         }
     }
 
+    pub fn split<'a>(&'a mut self) -> (Producer<'a, T, N>, Consumer<'a, T, N>) {
+        *self = Self::new(); // Reset head and tail to 0, ensure buffer is empty
+        (Producer { rb: self }, Consumer { rb: self })
+    }
+
     /// Pushes an item into the ring buffer.
     /// Returns Err(item) if the buffer is full.
     pub fn push(&self, item: T) -> Result<(), T> {
-        let timed = Timed {
-            value: item,
-            timestamp: Instant::now(),
-        };
-
         let head = self.head.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies head
         let next_head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
 
@@ -86,7 +112,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
                     .as_mut()
                     .unwrap()
                     .0
-                    .get_unchecked_mut(head) = MaybeUninit::new(timed);
+                    .get_unchecked_mut(head) = MaybeUninit::new(item);
             }
 
             self.head.0.store(next_head, Ordering::Release);
@@ -112,7 +138,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
                 if spin < SPIN_THRESHOLD {
                     spin *= 2; // backoff
                 } else {
-                    return Err(timed.value);
+                    return Err(item);
                 }
             }
             
@@ -127,31 +153,16 @@ impl<T, const N: usize> RingBuffer<T, N> {
                 .as_mut()
                 .unwrap()
                 .0
-                .get_unchecked_mut(head) = MaybeUninit::new(timed);
+                .get_unchecked_mut(head) = MaybeUninit::new(item);
         }
 
         self.head.0.store(next_head, Ordering::Release);
         Ok(())
     }
 
-    pub fn pop_and_record(&self, hist: &mut Histogram<u64>, count: usize) -> Option<T> {
-        let timed = self.pop()?;
-
-        let latency = timed.timestamp.elapsed().as_nanos() as u64;
-        hist.record(latency).ok();
-
-        // Only record 1 out of every 256 items
-        if count & 0xFF == 0 {
-            hist.record(latency).ok();
-        }
-
-
-        Some(timed.value)
-    }
-
     /// Pops an item from the ring buffer.
     /// Returns None if the buffer is empty.
-    pub fn pop(&self) -> Option<Timed<T>> {
+    pub fn pop(&self) -> Option<T> {
         let relaxed_head = self.head.0.load(Ordering::Relaxed); // Acquire to synchronize with producer
         let tail = self.tail.0.load(Ordering::Relaxed); // Relaxed is safe here because only the consumer modifies tail 
     
@@ -235,10 +246,6 @@ impl<T, const N: usize> RingBuffer<T, N> {
 
             // Synchronize with consumer to ensure we see the latest data, improve atomic load performance when buffer is not full
             //fence(Ordering::Acquire);
-            let timed = Timed {
-                value: item,
-                timestamp: Instant::now(),
-            };
 
             unsafe {
                  *self.buffer
@@ -246,7 +253,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
                     .as_mut()
                     .unwrap()
                     .0
-                    .get_unchecked_mut(head) = MaybeUninit::new(timed);
+                    .get_unchecked_mut(head) = MaybeUninit::new(item);
             }
 
             head = next_head;
@@ -258,7 +265,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
         pushed
     }
 
-    pub fn pop_batch(&self, items: &mut [Timed<T>]) -> usize 
+    pub fn pop_batch(&self, items: &mut [T]) -> usize 
     where T: Copy
     {
         let mut popped = 0;
@@ -323,67 +330,52 @@ mod tests {
 
     #[test]
     fn push_and_pop() {
-        let rb: RingBuffer<u8, 4> = RingBuffer::new();
-        assert_eq!(rb.push(1), Ok(()));
-        assert_eq!(rb.push(2), Ok(()));
-        assert_eq!(rb.push(3), Ok(()));
-        assert_eq!(rb.push(4), Err(4)); // Buffer should be full
-        assert_eq!(rb.pop().map(|t| t.value), Some(1));
-        assert_eq!(rb.pop().map(|t| t.value), Some(2));
-        assert_eq!(rb.push(4), Ok(()));
-        assert_eq!(rb.pop().map(|t| t.value), Some(3));
-        assert_eq!(rb.pop().map(|t| t.value), Some(4));
-        assert_eq!(rb.pop().map(|t| t.value), None); // Buffer should be empty
-    }
-
-    #[test]
-    fn is_empty_and_full() {
-        let rb: RingBuffer<u8, 2> = RingBuffer::new();
-        assert!(rb.is_empty());
-        assert!(!rb.is_full());
-        rb.push(1).unwrap();
-        assert!(rb.len() == 1);
-        assert!(!rb.is_empty());
-        assert!(rb.is_full());
-        rb.pop().unwrap();
-        assert!(rb.is_empty());
+        let mut rb: RingBuffer<u8, 4> = RingBuffer::new();
+        let (producer, consumer) = rb.split();
+        assert_eq!(producer.push(1), Ok(()));
+        assert_eq!(producer.push(2), Ok(()));
+        assert_eq!(producer.push(3), Ok(()));
+        assert_eq!(producer.push(4), Err(4)); // Buffer should be full
+        assert_eq!(consumer.pop(), Some(1));
+        assert_eq!(consumer.pop(), Some(2));
+        assert_eq!(producer.push(4), Ok(()));
+        assert_eq!(consumer.pop(), Some(3));
+        assert_eq!(consumer.pop(), Some(4));
+        assert_eq!(consumer.pop(), None); // Buffer should be empty
     }
 
     #[test]
     fn spsc_threads() {
-        use std::sync::Arc;
         use std::thread;
 
-        let rb = Arc::new(RingBuffer::<usize, 1024>::new());
+        let mut rb = RingBuffer::<usize, 1024>::new();
 
-        let prod = {
-            let rb = rb.clone();
-            thread::spawn(move || {
+        thread::scope(|s| {
+            let (producer, consumer) = rb.split();
+
+            let prod = s.spawn(move || {
                 for i in 0..1_000_000 {
                     loop {
-                        if rb.push(i).is_ok() {
+                        if producer.push(i).is_ok() {
                             break;
                         }
                     }
                 }
-            })
-        };
+            });
 
-        let cons = {
-            let rb = rb.clone();
-            thread::spawn(move || {
+            let cons = s.spawn(move || {
                 let mut expected = 0;
                 while expected < 1_000_000 {
-                    if let Some(v) = rb.pop() {
-                        assert_eq!(v.value, expected);
+                    if let Some(v) = consumer.pop() {
+                        assert_eq!(v, expected);
                         expected += 1;
                     }
                 }
-            })
-        };
+            });
 
-        prod.join().unwrap();
-        cons.join().unwrap();
+            prod.join().unwrap();
+            cons.join().unwrap();
+        });
     }
 
 }

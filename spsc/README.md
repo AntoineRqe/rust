@@ -22,4 +22,7 @@ RUSTFLAGS="-C force-frame-pointers=yes" cargo build --bin profile --profile prof
 perf stat -e   cycles,instructions,branches,branch-misses   ./target/profiling/profile
 perf stat -e cache-misses,cache-references,LLC-loads,LLC-load-misses target/profiling/profile
 RUSTFLAGS="-C force-frame-pointers=yes" cargo flamegraph --bin profile --profile profiling
+perf record -F 997 -g --call-graph dwarf -o perf.data ./target/profiling/profile
+perf script -i perf.data | inferno-collapse-perf | inferno-flamegraph > flamegraph.svg
+
 ```
