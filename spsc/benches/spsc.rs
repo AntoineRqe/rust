@@ -1,69 +1,119 @@
+use criterion::{criterion_group, criterion_main, Criterion};
 use std::sync::Arc;
 use std::thread;
-use criterion::{criterion_group, criterion_main, Criterion};
-use crossbeam::queue::ArrayQueue;
+use std::time::Instant;
+use hdrhistogram::Histogram;
+
 use spsc::RingBuffer;
+use crossbeam::queue::ArrayQueue;
 
 const N: usize = 1024;
-const ITERS: usize = 100;
+const ITERATIONS: usize = 1_000_000;
 
-fn ringbuffer_spsc(c: &mut Criterion) {
-    c.bench_function("ringbuffer SPSC", |b| {
+/// Benchmark your SPSC RingBuffer
+fn benchmark_ringbuffer() -> (u64, u64) {
+    let buffer = Arc::new(RingBuffer::<Instant, N>::new());
+    let mut hist = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
+
+    let buffer_producer = Arc::clone(&buffer);
+    let buffer_consumer = Arc::clone(&buffer);
+
+    let cores = core_affinity::get_core_ids().unwrap();
+    let producer_core = cores[0];
+    let consumer_core = cores[1];
+
+    let producer = thread::spawn(move || {
+        core_affinity::set_for_current(producer_core);
+        for _ in 0..ITERATIONS {
+            let ts = Instant::now();
+            loop {
+                if buffer_producer.push(ts).is_ok() {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+    });
+
+    let consumer = thread::spawn(move || {
+        core_affinity::set_for_current(consumer_core);
+        for _ in 0..ITERATIONS {
+            loop {
+                if let Some(ts) = buffer_consumer.pop() {
+                    let latency_ns = ts.timestamp.elapsed().as_nanos() as u64;
+                    hist.record(latency_ns).unwrap();
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+        hist
+    });
+
+    producer.join().unwrap();
+    let hist = consumer.join().unwrap();
+
+    (hist.value_at_percentile(50.0), hist.value_at_percentile(99.0))
+}
+
+/// Benchmark Crossbeam ArrayQueue
+fn benchmark_crossbeam() -> (u64, u64) {
+    let buffer = Arc::new(ArrayQueue::<Instant>::new(N));
+    let mut hist = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
+
+    let buffer_producer = Arc::clone(&buffer);
+    let buffer_consumer = Arc::clone(&buffer);
+
+    let cores = core_affinity::get_core_ids().unwrap();
+    let producer_core = cores[0];
+    let consumer_core = cores[1];
+
+    let producer = thread::spawn(move || {
+        core_affinity::set_for_current(producer_core);
+        for _ in 0..ITERATIONS {
+            let ts = Instant::now();
+            loop {
+                if buffer_producer.push(ts).is_ok() {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+    });
+
+    let consumer = thread::spawn(move || {
+        core_affinity::set_for_current(consumer_core);
+        for _ in 0..ITERATIONS {
+            loop {
+                if let Some(ts) = buffer_consumer.pop() {
+                    let latency_ns = ts.elapsed().as_nanos() as u64;
+                    hist.record(latency_ns).unwrap();
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+        hist
+    });
+
+    producer.join().unwrap();
+    let hist = consumer.join().unwrap();
+
+    (hist.value_at_percentile(50.0), hist.value_at_percentile(99.0))
+}
+
+/// Criterion benchmark comparing both queues
+fn spsc_comparison_benchmark(c: &mut Criterion) {
+    c.bench_function("RingBuffer SPSC vs Crossbeam ArrayQueue", |b| {
         b.iter(|| {
-            let rb = Arc::new(RingBuffer::<usize, N>::new());
+            let (p50_ring, p99_ring) = benchmark_ringbuffer();
+            println!("RingBuffer SPSC  - p50: {} ns, p99: {} ns", p50_ring, p99_ring);
 
-            let prod = {
-                let rb = rb.clone();
-                thread::spawn(move || {
-                    for i in 0..ITERS {
-                        while rb.push(i).is_err() {}
-                    }
-                })
-            };
-
-            let cons = {
-                let rb = rb.clone();
-                thread::spawn(move || {
-                    for _ in 0..ITERS {
-                        while rb.pop().is_none() {}
-                    }
-                })
-            };
-
-            prod.join().unwrap();
-            cons.join().unwrap();
+            let (p50_cb, p99_cb) = benchmark_crossbeam();
+            println!("Crossbeam ArrayQ - p50: {} ns, p99: {} ns", p50_cb, p99_cb);
         });
     });
 }
 
-fn crossbeam_spsc(c: &mut Criterion) {
-    c.bench_function("crossbeam ArrayQueue SPSC", |b| {
-        b.iter(|| {
-            let q = Arc::new(ArrayQueue::<usize>::new(N));
-
-            let prod = {
-                let q = q.clone();
-                thread::spawn(move || {
-                    for i in 0..ITERS {
-                        while q.push(i).is_err() {}
-                    }
-                })
-            };
-
-            let cons = {
-                let q = q.clone();
-                thread::spawn(move || {
-                    for _ in 0..ITERS {
-                        while q.pop().is_none() {}
-                    }
-                })
-            };
-
-            prod.join().unwrap();
-            cons.join().unwrap();
-        });
-    });
-}
-
-criterion_group!(spsc, ringbuffer_spsc, crossbeam_spsc);
-criterion_main!(spsc);
+criterion_group!(benches, spsc_comparison_benchmark);
+criterion_main!(benches);

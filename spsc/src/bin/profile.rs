@@ -1,43 +1,88 @@
-use spsc::RingBuffer;
+use spsc::{RingBuffer, Timed};
 use std::sync::Arc;
 use std::thread;
 extern crate core_affinity;
+use hdrhistogram::Histogram;
 
 fn produce_single(rb: &RingBuffer<usize, 4096>, start: usize, count: usize) {
     for i in 0..count {
         let item = start + i;
-        while rb.push(item).is_err() {
-            // Buffer full, spin
-            std::thread::yield_now();
+
+        let mut spins = 0;
+
+        loop {
+            if rb.push(item).is_ok() {
+                break; // success
+            }
+
+            // Buffer full, spin for a while
+            if spins < 1_000 {
+                std::hint::spin_loop();
+                spins += 1;
+            } else {
+                std::thread::yield_now();
+                spins = 0; // reset after yielding
+            }
         }
+
         //println!("Produced: {}", item);
     }
 }
 
-fn consume_single(rb: &RingBuffer<usize, 4096>, total_count: usize) {
+
+fn consume_single(
+    rb: &RingBuffer<usize, 4096>,
+    mut hist: Option<&mut Histogram<u64>>,
+    total_count: usize,
+) {
     let mut expected: usize = 0;
-    for _ in 0..total_count {
-        let item;
-        loop {
-            if let Some(val) = rb.pop() {
-                //println!("Consumed: {}", val);
-                item = val;
-                break;
-            } else {
-                // Buffer empty, spin
-                std::thread::yield_now();
+
+    match hist.as_deref_mut() {
+        Some(hist) => {
+            for count in 0..total_count {
+                let mut spins = 0;
+                loop {
+                    if let Some(_) = rb.pop_and_record(hist, count) {
+                        break;
+                    }
+
+                    if spins < 1_000 {
+                        std::hint::spin_loop();
+                        spins += 1;
+                    } else {
+                        std::thread::yield_now();
+                        spins = 0;
+                    }
+                }
             }
         }
-        assert_eq!(item, expected);
-        expected += 1;
+
+        None => {
+            for _ in 0..total_count {
+                let item;
+                loop {
+                    if let Some(val) = rb.pop() {
+                        item = val.value;
+                        break;
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+
+                assert_eq!(item, expected);
+                expected += 1;
+            }
+        }
     }
 }
 
+
+#[allow(dead_code)]
 const BATCH_SIZE: usize = 64;
 
-
+#[allow(dead_code)]
 fn consume_batch(rb: &RingBuffer<usize, 4096>, total_count: usize) {
-    let mut buffer = [0; BATCH_SIZE]; // replace 0 with the appropriate type
+    let mut buffer = [Timed { value: 0, timestamp: std::time::Instant::now() }; BATCH_SIZE]; // replace 0 with the appropriate type
     let mut expected: usize = 0;
     let mut items_consumed = 0;
 
@@ -56,8 +101,8 @@ fn consume_batch(rb: &RingBuffer<usize, 4096>, total_count: usize) {
         }
 
         for &item in &buffer[..to_consume] {
-            //println!("Consumed: {}", item);
-            assert_eq!(item, expected);
+            //println!("Consumed: {}", item.value);
+            assert_eq!(item.value, expected);
             expected += 1;
         }
 
@@ -65,6 +110,7 @@ fn consume_batch(rb: &RingBuffer<usize, 4096>, total_count: usize) {
     }
 }
 
+#[allow(dead_code)]
 fn produce_batch(rb: &RingBuffer<usize, 4096>, start: usize, count: usize) {
     let mut batch = [0; BATCH_SIZE]; // replace 0 with the appropriate type
 
@@ -74,7 +120,7 @@ fn produce_batch(rb: &RingBuffer<usize, 4096>, start: usize, count: usize) {
 
         // Fill the batch array
         for i in 0..actual_batch_size {
-            batch[i] = batch_start + i; // or whatever value you need
+            batch[i] = start + batch_start + i;
         }
 
         let mut pushed = 0;
@@ -115,17 +161,40 @@ fn main() {
         }
     });
 
-    let cons = thread::spawn({
-        let _ = core_affinity::set_for_current(core_ids[1]);
-        let rb = rb_consumer;
-        move || {
-            consume_single(&rb, NUM_ITEMS);
-            // consume_batch(&rb, NUM_ITEMS);
-        }
+    // let cons = thread::spawn({
+    //     let _ = core_affinity::set_for_current(core_ids[1]);
+    //     let rb = rb_consumer;
+    //     move || {
+    //         consume_single(&rb, NUM_ITEMS);
+    //         // consume_batch(&rb, NUM_ITEMS);
+    //     }
+    // });
+
+    let hist = thread::scope(|s| {
+        let cons = s.spawn(move || {
+            let _ = core_affinity::set_for_current(core_ids[1]);
+
+            let mut hist = Histogram::<u64>::new_with_bounds(
+                1,
+                10_000_000,
+                3,
+            ).unwrap();
+
+            consume_single(&rb_consumer, Some(&mut hist), NUM_ITEMS);
+            hist
+        });
+
+        // producer can run concurrently here if needed
+
+        cons.join().unwrap()
     });
 
     prod.join().unwrap();
-    cons.join().unwrap();
+
+    println!("Latency profile (nanoseconds):");
+    println!("p50 = {} ns", hist.value_at_percentile(50.0));
+    println!("p99 = {} ns", hist.value_at_percentile(99.0));
+    println!("max = {} ns", hist.max());
 
     println!("SPSC RingBuffer profile completed.");
 }
