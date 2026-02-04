@@ -1,6 +1,10 @@
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::cell::UnsafeCell;
+use std::thread::{Thread};
+use std::marker::PhantomData;
+use std::thread;
+
 
 #[repr(align(64))]
 pub struct CachePadded<T> (T);
@@ -18,10 +22,12 @@ pub struct RingBuffer<T, const N: usize> {
 /// This allows for safe concurrent access from separate threads without needing to use Arc or other synchronization primitives.
 pub struct Producer<'a, T, const N: usize> {
     rb: &'a RingBuffer<T, N>,
+    // consumer_thread: Thread, // Store the consumer thread handle to allow for better synchronization in push when buffer is full, by yielding to the consumer thread
 }
 
 pub struct Consumer<'a, T, const N: usize> {
     rb: &'a RingBuffer<T, N>,
+    // _no_send: PhantomData<*const ()>, // Make Consumer !Send to prevent accidentally sending it to another thread, since it holds a reference to the RingBuffer which is shared with the Producer
 }
 
 // Safety: The RingBuffer can be safely sent between threads as long as T is Send
@@ -51,7 +57,14 @@ impl<T, const N: usize> Drop for RingBuffer<T, N> {
 
 impl <'a, T, const N: usize> Producer<'a, T, N> {
     pub fn push(&self, item: T) -> Result<(), T> {
-        self.rb.push(item)
+        match self.rb.push(item) {
+            Ok(()) => {
+                Ok(())
+            },
+            Err(item) => {
+                Err(item)
+            }
+        }
     }
 
     pub fn push_batch(&self, items: &[T]) -> usize 
@@ -63,7 +76,12 @@ impl <'a, T, const N: usize> Producer<'a, T, N> {
 
 impl <'a, T, const N: usize> Consumer<'a, T, N> {
     pub fn pop(&self) -> Option<T> {
-        self.rb.pop()
+        match self.rb.pop() {
+            Some(item) => Some(item),
+            None => {
+                self.rb.pop() // Try again after being woken up
+            },
+        }
     }
 
     pub fn pop_batch(&self, items: &mut [T]) -> usize 
@@ -92,7 +110,16 @@ impl<T, const N: usize> RingBuffer<T, N> {
 
     pub fn split<'a>(&'a mut self) -> (Producer<'a, T, N>, Consumer<'a, T, N>) {
         *self = Self::new(); // Reset head and tail to 0, ensure buffer is empty
-        (Producer { rb: self }, Consumer { rb: self })
+        (
+            Producer { 
+                rb: self,
+                // consumer_thread: std::thread::current(), // Store the consumer thread handle to allow for better synchronization in push when buffer is full, by yielding to the consumer thread
+            },
+            Consumer {
+                rb: self,
+                // _no_send: PhantomData, // Make Consumer !Send to prevent accidentally sending it to another thread, since it holds a reference to the RingBuffer which is shared with the Producer
+            }
+        )
     }
 
     /// Pushes an item into the ring buffer.
@@ -184,7 +211,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
             
             return Some(item);
         }
-        
+
         let mut head = self.head.0.load(Ordering::Acquire); // Acquire to synchronize with producer
         if head == tail {
             let mut spin = 1;
@@ -363,18 +390,15 @@ mod tests {
                 }
             });
 
-            let cons = s.spawn(move || {
-                let mut expected = 0;
-                while expected < 1_000_000 {
-                    if let Some(v) = consumer.pop() {
-                        assert_eq!(v, expected);
-                        expected += 1;
-                    }
+            let mut expected = 0;
+            while expected < 1_000_000 {
+                if let Some(v) = consumer.pop() {
+                    assert_eq!(v, expected);
+                    expected += 1;
                 }
-            });
+            }
 
             prod.join().unwrap();
-            cons.join().unwrap();
         });
     }
 

@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-core_affinity = "0.8.3"
-hdrhistogram = "7.5.4"
 
 
 [[bench]]
@@ -17,7 +15,9 @@ path = "benches/spsc.rs"
 [dev-dependencies]
 crossbeam = "0.8.4"
 crossbeam-utils = "0.8.21"
-criterion = "0.8.1"
+criterion = "0.8.2"
+hdrhistogram = "7.5.4"
+core_affinity = "0.8.3"
 
 
 [profile.profiling]
