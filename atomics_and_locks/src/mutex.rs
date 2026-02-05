@@ -24,17 +24,30 @@ impl<T> Mutex<T> {
     pub fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
         // Try to acquire the lock by setting state from 0 to 1.
         if self.state.compare_exchange(0, 1, Acquire, Relaxed).is_err() {
-            // If we failed to acquire the lock, it means it's already held by another thread.
-            // We set it to 2 to indicate that there are waiters.
-            // if the previous state was 0, we successfully acquired the lock, so we can break out of the loop.
-            while self.state.swap(2, Acquire) != 0 {
-                // Wait until the state changes from 2 (locked with waiters) to 0 (unlocked).
-                wait(&self.state, 2);
-            }
+            // If we failed to acquire the lock, it means it's already locked. We need to handle contention.
+            Self::lock_contended(&self.state);
         }
         // At this point, we have acquired the lock (state is 1).
         MutexGuard { mutex: self }
     }
+
+    #[cold]
+    fn lock_contended(state: &AtomicU32) {
+        let mut spin_count = 0;
+
+        while state.load(Relaxed) == 1 && spin_count < 10 {
+            spin_count += 1;
+            std::hint::spin_loop();
+        }
+
+        if state.compare_exchange(0, 1, Acquire, Relaxed).is_ok() {
+            return;
+        }
+
+        while state.swap(2, Acquire) != 0 {
+            wait(state, 2);
+    }
+}
 }
 
 pub struct MutexGuard<'a, T> {
