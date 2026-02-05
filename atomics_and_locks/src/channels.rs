@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed, Release}};
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
-pub use std::sync::Arc;
 
 pub struct Sender<'a, T> {
     channel: &'a Channel<T>,

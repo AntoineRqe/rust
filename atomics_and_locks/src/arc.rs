@@ -196,41 +196,41 @@ impl<T> Arc<T> {
 mod tests {
     use super::*;
     
-#[test]
-fn test() {
-    static NUM_DROPS: AtomicUsize = AtomicUsize::new(0);
+    #[test]
+    fn test() {
+        static NUM_DROPS: AtomicUsize = AtomicUsize::new(0);
 
-    struct DetectDrop;
+        struct DetectDrop;
 
-    impl Drop for DetectDrop {
-        fn drop(&mut self) {
-            NUM_DROPS.fetch_add(1, Relaxed);
+        impl Drop for DetectDrop {
+            fn drop(&mut self) {
+                NUM_DROPS.fetch_add(1, Relaxed);
+            }
         }
+
+        // Create an Arc with two weak pointers.
+        let x = Arc::new(("hello", DetectDrop));
+        let y = Arc::downgrade(&x);
+        let z = Arc::downgrade(&x);
+
+        let t = std::thread::spawn(move || {
+            // Weak pointer should be upgradable at this point.
+            let y = y.upgrade().unwrap();
+            assert_eq!(y.0, "hello");
+        });
+        assert_eq!(x.0, "hello");
+        t.join().unwrap();
+
+        // The data shouldn't be dropped yet,
+        // and the weak pointer should be upgradable.
+        assert_eq!(NUM_DROPS.load(Relaxed), 0);
+        assert!(z.upgrade().is_some());
+
+        drop(x);
+
+        // Now, the data should be dropped, and the
+        // weak pointer should no longer be upgradable.
+        assert_eq!(NUM_DROPS.load(Relaxed), 1);
+        assert!(z.upgrade().is_none());
     }
-
-    // Create an Arc with two weak pointers.
-    let x = Arc::new(("hello", DetectDrop));
-    let y = Arc::downgrade(&x);
-    let z = Arc::downgrade(&x);
-
-    let t = std::thread::spawn(move || {
-        // Weak pointer should be upgradable at this point.
-        let y = y.upgrade().unwrap();
-        assert_eq!(y.0, "hello");
-    });
-    assert_eq!(x.0, "hello");
-    t.join().unwrap();
-
-    // The data shouldn't be dropped yet,
-    // and the weak pointer should be upgradable.
-    assert_eq!(NUM_DROPS.load(Relaxed), 0);
-    assert!(z.upgrade().is_some());
-
-    drop(x);
-
-    // Now, the data should be dropped, and the
-    // weak pointer should no longer be upgradable.
-    assert_eq!(NUM_DROPS.load(Relaxed), 1);
-    assert!(z.upgrade().is_none());
-}
 }

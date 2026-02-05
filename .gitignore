@@ -1,2 +1,10 @@
 target
 outputs
+**.svg
+**.csv
+**.data
+**.log
+**.tmp
+**.bak
+**.swp
+**.old

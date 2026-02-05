@@ -5,7 +5,6 @@ use std::{sync::atomic::{
 
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut, Drop};
-use std::thread;
 
 struct SpinLock<T> {
     locked: AtomicBool,
@@ -77,7 +76,7 @@ mod tests {
     #[test]
     fn test_spin_lock_basic() {
         let x = SpinLock::new(Vec::new());
-        thread::scope(|s| {
+        std::thread::scope(|s| {
             s.spawn(|| x.lock().push(1));
             s.spawn(|| {
                 let mut g = x.lock();

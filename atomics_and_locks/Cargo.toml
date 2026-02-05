@@ -3,4 +3,18 @@ name = "atomics_and_locks"
 version = "0.1.0"
 edition = "2024"
 
+
+[lib]
+name = "atomics_and_locks"
+path = "src/lib.rs"
+
+
 [dependencies]
+atomic-wait = "1.1.0"
+
+[[test]]
+name = "perf_mutex"
+path = "tests/perf_mutex.rs"
+
+[profile.bench]
+debug = true
