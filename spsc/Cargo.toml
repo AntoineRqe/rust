@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+core_affinity = "0.8.3"
 
 
 [[bench]]
@@ -26,6 +27,18 @@ codegen-units = 16
 debug = true
 strip = false
 
-[[bin]]
-name = "profile"
-path = "src/bin/profile.rs"
+
+[features]
+default = ["cache-padding"]
+cache-padding = []
+
+
+[[example]]
+name = "profile_aligned"
+required-features = ["cache-padding"]
+path = "src/example/profile_aligned.rs"
+
+
+[[example]]
+name = "profile_unaligned"
+path = "src/example/profile_unaligned.rs"

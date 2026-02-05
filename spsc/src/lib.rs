@@ -6,11 +6,19 @@ use std::marker::PhantomData;
 use std::thread;
 
 
+#[cfg(feature = "cache-padding")]
 #[repr(align(64))]
-pub struct CachePadded<T> (T);
+pub struct CachePadded<T>(T);
 
+#[cfg(not(feature = "cache-padding"))]
+pub struct CachePadded<T>(T);
+
+#[cfg(feature = "cache-padding")]
 #[repr(align(64))]
-pub struct AlignedBuffer<T, const N: usize> ([MaybeUninit<T>; N]);
+pub struct AlignedBuffer<T, const N: usize>([MaybeUninit<T>; N]);
+
+#[cfg(not(feature = "cache-padding"))]
+pub struct AlignedBuffer<T, const N: usize>([MaybeUninit<T>; N]);
 
 pub struct RingBuffer<T, const N: usize> {
     pub head: CachePadded<AtomicUsize>,
