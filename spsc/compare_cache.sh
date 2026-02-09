@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CORES="1,3"
+CORES="0,7"
 
 echo "╔════════════════════════════════════════════════════════╗"
 echo "║     Cache Padding Impact Analysis                      ║"

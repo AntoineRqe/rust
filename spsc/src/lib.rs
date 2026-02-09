@@ -1,9 +1,9 @@
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::cell::UnsafeCell;
-use std::thread::{Thread};
-use std::marker::PhantomData;
-use std::thread;
+// use std::thread::{Thread};
+// use std::marker::PhantomData;
+// use std::thread;
 
 
 #[cfg(feature = "cache-padding")]
@@ -48,7 +48,6 @@ impl<T, const N: usize> Drop for RingBuffer<T, N> {
     fn drop(&mut self) {
         let mut head = self.head.0.load(Ordering::Relaxed);
         let tail = self.tail.0.load(Ordering::Relaxed);
-
         while head != tail {
             unsafe {
                 self.buffer.get()
