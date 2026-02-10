@@ -145,18 +145,22 @@ impl GeminiApiCall {
                 presence_penalty: None,
                 frequency_penalty: None,
                 stop_sequences: None,
-                // response_mime_type: Some(String::from("application/json")),
-                // response_schema: Some(ResponseSchema {
-                //     schema_type: String::from("object"),
-                //     additional_properties: AdditionalProperties {
-                //         value_type: String::from("array"),
-                //         items: Items {
-                //             item_type: String::from("string"),
-                //         },
-                //     },
-                // }),
-                response_mime_type: None,
-                response_schema: None,
+                response_mime_type: cfg!(feature = "output-json")
+                    .then(|| String::from("application/json")),
+                response_schema: if cfg!(feature = "output-json") {
+                    Some(ResponseSchema {
+                    schema_type: String::from("object"),
+                    additional_properties: AdditionalProperties {
+                        value_type: String::from("array"),
+                        items: Items {
+                            item_type: String::from("string"),
+                        },
+                    },
+                })
+                } else {
+                    None
+                },
+
                 seed: Some(generate_seed() as i32),
                 response_logprobs: None,
                 logprobs: None,

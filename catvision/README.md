@@ -31,7 +31,13 @@ Its behavior is entirely controlled through a JSON configuration file, making it
 Run the classifier:
 
 ```bash
-cargo run --release -- --input ~/microsoft.csv --config configs/config-prod.json
+cargo run --release --features output-json -- --input ~/domain.csv --config configs/config-prod-classify.json --command classify
+```
+
+Run the describer:
+
+```bash
+cargo run --release --no-default-features  -- --input ~/domain.csv --config configs/config-prod-describe.json --command describe
 ```
 
 ---
@@ -160,17 +166,3 @@ linkedin.com,Professional social network
 ```
 
 ---
-
-## Development
-
-Build:
-
-```bash
-cargo build
-```
-
-Run with example data:
-
-```bash
-cargo run -- --input ./data/example.csv --config ./configs/config-prod.json --command classify
-```

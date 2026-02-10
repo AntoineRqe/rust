@@ -15,3 +15,6 @@ tokio = "1.49.0"
 
 utils = { path = "../utils" }     # Likely needs core types
 config = { path = "../config" }
+
+[features]
+output-json = []

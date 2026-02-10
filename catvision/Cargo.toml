@@ -32,6 +32,7 @@ codegen-units = 1               # Better optimization, slower compile
 strip = true                    # Remove debug symbols
 panic = "abort"                 # Smaller binary size
 
+
 # Optional: separate profile for faster release builds during development
 [profile.release-dev]
 inherits = "release"
