@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/order-book",
+]
+
+# Shared dependencies across all crates
+[workspace.dependencies]
+
+# Optimization profiles
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+# Full optimizations for release
+lto = "thin"                    # Link-time optimization
+codegen-units = 1               # Better optimization, slower compile
+strip = true                    # Remove debug symbols
+panic = "abort"
