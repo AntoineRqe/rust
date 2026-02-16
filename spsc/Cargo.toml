@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+core_affinity = "0.8.3"
 
 
 [[bench]]
@@ -17,7 +18,7 @@ crossbeam = "0.8.4"
 crossbeam-utils = "0.8.21"
 criterion = "0.8.2"
 hdrhistogram = "7.5.4"
-core_affinity = "0.8.3"
+
 
 
 [profile.profiling]
@@ -35,9 +36,13 @@ cache-padding = []
 [[example]]
 name = "profile_aligned"
 required-features = ["cache-padding"]
-path = "src/example/profile_aligned.rs"
+path = "examples/profile_aligned.rs"
 
 
 [[example]]
 name = "profile_unaligned"
-path = "src/example/profile_unaligned.rs"
+path = "examples/profile_unaligned.rs"
+
+[[example]]
+name = "profile_lock"
+path = "examples/profile_lock.rs"

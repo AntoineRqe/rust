@@ -5,12 +5,15 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use std::sync::OnceLock;
 
-use spsc::RingBuffer;
+use spsc::spsc_lock_free::RingBuffer;
 use crossbeam::queue::ArrayQueue;
 use core_affinity::CoreId;
 
 const N: usize = 4096; // Size of the ring buffer
 const ITERATIONS: usize = 1_000_000;
+
+const PRODUCER_CORE_OFFSET: usize = 0; // Producer on the first core
+const CONSUMER_CORE_OFFSET: usize = 2; // Offset to ensure producer and consumer are on different cores
 
 // At the top level of your benchmark file
 static BENCHMARK_CORES: OnceLock<Vec<CoreId>> = OnceLock::new();
@@ -34,8 +37,8 @@ fn benchmark_ringbuffer() -> (u64, u64) {
         panic!("Need at least 2 cores available. Run with: taskset -c 0,1 cargo bench");
     }
     
-    let producer_core = cores[0];
-    let consumer_core = cores[1];
+    let producer_core = cores[PRODUCER_CORE_OFFSET % cores.len()];
+    let consumer_core = cores[CONSUMER_CORE_OFFSET % cores.len()];
     
     let hist = thread::scope(|s| {
         let mut hist: Histogram<u64> = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
@@ -87,8 +90,8 @@ fn benchmark_crossbeam() -> (u64, u64) {
         panic!("Need at least 2 cores available. Run with: taskset -c 0,1 cargo bench");
     }
     
-    let producer_core = cores[0];
-    let consumer_core = cores[1];
+    let producer_core = cores[PRODUCER_CORE_OFFSET % cores.len()];
+    let consumer_core = cores[CONSUMER_CORE_OFFSET % cores.len()];
 
     let producer = thread::spawn(move || {
         core_affinity::set_for_current(producer_core);

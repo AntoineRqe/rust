@@ -42,6 +42,8 @@ I wrote several papers to explain the design decisions and implementation detail
 
 - [Cache Management in Lock-Free Data Structures](papers/cache-management.md)
 
+- [SPSC implementation discussion](papers/spsc-implementation.md)
+
 ## Profiling
 To profile the ring buffer performance, use the `profile.rs` script located in the `src/bin` directory. You can run it using:
 ```rust

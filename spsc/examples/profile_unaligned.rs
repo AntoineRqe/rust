@@ -1,4 +1,4 @@
-use spsc::{Producer, Consumer, RingBuffer};
+use spsc::spsc_lock_free::{Producer, Consumer, RingBuffer};
 use std::thread;
 extern crate core_affinity;
 use std::sync::OnceLock;
