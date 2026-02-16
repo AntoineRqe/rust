@@ -1,5 +1,7 @@
 use std::{cmp::Reverse, collections::BinaryHeap};
-use crate::types::{Order, OrderType, Side};
+use crate::types::{Order, Side, OrderResult, OrderStatus};
+use tracing::{instrument};
+
 
 /// Represents the order book, maintaining separate heaps for bids and asks.
 /// Bids are stored in a max-heap (higher prices have priority), while asks are stored in a min-heap (lower prices have priority).
@@ -8,41 +10,6 @@ pub struct OrderBook {
     pub bids: BinaryHeap<Order>,
     pub asks: BinaryHeap<Reverse<Order>>,
     id_counter: u64,
-}
-
-/// Represents the status of an order after processing.
-/// - `New`: The order is new and has not been processed yet.
-/// - `PartiallyFilled`: The order has been partially filled, meaning some quantity has been matched, but there is still remaining quantity in the order book.
-/// - `Filled`: The order has been completely filled, meaning all quantity has been matched and there is no remaining quantity in the order book.
-/// - `NotMatched`: The order could not be matched with any existing orders in the order book, and remains in the order book as a new order.
-/// - `Canceled`: The order has been canceled and removed from the order book.
-#[derive(PartialEq, Eq, Debug)]
-pub enum OrderStatus {
-    New,
-    PartiallyFilled,
-    Filled,
-    NotMatched,
-    Canceled,
-}
-
-pub struct OrderResult {
-    pub price: f64,
-    pub quantity: f64,
-    pub side: Side,
-    pub order_type: OrderType,
-    pub order_id: u64,
-    pub trade_id: Option<u64>,
-    pub status: OrderStatus,
-}
-
-impl std::fmt::Display for OrderResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "OrderResult {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, order_id: {}, trade_id: {:?}, status: {:?} }}",
-            self.price, self.quantity, self.side, self.order_type, self.order_id, self.trade_id, self.status
-        )
-    }
 }
 
 impl OrderBook {
@@ -54,7 +21,9 @@ impl OrderBook {
         }
     }
 
+    #[instrument(level = "debug", skip(self, order), fields(order_id = order.id, side = ?order.side, price = order.price, quantity = order.quantity))]
     pub fn process_order(&mut self, order: Order) -> OrderResult {
+
         match order.side {
             Side::Buy => self.process_buy_order(order),
             Side::Sell => self.process_sell_order(order),
@@ -156,29 +125,34 @@ impl OrderBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::OrderType::{LimitOrder};
 
     #[test]
     fn test_order_book() {
+        logging::init_tracing("order_book");
+
+        tracing::debug!("TEST STARTED");
+
         let mut order_book = OrderBook::new();
         let order1 = Order {
             price: 100.0,
             quantity: 10.0,
             side: Side::Buy,
-            order_type: OrderType::LimitOrder,
+            order_type: LimitOrder,
             id: 1,
         };
         let order2 = Order {
             price: 99.0,
             quantity: 5.0,
             side: Side::Sell,
-            order_type: OrderType::LimitOrder,
+            order_type: LimitOrder,
             id: 2,
         };
         let order3 = Order {
             price: 98.0,
             quantity: 10.0,
             side: Side::Sell,
-            order_type: OrderType::LimitOrder,
+            order_type: LimitOrder,
             id: 3,
         };
 
@@ -190,7 +164,7 @@ mod tests {
         assert_eq!(result1.price, 100.0);
         assert_eq!(result1.quantity, 10.0); // 5 units filled, 5 units remaining
         assert_eq!(result1.side, Side::Buy);
-        assert_eq!(result1.order_type, OrderType::LimitOrder);
+        assert_eq!(result1.order_type, LimitOrder);
         assert_eq!(result1.order_id, 1);
         assert!(result1.trade_id.is_none());
         assert_eq!(result1.status, OrderStatus::NotMatched);
@@ -199,7 +173,7 @@ mod tests {
         assert_eq!(result2.price, 99.0);
         assert_eq!(result2.quantity, 0.0);
         assert_eq!(result2.side, Side::Sell);
-        assert_eq!(result2.order_type, OrderType::LimitOrder);
+        assert_eq!(result2.order_type, LimitOrder);
         assert_eq!(result2.order_id, 2);
         assert!(result2.trade_id.is_some());
         assert_eq!(result2.status, OrderStatus::Filled);
@@ -208,9 +182,12 @@ mod tests {
         assert_eq!(result3.price, 98.0);
         assert_eq!(result3.quantity, 5.0); // 5 units filled, 5 units remaining
         assert_eq!(result3.side, Side::Sell);
-        assert_eq!(result3.order_type, OrderType::LimitOrder);
+        assert_eq!(result3.order_type, LimitOrder);
         assert_eq!(result3.order_id, 3);
         assert!(result3.trade_id.is_some());
         assert_eq!(result3.status, OrderStatus::PartiallyFilled);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
     }
 }

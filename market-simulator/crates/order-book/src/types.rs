@@ -11,12 +11,23 @@ use std::cmp::Ordering;
 /// - `order_type`: The type of the order (limit or market).
 /// - `id`: A unique identifier for the order.
 ///   
+#[derive(Debug, Clone)]
 pub struct Order {
     pub price: f64,
     pub quantity: f64,
     pub side: Side,
     pub order_type: OrderType,
     pub id: u64,
+}
+
+impl std::fmt::Display for Order {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Order {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, id: {} }}",
+            self.price, self.quantity, self.side, self.order_type, self.id
+        )
+    }
 }
 
 impl PartialEq for Order {
@@ -56,3 +67,37 @@ pub enum OrderType {
     MarketOrder,
 }
 
+/// Represents the status of an order after processing.
+/// - `New`: The order is new and has not been processed yet.
+/// - `PartiallyFilled`: The order has been partially filled, meaning some quantity has been matched, but there is still remaining quantity in the order book.
+/// - `Filled`: The order has been completely filled, meaning all quantity has been matched and there is no remaining quantity in the order book.
+/// - `NotMatched`: The order could not be matched with any existing orders in the order book, and remains in the order book as a new order.
+/// - `Canceled`: The order has been canceled and removed from the order book.
+#[derive(PartialEq, Eq, Debug)]
+pub enum OrderStatus {
+    New,
+    PartiallyFilled,
+    Filled,
+    NotMatched,
+    Canceled,
+}
+
+pub struct OrderResult {
+    pub price: f64,
+    pub quantity: f64,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub order_id: u64,
+    pub trade_id: Option<u64>,
+    pub status: OrderStatus,
+}
+
+impl std::fmt::Display for OrderResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OrderResult {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, order_id: {}, trade_id: {:?}, status: {:?} }}",
+            self.price, self.quantity, self.side, self.order_type, self.order_id, self.trade_id, self.status
+        )
+    }
+}
