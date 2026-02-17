@@ -10,22 +10,23 @@ use std::cmp::Ordering;
 /// - `side`: The side of the order (buy or sell).
 /// - `order_type`: The type of the order (limit or market).
 /// - `id`: A unique identifier for the order.
-///   
+/// - `broker_id`: The identifier of the broker placing the order.
 #[derive(Debug, Clone)]
 pub struct Order {
     pub price: f64,
     pub quantity: f64,
     pub side: Side,
     pub order_type: OrderType,
-    pub id: u64,
+    pub order_id: u64,
+    pub broker_id: u64,
 }
 
 impl std::fmt::Display for Order {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Order {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, id: {} }}",
-            self.price, self.quantity, self.side, self.order_type, self.id
+            "Order {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, order_id: {}, broker_id: {} }}",
+            self.price, self.quantity, self.side, self.order_type, self.order_id, self.broker_id
         )
     }
 }
@@ -82,13 +83,18 @@ pub enum OrderStatus {
     Canceled,
 }
 
+pub struct Trade {
+    pub traded_price: f64,
+    pub traded_quantity: f64,
+    pub trade_id: u64,
+}
 pub struct OrderResult {
-    pub price: f64,
-    pub quantity: f64,
+    pub original_price: f64,
+    pub original_quantity: f64,
+    pub trades: Vec<Trade>,
     pub side: Side,
     pub order_type: OrderType,
     pub order_id: u64,
-    pub trade_id: Option<u64>,
     pub status: OrderStatus,
 }
 
@@ -96,8 +102,16 @@ impl std::fmt::Display for OrderResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderResult {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, order_id: {}, trade_id: {:?}, status: {:?} }}",
-            self.price, self.quantity, self.side, self.order_type, self.order_id, self.trade_id, self.status
-        )
+            "OrderResult {{ original_price: {}, original_quantity: {}, side: {:?}, order_type: {:?}, order_id: {}, status: {:?} }}",
+            self.original_price, self.original_quantity, self.side, self.order_type, self.order_id, self.status
+        )?;
+        for trade in &self.trades {
+            write!(
+                f,
+                "  Trade {{ traded_price: {}, traded_quantity: {}, trade_id: {} }}\n",
+                trade.traded_price, trade.traded_quantity, trade.trade_id
+            )?;
+        }
+        Ok(())
     }
 }
