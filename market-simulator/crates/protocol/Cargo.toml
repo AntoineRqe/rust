@@ -1,0 +1,20 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[features]
+default = ["branchless", "simd"]
+branchless = []
+simd = []
+
+[[bench]]
+name = "fix_bench"
+harness = false
+path = "benches/fix.rs"
+
+[dev-dependencies]
+criterion.workspace = true
+hdrhistogram.workspace = true

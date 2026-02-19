@@ -3,6 +3,7 @@ resolver = "2"
 
 members = [
     "crates/order-book",
+    "crates/protocol",
     "crates/logging",
 ]
 
@@ -11,6 +12,8 @@ members = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
+criterion = "0.8.2"
+hdrhistogram = "7.0"
 
 
 # Optimization profiles
