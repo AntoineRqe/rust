@@ -24,7 +24,7 @@ pub struct FixParser<'a> {
 /// - `buf`: The input byte slice containing the FIX message.
 /// Returns:
 /// - A vector of indices where the SOH delimiter (0x01) is found in the input buffer.
-fn find_soh_positions(buf: &[u8]) -> Vec<usize> {
+fn find_delimiter_positions(buf: &[u8], delimiter: u8) -> Vec<usize> {
     let mut positions = Vec::new();
     let len = buf.len();
     let chunks = len / 32;
@@ -33,7 +33,7 @@ fn find_soh_positions(buf: &[u8]) -> Vec<usize> {
         let offset = i * 32;
 
         let block = u8x32::from_slice(&buf[offset..offset + 32]);
-        let mask = block.simd_eq(u8x32::splat(SOH));
+        let mask = block.simd_eq(u8x32::splat(delimiter));
 
         let mut bits = mask.to_bitmask();
 
@@ -45,12 +45,21 @@ fn find_soh_positions(buf: &[u8]) -> Vec<usize> {
     }
 
     for i in (chunks * 32)..len {
-        if buf[i] == SOH {
+        if buf[i] == delimiter {
             positions.push(i);
         }
     }
 
     positions
+}
+
+#[inline(always)]
+fn parse_tag_fast(bytes: &[u8]) -> u32 {
+    let mut v = 0u32;
+    for &b in bytes {
+        v = v * 10 + (b - b'0') as u32;
+    }
+    v
 }
 
 impl<'a> FixParser<'a> {
@@ -66,30 +75,29 @@ impl<'a> FixParser<'a> {
             return Vec::new();
         }
 
-        let soh_positions = find_soh_positions(&self.data[self.pos..]);
+        let soh_positions = find_delimiter_positions(&self.data[self.pos..], SOH);
+
         if soh_positions.is_empty() {
             return Vec::new(); // Malformed message, no more fields
         }
 
         let mut fields = Vec::new();
 
-        for pos in soh_positions {
-            if pos >= self.data.len() {
+        for pos in soh_positions.iter() {
+            if *pos >= self.data.len() {
                 break; // Malformed message, SOH beyond end
             }
 
-            let field = &self.data[self.pos..pos];
-            self.pos = pos + 1; // Move past SOH
+            let field_data = &self.data[self.pos..*pos];
+            self.pos += field_data.len() + 1; // Move past this field and the SOH
 
+            if let Some(eq_pos) = field_data.iter().position(|&b| b == EQUALS) {
+                let tag_str = &field_data[..eq_pos];
+                let value = &field_data[eq_pos + 1..];
 
-            let mut parts = field.splitn(2, |&b| b == EQUALS);
-            let tag_part = parts.next().unwrap();
-            let value_part = parts.next().unwrap();
-
-            fields.push(FixField {
-                tag: std::str::from_utf8(tag_part).unwrap().parse::<u32>().unwrap(),
-                value: value_part,
-            });
+                let tag = parse_tag_fast(tag_str);
+                fields.push(FixField { tag, value });
+            }
         }
         fields
     }
