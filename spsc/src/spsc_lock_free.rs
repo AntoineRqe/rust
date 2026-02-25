@@ -20,6 +20,7 @@ pub struct AlignedBuffer<T, const N: usize>([MaybeUninit<T>; N]);
 #[cfg(not(feature = "cache-padding"))]
 pub struct AlignedBuffer<T, const N: usize>([MaybeUninit<T>; N]);
 
+#[repr(align(64))]
 pub struct RingBuffer<T, const N: usize> {
     pub head: CachePadded<AtomicUsize>,
     pub tail: CachePadded<AtomicUsize>,
@@ -112,6 +113,12 @@ impl<T, const N: usize> RingBuffer<T, N> {
             buffer,
             head: CachePadded(AtomicUsize::new(0)),
             tail: CachePadded(AtomicUsize::new(0)),
+        }
+    }
+
+    pub unsafe fn init(ptr: *mut Self) {
+        unsafe {
+            ptr.write(Self::new());
         }
     }
 
