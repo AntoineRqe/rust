@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+order-book = { path = "../order-book" }
+memory = { path = "../memory" }
+utils = { path = "../utils" }
+spsc.workspace = true
 
 [features]
 default = ["branchless", "simd"]

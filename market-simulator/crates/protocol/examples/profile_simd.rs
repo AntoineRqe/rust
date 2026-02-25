@@ -4,10 +4,9 @@ const ITERATIONS: usize = 1_000_000;
 
 fn main() {
     let data = build_fix_message::<65536>();
-    let mut parser = FixParser::new(&data);
 
     for _ in 0..ITERATIONS {
-        parser = FixParser::new(&data);
+        let mut parser = FixParser::new(&data);
         let message = parser.get_fields();
 
         std::hint::black_box(message);

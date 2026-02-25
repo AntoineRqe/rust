@@ -6,6 +6,7 @@ members = [
     "crates/protocol",
     "crates/logging",
     "crates/memory",
+    "crates/utils",
 ]
 
 # Shared dependencies across all crates
