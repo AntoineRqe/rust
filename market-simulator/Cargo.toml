@@ -5,6 +5,7 @@ members = [
     "crates/order-book",
     "crates/protocol",
     "crates/logging",
+    "crates/memory",
 ]
 
 # Shared dependencies across all crates
@@ -14,6 +15,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 criterion = "0.8.2"
 hdrhistogram = "7.0"
+spsc = { path = "../spsc" }
 
 
 # Optimization profiles

@@ -1,0 +1,9 @@
+[package]
+name = "memory"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memmap2 = "0.9.10"
+order-book = { path = "../order-book" }
+spsc.workspace = true
