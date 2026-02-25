@@ -18,3 +18,9 @@ path = "benches/fix.rs"
 [dev-dependencies]
 criterion.workspace = true
 hdrhistogram.workspace = true
+lazy_static = "1"
+
+
+[[example]]
+name = "profile_simd"
+path = "examples/profile_simd.rs"

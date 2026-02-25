@@ -479,6 +479,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "hdrhistogram",
+ "lazy_static",
 ]
 
 [[package]]

@@ -26,3 +26,14 @@ lto = "thin"                    # Link-time optimization
 codegen-units = 1               # Better optimization, slower compile
 strip = true                    # Remove debug symbols
 panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.profiling]
+inherits = "release"
+codegen-units = 16
+debug = true
+strip = false
