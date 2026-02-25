@@ -1,19 +1,19 @@
 use std::{cmp::Reverse, collections::BinaryHeap};
 use crate::types::{
-    Order,
-    Side,
-    Side::{
-        Buy,
-        Sell
-    },
+    OrderEvent, OrderResult, OrderStatus,
     OrderType::{
+        self,
         LimitOrder,
         MarketOrder
     },
-    OrderResult,
-    OrderStatus,
-    Trade};
-use tracing::{instrument};
+    Price,
+    Side::{
+        self,
+        Buy,
+        Sell
+    },
+    Trade
+};
 
 
 /// Represents the order book, maintaining separate heaps for bids and asks.
@@ -23,8 +23,8 @@ use tracing::{instrument};
 /// - `asks`: A binary heap containing sell orders, sorted by price in ascending order (using `Reverse` to achieve min-heap behavior).
 /// - `id_counter`: A counter used to generate unique trade IDs for matched orders.
 pub struct OrderBook {
-    pub bids: BinaryHeap<Order>,
-    pub asks: BinaryHeap<Reverse<Order>>,
+    pub bids: BinaryHeap<OrderEvent>,
+    pub asks: BinaryHeap<Reverse<OrderEvent>>,
     id_counter: u64,
 }
 
@@ -56,22 +56,22 @@ impl OrderBook {
     /// - `order`: The incoming order to be processed, containing details such as price, quantity, side, order type, order ID, and broker ID.
     /// Returns:
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
-    #[instrument(level = "debug", skip(self, order), fields(order_id = order.order_id, side = ?order.side, price = order.price, quantity = order.quantity))]
-    pub fn process_order(&mut self, order: Order) -> OrderResult {
+    //#[instrument(level = "debug", skip(self, order), fields(order_id = order.order_id, side = ?order.side, price = order.price, quantity = order.quantity))]
+    pub fn process_order(&mut self, order: OrderEvent) -> OrderResult {
         match order.order_type {
             LimitOrder => self.process_limit_order(order),
             MarketOrder => self.process_market_order(order),
         }
     }
 
-    fn process_limit_order(&mut self, order: Order) -> OrderResult {
+    fn process_limit_order(&mut self, order: OrderEvent) -> OrderResult {
         match order.side {
             Buy => self.process_buy_limit_order(order),
             Sell => self.process_sell_limit_order(order),
         }
     }
 
-    fn process_market_order(&mut self, order: Order) -> OrderResult {
+    fn process_market_order(&mut self, order: OrderEvent) -> OrderResult {
         match order.side {
             Buy => self.process_buy_market_order(order),
             Sell => self.process_sell_market_order(order),
@@ -80,7 +80,7 @@ impl OrderBook {
 
     /// Generates an `OrderResult` based on the processed order, including trade ID and status.
     /// The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
-    fn generate_order_result(&mut self, order: &Order, status: Option<OrderStatus>, original_quantity: f64, trades: Vec<Trade>) -> OrderResult {
+    fn generate_order_result(&mut self, order: &OrderEvent, status: Option<OrderStatus>, original_quantity: u64, trades: Vec<Trade>) -> OrderResult {
         OrderResult {
             original_price: order.price,
             original_quantity,
@@ -89,7 +89,7 @@ impl OrderBook {
             order_type: order.order_type,
             order_id: order.order_id,
             status: status.unwrap_or_else(|| {
-                if order.quantity == 0.0 {
+                if order.quantity == 0 {
                     OrderStatus::Filled
                 } else if order.quantity < original_quantity {
                     OrderStatus::PartiallyFilled
@@ -105,7 +105,7 @@ impl OrderBook {
     /// - `order`: The incoming sell limit order to be processed.
     /// Returns:
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
-    fn process_sell_limit_order(&mut self, mut order: Order) -> OrderResult {
+    fn process_sell_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
         let original_quantity = order.quantity;
         let mut trades: Vec<Trade> = Vec::with_capacity(10);
 
@@ -124,13 +124,13 @@ impl OrderBook {
                 });
                 self.id_counter += 1;
         
-                if best_bid.quantity > 0.0 {
+                if best_bid.quantity > 0 {
                     self.bids.push(best_bid);
                 }
                 // Update the incoming order's quantity
                 order.quantity -= trade_quantity;
 
-                if order.quantity == 0.0 {
+                if order.quantity == 0 {
                     return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
                 }
             } else {
@@ -140,7 +140,7 @@ impl OrderBook {
 
         let order_result = self.generate_order_result(&order, None, original_quantity, trades);
 
-        if order.quantity > 0.0 {
+        if order.quantity > 0 {
             self.asks.push(Reverse(order));
         }
 
@@ -152,7 +152,7 @@ impl OrderBook {
     /// - `order`: The incoming buy limit order to be processed.
     /// Returns:
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
-    fn process_buy_limit_order(&mut self, mut order: Order) -> OrderResult {
+    fn process_buy_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
         let original_quantity = order.quantity;
         let mut trades: Vec<Trade> = Vec::with_capacity(10);
 
@@ -171,13 +171,13 @@ impl OrderBook {
                 self.id_counter += 1;
 
                 // If the best ask still has quantity remaining after the trade, push it back onto the asks
-                if best_ask.quantity > 0.0 {
+                if best_ask.quantity > 0 {
                     self.asks.push(Reverse(best_ask));
                 }
                 // Update the incoming order's quantity
                 order.quantity -= trade_quantity;
 
-                if order.quantity == 0.0 {
+                if order.quantity == 0 {
                     return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
                 }
             } else {
@@ -187,43 +187,43 @@ impl OrderBook {
 
         let order_result = self.generate_order_result(&order, None, original_quantity, trades);
 
-        if order.quantity > 0.0 {
+        if order.quantity > 0 {
             self.bids.push(order);
         }
 
         order_result
     }
 
-    fn process_buy_market_order(&mut self, mut order: Order) -> OrderResult {
-        order.price = f64::INFINITY; // Market orders are treated as having an infinitely high price to ensure they match with the best available asks
+    fn process_buy_market_order(&mut self, mut order: OrderEvent) -> OrderResult {
+        order.price = Price::from_f64(f64::INFINITY); // Market orders are treated as having an infinitely high price to ensure they match with the best available asks
         self.process_buy_limit_order(order)
     }
 
-    fn process_sell_market_order(&mut self, mut order: Order) -> OrderResult {
-        order.price = 0.0; // Market orders are treated as having an infinitely low price to ensure they match with the best available bids
+    fn process_sell_market_order(&mut self, mut order: OrderEvent) -> OrderResult {
+        order.price = Price::from_f64(f64::NEG_INFINITY); // Market orders are treated as having an infinitely low price to ensure they match with the best available bids
         self.process_sell_limit_order(order)
     }
 
     /// Gets the best bid from the order book, which is the highest-priced buy order. Since bids are stored in a max-heap, we can directly access the top element.
     /// Returns:
-    /// - An `Option<&Order>` containing a reference to the best bid if it exists
-    pub fn get_best_bid(&self) -> Option<&Order> {
+    /// - An `Option<&OrderEvent>` containing a reference to the best bid if it exists
+    pub fn get_best_bid(&self) -> Option<&OrderEvent> {
         self.bids.peek()
     }
 
-    /// Gets the best ask from the order book, which is the lowest-priced sell order. Since asks are stored in a min-heap using `Reverse`, we need to access the inner `Order` from the `Reverse` wrapper.
+    /// Gets the best ask from the order book, which is the lowest-priced sell order. Since asks are stored in a min-heap using `Reverse`, we need to access the inner `OrderEvent` from the `Reverse` wrapper.
     /// Returns:
-    /// - An `Option<&Order>` containing a reference to the best ask if it exists, or `None` if there are no asks in the order book.
-    pub fn get_best_ask(&self) -> Option<&Order> {
+    /// - An `Option<&OrderEvent>` containing a reference to the best ask if it exists, or `None` if there are no asks in the order book.
+    pub fn get_best_ask(&self) -> Option<&OrderEvent> {
         self.asks.peek().map(|reverse_order| &reverse_order.0)
     }
 
     /// Calculates the spread of the order book, which is the difference between the best ask price and the best bid price. If either the best bid or best ask is not available, it returns `None`.
     /// Returns:
-    /// - An `Option<f64>` containing the spread if both best bid and best ask are available, or `None` if either is missing.
-    pub fn get_spread(&self) -> Option<f64> {
+    /// - An `Option<Price>` containing the spread if both best bid and best ask are available, or `None` if either is missing.
+    pub fn get_spread(&self) -> Option<Price> {
         match (self.get_best_bid(), self.get_best_ask()) {
-            (Some(best_bid), Some(best_ask)) => Some(best_ask.price - best_bid.price),
+            (Some(best_bid), Some(best_ask)) => Some(Price::from_raw(best_ask.price.raw() - best_bid.price.raw())),
             _ => None,
         }
     }
@@ -232,8 +232,8 @@ impl OrderBook {
     /// Arguments:
     /// - `side`: The side of the order book to dump (either `Side::Buy` for bids or `Side::Sell` for asks).
     /// Returns:
-    /// - A `Vec<Order>` containing the orders for the specified side of the order book. For bids, it returns the orders directly from the `bids` heap, and for asks, it extracts the inner `Order` from the `Reverse` wrapper in the `asks` heap
-    pub fn dump_order_book(&self, side: Side) -> Vec<Order> {
+    /// - A `Vec<OrderEvent>` containing the orders for the specified side of the order book. For bids, it returns the orders directly from the `bids` heap, and for asks, it extracts the inner `OrderEvent` from the `Reverse` wrapper in the `asks` heap.
+    pub fn dump_order_book(&self, side: Side) -> Vec<OrderEvent> {
         match side {
             Buy => self.bids.iter().cloned().collect(),
             Sell => self.asks.iter().map(|reverse_order| reverse_order.0.clone()).collect(),
@@ -251,25 +251,25 @@ mod tests {
         logging::init_tracing("order_book");
 
         let mut order_book = OrderBook::new();
-        let order1 = Order {
-            price: 100.0,
-            quantity: 10.0,
+        let order1 = OrderEvent {
+            price: Price::from_f64(100.0), // 100.0 with 8 decimal places
+            quantity: 10,
             side: Buy,
             order_type: LimitOrder,
             order_id: 1,
             broker_id: 666,
         };
-        let order2 = Order {
-            price: 99.0,
-            quantity: 5.0,
+        let order2 = OrderEvent {
+            price: Price::from_f64(99.0),
+            quantity: 5,
             side: Sell,
             order_type: LimitOrder,
             order_id: 2,
             broker_id: 667,
         };
-        let order3 = Order {
-            price: 98.0,
-            quantity: 10.0,
+        let order3 = OrderEvent {
+            price: Price::from_f64(98.0),
+            quantity: 10,
             side: Sell,
             order_type: LimitOrder,
             order_id: 3,
@@ -281,7 +281,7 @@ mod tests {
         let result3 = order_book.process_order(order3);
 
         // The first order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
-        assert_eq!(result1.original_price, 100.0);
+        assert_eq!(result1.original_price, Price::from_f64(100.0));
         assert_eq!(result1.trades.len(), 0); // No trades executed,
         assert_eq!(result1.side, Buy);
         assert_eq!(result1.order_type, LimitOrder);
@@ -289,21 +289,21 @@ mod tests {
         assert_eq!(result1.status, OrderStatus::NotMatched);
 
         // The second order should be completely filled (5 units filled, 0 units remaining).
-        assert_eq!(result2.original_price, 99.0);
+        assert_eq!(result2.original_price, Price::from_f64(99.0));
         assert_eq!(result2.trades.len(), 1); // 5 units * 99.0 price
         assert_eq!(result2.side, Sell);
         assert_eq!(result2.order_type, LimitOrder);
         assert_eq!(result2.order_id, 2);
         assert_eq!(result2.trades[0].trade_id, 0); // Trade ID should be 0 for the first trade
-        assert_eq!(result2.trades[0].traded_quantity, 5.0); // 5 units filled
-        assert_eq!(result2.trades[0].traded_price, 100.0); // 100.0
+        assert_eq!(result2.trades[0].traded_quantity, 5); // 5 units filled
+        assert_eq!(result2.trades[0].traded_price, Price::from_f64(100.0)); // 100.0
         assert_eq!(result2.status, OrderStatus::Filled);
 
         // The third order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the asks.
-        assert_eq!(result3.original_price, 98.0);
+        assert_eq!(result3.original_price, Price::from_f64(98.0));
         assert_eq!(result3.trades.len(), 1); // 5 units * 98.0 price
-        assert_eq!(result3.trades[0].traded_quantity, 5.0); // 5 units filled
-        assert_eq!(result3.trades[0].traded_price, 100.0); // 5 units * 100.0 price
+        assert_eq!(result3.trades[0].traded_quantity, 5); // 5 units filled
+        assert_eq!(result3.trades[0].traded_price, Price::from_f64(100.0)); // 5 units * 100.0 price
         assert_eq!(result3.side, Sell);
         assert_eq!(result3.order_type, LimitOrder);
         assert_eq!(result3.order_id, 3);
@@ -311,8 +311,8 @@ mod tests {
 
         assert_eq!(order_book.bids.len(), 0); // One ask should remain in the order book
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
-        assert_eq!(order_book.asks.peek().unwrap().0.price, 98.0); // The remaining ask should be the one at 98.0
-        assert_eq!(order_book.asks.peek().unwrap().0.quantity, 5.0); // The remaining ask should have a quantity of 5.0
+        assert_eq!(order_book.asks.peek().unwrap().0.price, Price::from_f64(98.0)); // The remaining ask should be the one at 98.0
+        assert_eq!(order_book.asks.peek().unwrap().0.quantity, 5); // The remaining ask should have a quantity of 5
         assert_eq!(order_book.asks.peek().unwrap().0.order_id, 3); // The remaining ask should have the same order ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.broker_id, 668); // The remaining ask should have the same broker ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.order_type, LimitOrder); // The remaining ask should have the same order type as the third order
@@ -327,33 +327,33 @@ mod tests {
 
         let mut order_book = OrderBook::new();
 
-        let order1 = Order {
-            price: 99.0,
-            quantity: 3.0,
+        let order1 = OrderEvent {
+            price: Price::from_f64(99.0),
+            quantity: 3,
             side: Sell,
             order_type: LimitOrder,
             order_id: 0,
             broker_id: 669,
         };
-        let order2 = Order {
-            price: 98.0,
-            quantity: 5.0,
+        let order2 = OrderEvent {
+            price: Price::from_f64(98.0),
+            quantity: 5,
             side: Sell,
             order_type: LimitOrder,
             order_id: 0,
             broker_id: 667,
         };
-        let order3 = Order {
-            price: 97.0,
-            quantity: 3.0,
+        let order3 = OrderEvent {
+            price: Price::from_f64(97.0),
+            quantity: 3,
             side: Sell,
             order_type: LimitOrder,
             order_id: 0,
             broker_id: 668,
         };
-        let order4 = Order {
-            price: 100.0,
-            quantity: 10.0,
+        let order4 = OrderEvent {
+            price: Price::from_f64(100.0),
+            quantity: 10,
             side: Buy,
             order_type: LimitOrder,
             order_id: 0,
@@ -366,7 +366,7 @@ mod tests {
         let result4 = order_book.process_order(order4);
 
         // The first order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
-        assert_eq!(result1.original_price, 99.0);
+        assert_eq!(result1.original_price, Price::from_f64(99.0));
         assert_eq!(result1.trades.len(), 0); // No trades executed,
         assert_eq!(result1.side, Sell);
         assert_eq!(result1.order_type, LimitOrder);
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(result1.status, OrderStatus::NotMatched);
 
         // The second order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
-        assert_eq!(result2.original_price, 98.0);
+        assert_eq!(result2.original_price, Price::from_f64(98.0));
         assert_eq!(result2.trades.len(), 0); // No trades executed,
         assert_eq!(result2.side, Sell);
         assert_eq!(result2.order_type, LimitOrder);
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(result2.status, OrderStatus::NotMatched);
 
         // The third order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
-        assert_eq!(result3.original_price, 97.0);
+        assert_eq!(result3.original_price, Price::from_f64(97.0));
         assert_eq!(result3.trades.len(), 0); // No trades executed,
         assert_eq!(result3.side, Sell);
         assert_eq!(result3.order_type, LimitOrder);
@@ -390,25 +390,25 @@ mod tests {
         assert_eq!(result3.status, OrderStatus::NotMatched);
 
         // The fourth order should be completely filled (3 units filled at 97.0, 5 units filled at 98.0, and 2 units filled at 99.0).
-        assert_eq!(result4.original_price, 100.0);
+        assert_eq!(result4.original_price, Price::from_f64(100.0));
         assert_eq!(result4.trades.len(), 3); // 3 trades executed
         assert_eq!(result4.trades[0].trade_id, 0); // Trade ID should be 0 for the first trade
-        assert_eq!(result4.trades[0].traded_quantity, 3.0); // 3 units filled
-        assert_eq!(result4.trades[0].traded_price, 97.0); // 3 units * 97.0 price
+        assert_eq!(result4.trades[0].traded_quantity, 3); // 3 units filled
+        assert_eq!(result4.trades[0].traded_price, Price::from_f64(97.0)); // 3 units * 97.0 price
         assert_eq!(result4.trades[1].trade_id, 1); // Trade ID should be 1 for the second trade
-        assert_eq!(result4.trades[1].traded_quantity, 5.0); // 5 units filled
-        assert_eq!(result4.trades[1].traded_price, 98.0); // 5 units * 98.0 price
+        assert_eq!(result4.trades[1].traded_quantity, 5); // 5 units filled
+        assert_eq!(result4.trades[1].traded_price, Price::from_f64(98.0)); // 5 units * 98.0 price
         assert_eq!(result4.trades[2].trade_id, 2); // Trade ID should be 2 for the third trade
-        assert_eq!(result4.trades[2].traded_quantity, 2.0); // 2 units filled
-        assert_eq!(result4.trades[2].traded_price, 99.0); // 2 units * 99.0 price
-        assert_eq!(result4.side, Buy);
+        assert_eq!(result4.trades[2].traded_quantity, 2); // 2 units filled
+        assert_eq!(result4.trades[2].traded_price, Price::from_f64(99.0)); // 2 units * 99.0 price
+        assert_eq!(result4.side, Side::Buy);
         assert_eq!(result4.order_type, LimitOrder);
         assert_eq!(result4.order_id, 0);
         assert_eq!(result4.status, OrderStatus::Filled);
 
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
-        assert_eq!(order_book.asks.peek().unwrap().0.price, 99.0); // The remaining ask should be the one at 99.0
-        assert_eq!(order_book.asks.peek().unwrap().0.quantity, 1.0); // The remaining ask should have a quantity of 1.0
+        assert_eq!(order_book.asks.peek().unwrap().0.price, Price::from_f64(99.0)); // The remaining ask should be the one at 99.0
+        assert_eq!(order_book.asks.peek().unwrap().0.quantity, 1); // The remaining ask should have a quantity of 1
         assert_eq!(order_book.asks.peek().unwrap().0.order_id, 0); // The remaining ask should have the same order ID as the first order
         assert_eq!(order_book.asks.peek().unwrap().0.broker_id, 669); // The remaining ask should have the same broker ID as the first order
         assert_eq!(order_book.asks.peek().unwrap().0.order_type, LimitOrder); // The remaining ask should have the same order type as the first order
@@ -425,35 +425,35 @@ mod tests {
 
         let mut order_book = OrderBook::new();
 
-        let order1 = Order {
-            price: 99.0,
-            quantity: 5.0,
-            side: Sell,
-            order_type: LimitOrder,
+        let order1 = OrderEvent {
+            price: Price::from_f64(99.0),
+            quantity: 5,
+            side: Side::Sell,
+            order_type: OrderType::LimitOrder,
             order_id: 0,
             broker_id: 669,
         };
-        let order2 = Order {
-            price: 98.0,
-            quantity: 5.0,
-            side: Sell,
-            order_type: LimitOrder,
+        let order2 = OrderEvent {
+            price: Price::from_f64(98.0),
+            quantity: 5,
+            side: Side::Sell,
+            order_type: OrderType::LimitOrder,
             order_id: 0,
             broker_id: 667,
         };
-        let order3 = Order {
-            price: 98.0,
-            quantity: 10.0,
-            side: Sell,
-            order_type: LimitOrder,
+        let order3 = OrderEvent {
+            price: Price::from_f64(98.0),
+            quantity: 10,
+            side: Side::Sell,
+            order_type: OrderType::LimitOrder,
             order_id: 0,
             broker_id: 668,
         };
-        let order4 = Order {
-            price: 0.0, // Price is ignored for market orders
-            quantity: 12.0,
-            side: Buy,
-            order_type: crate::types::OrderType::MarketOrder,
+        let order4 = OrderEvent {
+            price: Price::from_f64(0.0), // Price is ignored for market orders
+            quantity: 12,
+            side: Side::Buy,
+            order_type: OrderType::MarketOrder,
             order_id: 0,
             broker_id: 666,
         };
@@ -464,21 +464,21 @@ mod tests {
         let result4 = order_book.process_order(order4);
 
         // The first three orders should be added to the asks heap as they are limit sell orders.
-        assert_eq!(result1.original_price, 99.0);
+        assert_eq!(result1.original_price, Price::from_f64(99.0));
         assert_eq!(result1.trades.len(), 0); // No trades executed
         assert_eq!(result1.side, Sell);
         assert_eq!(result1.order_type, LimitOrder);
         assert_eq!(result1.order_id, 0);
         assert_eq!(result1.status, OrderStatus::NotMatched);
 
-        assert_eq!(result2.original_price, 98.0);
+        assert_eq!(result2.original_price, Price::from_f64(98.0));
         assert_eq!(result2.trades.len(), 0); // No trades executed
         assert_eq!(result2.side, Sell);
         assert_eq!(result2.order_type, LimitOrder);
         assert_eq!(result2.order_id, 0);
         assert_eq!(result2.status, OrderStatus::NotMatched);
 
-        assert_eq!(result3.original_price, 98.0);
+        assert_eq!(result3.original_price, Price::from_f64(98.0));
         assert_eq!(result3.trades.len(), 0); // No trades executed
         assert_eq!(result3.side, Sell);
         assert_eq!(result3.order_type, LimitOrder);
@@ -486,14 +486,14 @@ mod tests {
         assert_eq!(result3.status, OrderStatus::NotMatched);
 
         // The fourth order should be completely filled (5 units filled at 98.0 and 7 units filled at 99.0).
-        assert_eq!(result4.original_price, f64::INFINITY); // Market orders are treated as having an infinitely high price
+        assert_eq!(result4.original_price, Price::from_f64(f64::INFINITY)); // Market orders are treated as having an infinitely high price
         assert_eq!(result4.trades.len(), 2); // 2 trades executed
         assert_eq!(result4.trades[0].trade_id, 0); // Trade ID should be 0 for the first trade
-        assert_eq!(result4.trades[0].traded_quantity, 5.0); // 5 units filled
-        assert_eq!(result4.trades[0].traded_price, 98.0); // 5 units * 98.0 price
+        assert_eq!(result4.trades[0].traded_quantity, 5); // 5 units filled
+        assert_eq!(result4.trades[0].traded_price, Price::from_f64(98.0)); // 5 units * 98.0 price
         assert_eq!(result4.trades[1].trade_id, 1); // Trade ID should be 1 for the second trade
-        assert_eq!(result4.trades[1].traded_quantity, 7.0); // 7 units filled
-        assert_eq!(result4.trades[1].traded_price, 98.0); // 7 units * 98.0 price
+        assert_eq!(result4.trades[1].traded_quantity, 7); // 7 units filled
+        assert_eq!(result4.trades[1].traded_price, Price::from_f64(98.0)); // 7 units * 98.0 price
         assert_eq!(result4.side, Buy);
         assert_eq!(result4.order_type, MarketOrder);
         assert_eq!(result4.order_id, 0);
@@ -501,13 +501,13 @@ mod tests {
 
         // Check the remaining orders in the order book after processing the market order
         assert_eq!(order_book.asks.len(), 2); // Two asks should remain in the order book
-        assert_eq!(order_book.asks.peek().unwrap().0.price, 98.0); // The remaining ask should be the one at 98.0
-        assert_eq!(order_book.asks.peek().unwrap().0.quantity, 3.0); // The remaining ask should have a quantity of 3.0
+        assert_eq!(order_book.asks.peek().unwrap().0.price, Price::from_f64(98.0)); // The remaining ask should be the one at 98.0
+        assert_eq!(order_book.asks.peek().unwrap().0.quantity, 3); // The remaining ask should have a quantity of 3.0
         assert_eq!(order_book.asks.peek().unwrap().0.order_id, 0); // The remaining ask should have the same order ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.broker_id, 668); // The remaining ask should have the same broker ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.order_type, LimitOrder); // The remaining ask should have the same order type as the third order
-        assert_eq!(order_book.asks.iter().nth(1).unwrap().0.price, 99.0); // The second remaining ask should be the one at 99.0
-        assert_eq!(order_book.asks.iter().nth(1).unwrap().0.quantity, 5.0); // The second remaining ask should have a quantity of 5.0
+        assert_eq!(order_book.asks.iter().nth(1).unwrap().0.price, Price::from_f64(99.0)); // The second remaining ask should be the one at 99.0
+        assert_eq!(order_book.asks.iter().nth(1).unwrap().0.quantity, 5); // The second remaining ask should have a quantity of 5.0
 
     }
 
@@ -515,17 +515,17 @@ mod tests {
     fn test_spread_calculation() {
         logging::init_tracing("order_book");
         let mut order_book = OrderBook::new();
-        let order1 = Order {
-            price: 100.0,
-            quantity: 10.0,
+        let order1 = OrderEvent {
+            price: Price::from_f64(100.0),
+            quantity: 10,
             side: Buy,
             order_type: LimitOrder,
             order_id: 0,
             broker_id: 666,
         };
-        let order2 = Order {
-            price: 102.0,
-            quantity: 5.0,
+        let order2 = OrderEvent {
+            price: Price::from_f64(102.0),
+            quantity: 5,
             side: Sell,
             order_type: LimitOrder,
             order_id: 0,
@@ -536,7 +536,7 @@ mod tests {
         order_book.process_order(order2);
 
         let spread = order_book.get_spread();
-        assert_eq!(spread, Some(2.0)); // Spread should be 102.0 - 100.0 = 2.0
+        assert_eq!(spread, Some(Price::from_f64(2.0))); // Spread should be 102.0 - 100.0 = 2.0
 
         // Give time for the logs to be flushed before the test ends
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -546,17 +546,17 @@ mod tests {
     fn test_dump_order_book() {
         logging::init_tracing("order_book");
         let mut order_book = OrderBook::new();
-        let order1 = Order {
-            price: 100.0,
-            quantity: 10.0,
+        let order1 = OrderEvent {
+            price: Price::from_f64(100.0),
+            quantity: 10,
             side: Buy,
             order_type: LimitOrder,
             order_id: 0,
             broker_id: 666,
         };
-        let order2 = Order {
-            price: 102.0,
-            quantity: 5.0,
+        let order2 = OrderEvent {
+            price: Price::from_f64(102.0),
+            quantity: 5,
             side: Sell,
             order_type: LimitOrder,
             order_id: 0,
@@ -570,15 +570,15 @@ mod tests {
         let asks = order_book.dump_order_book(Sell);
 
         assert_eq!(bids.len(), 1); // One bid should be in the order book
-        assert_eq!(bids[0].price, 100.0); // The bid should have the correct price
-        assert_eq!(bids[0].quantity, 10.0); // The bid should have the correct quantity
+        assert_eq!(bids[0].price, Price::from_f64(100.0)); // The bid should have the correct price
+        assert_eq!(bids[0].quantity, 10); // The bid should have the correct quantity
         assert_eq!(bids[0].order_id, 0); // The bid should have the correct order ID
         assert_eq!(bids[0].broker_id, 666); // The bid should have the correct broker ID
         assert_eq!(bids[0].order_type, LimitOrder); // The bid should have the correct order type
 
         assert_eq!(asks.len(), 1); // One ask should be in the order book
-        assert_eq!(asks[0].price, 102.0); // The ask should have the correct price
-        assert_eq!(asks[0].quantity, 5.0); // The ask should have the correct quantity
+        assert_eq!(asks[0].price, Price::from_f64(102.0)); // The ask should have the correct price
+        assert_eq!(asks[0].quantity, 5); // The ask should have the correct quantity
         assert_eq!(asks[0].order_id, 0); // The ask should have the correct order ID
         assert_eq!(asks[0].broker_id, 667); // The ask should have the correct broker ID
         assert_eq!(asks[0].order_type, LimitOrder); // The ask should have the correct order type
