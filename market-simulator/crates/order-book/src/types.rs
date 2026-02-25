@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering};
 
 /// Represents an order in the order book.
 /// Orders are compared based on price for sorting in the order book.
@@ -11,22 +11,76 @@ use std::cmp::Ordering;
 /// - `order_type`: The type of the order (limit or market).
 /// - `id`: A unique identifier for the order.
 /// - `broker_id`: The identifier of the broker placing the order.
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct OrderEvent {
     pub price: Price,
-    pub quantity: u64,
+    pub quantity: u64, // In FIX, qty is a float but we will use integer for simplicity (e.g. 100.0 -> 100)
     pub side: Side,
     pub order_type: OrderType,
-    pub order_id: u64,
-    pub broker_id: u64,
+    pub order_id: [u8; 20], // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub sender_id: [u8; 20], // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub target_id: [u8; 20], // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
 }
 
+impl Default for OrderEvent {
+    fn default() -> Self {
+        Self {
+            price: Price::PRICE_ZERO,
+            quantity: 0,
+            side: Side::Buy,
+            order_type: OrderType::LimitOrder,
+            order_id: [0u8; 20],
+            sender_id: [0u8; 20],
+            target_id: [0u8; 20],
+        }
+    }
+}
+
+impl OrderEvent {
+    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, order_id: [u8; 20], sender_id: [u8; 20], target_id: [u8; 20]) -> Self {
+        Self {
+            price,
+            quantity,
+            side,
+            order_type,
+            order_id,
+            sender_id,
+            target_id,
+        }
+    }
+
+    pub fn check_valid(&self) -> bool {
+        if self.side != Side::Buy && self.side != Side::Sell {
+            return false;
+        }
+        if self.order_type != OrderType::LimitOrder && self.order_type != OrderType::MarketOrder {
+            return false;
+        }
+        if self.quantity == 0 {
+            return false;
+        }
+        if self.price.raw() < 0 {
+            return false;
+        }
+        if self.order_id.iter().all(|&b| b == 0) {
+            return false;
+        }
+        if self.sender_id.iter().all(|&b| b == 0) {
+            return false;
+        }
+        if self.target_id.iter().all(|&b| b == 0) {
+            return false;
+        }
+        true
+    }
+}
 impl std::fmt::Display for OrderEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, order_id: {}, broker_id: {} }}",
-            self.price.raw(), self.quantity, self.side, self.order_type, self.order_id, self.broker_id
+            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?} }}",
+            self.price.raw(), self.quantity, self.side, self.order_type, self.order_id, self.sender_id, self.target_id
         )
     }
 }
@@ -85,7 +139,7 @@ pub enum OrderStatus {
 pub struct Trade {
     pub traded_price: Price,
     pub traded_quantity: u64,
-    pub trade_id: u64,
+    pub trade_id: [u8; 20], // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
 }
 pub struct OrderResult {
     pub original_price: Price,
@@ -93,21 +147,23 @@ pub struct OrderResult {
     pub trades: Vec<Trade>,
     pub side: Side,
     pub order_type: OrderType,
-    pub order_id: u64,
+    pub order_id: [u8; 20],
     pub status: OrderStatus,
+    pub sender_id: [u8; 20],
+    pub target_id: [u8; 20],
 }
 
 impl std::fmt::Display for OrderResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderResult {{ original_price: {}, original_quantity: {}, side: {:?}, order_type: {:?}, order_id: {}, status: {:?} }}",
-            self.original_price.raw(), self.original_quantity, self.side, self.order_type, self.order_id, self.status
+            "OrderResult {{ original_price: {}, original_quantity: {}, side: {:?}, order_type: {:?}, order_id: {:?}, status: {:?}, sender_id: {:?}, target_id: {:?} }}\n",
+            self.original_price.raw(), self.original_quantity, self.side, self.order_type, self.order_id, self.status, self.sender_id, self.target_id
         )?;
         for trade in &self.trades {
             write!(
                 f,
-                "  Trade {{ traded_price: {}, traded_quantity: {}, trade_id: {} }}\n",
+                "  Trade {{ traded_price: {}, traded_quantity: {}, trade_id: {:?} }}\n",
                 trade.traded_price.raw(), trade.traded_quantity, trade.trade_id
             )?;
         }
@@ -120,7 +176,9 @@ impl std::fmt::Display for OrderResult {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Price(i64);
 
+
 impl Price {
+    pub const PRICE_ZERO: Price = Price(0);
     pub const SCALE: i64 = 100_000_000; // 10^8
 
     pub fn from_fix_bytes(bytes: &[u8]) -> Option<Self> {
