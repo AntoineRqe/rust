@@ -271,6 +271,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order2 = OrderEvent {
             price: Price::from_f64(99.0),
@@ -280,6 +281,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order3 = OrderEvent {
             price: Price::from_f64(98.0),
@@ -289,6 +291,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
 
         let result1 = order_book.process_order(order1);
@@ -364,6 +367,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order2 = OrderEvent {
             price: Price::from_f64(98.0),
@@ -373,6 +377,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order3 = OrderEvent {
             price: Price::from_f64(97.0),
@@ -382,6 +387,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order4 = OrderEvent {
             price: Price::from_f64(100.0),
@@ -391,6 +397,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
 
         let result1 = order_book.process_order(order1);
@@ -504,6 +511,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order2 = OrderEvent {
             price: Price::from_f64(98.0),
@@ -513,6 +521,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order3 = OrderEvent {
             price: Price::from_f64(98.0),
@@ -522,6 +531,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order4 = OrderEvent {
             price: Price::from_f64(0.0), // Price is ignored for market orders
@@ -531,6 +541,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
 
         let result1 = order_book.process_order(order1);
@@ -624,6 +635,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order2 = OrderEvent {
             price: Price::from_f64(102.0),
@@ -633,6 +645,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
 
         order_book.process_order(order1);
@@ -657,6 +670,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
         let order2 = OrderEvent {
             price: Price::from_f64(102.0),
@@ -666,6 +680,7 @@ mod tests {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         };
 
         order_book.process_order(order1);

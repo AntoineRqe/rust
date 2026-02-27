@@ -100,8 +100,13 @@ impl<'a> FixEngine<'a> {
                             utils::copy_array(&mut order_event.target_id, field.value);
                         },
                         fix::tags::ORDER_QTY => {
-                            if let Some(qty) = utils::parse_u64_ascii(field.value) {
+                            if let Some(qty) = utils::parse_unsigned_ascii::<u64>(field.value) {
                                 order_event.quantity = qty;
+                            }
+                        },
+                        fix::tags::SENDING_TIME => {
+                            if let Some(timestamp) = utils::UtcTimestamp::from_fix_bytes(field.value) {
+                                order_event.timestamp = timestamp.to_unix_ms() as u64;
                             }
                         },
                         _ => continue, // Skip unsupported tags
@@ -166,9 +171,9 @@ mod tests {
             assert_eq!(field_str(&order_event.sender_id), b"SENDER");
             assert_eq!(field_str(&order_event.target_id), b"TARGET");
             assert_eq!(order_event.quantity, 1_000_000);
-            assert_eq!(order_event.price,    Price(123_456_000));
-            assert_eq!(order_event.side,     Side::Buy);
-            
+            assert_eq!(order_event.price, Price(123_456_000));
+            assert_eq!(order_event.side, Side::Buy);
+
             handle.stop();
         });
     }

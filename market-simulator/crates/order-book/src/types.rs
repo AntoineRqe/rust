@@ -21,6 +21,7 @@ pub struct OrderEvent {
     pub order_id: [u8; 20], // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub sender_id: [u8; 20], // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub target_id: [u8; 20], // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
 impl Default for OrderEvent {
@@ -33,12 +34,13 @@ impl Default for OrderEvent {
             order_id: [0u8; 20],
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
+            timestamp: 0,
         }
     }
 }
 
 impl OrderEvent {
-    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, order_id: [u8; 20], sender_id: [u8; 20], target_id: [u8; 20]) -> Self {
+    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, order_id: [u8; 20], sender_id: [u8; 20], target_id: [u8; 20], timestamp: u64) -> Self {
         Self {
             price,
             quantity,
@@ -47,6 +49,7 @@ impl OrderEvent {
             order_id,
             sender_id,
             target_id,
+            timestamp,
         }
     }
 
