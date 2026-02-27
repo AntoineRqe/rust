@@ -13,8 +13,8 @@ pub mod tags {
     pub const TARGET_COMP_ID: u32 = 56;
     pub const MSG_SEQ_NUM: u32 = 34;
     pub const SENDING_TIME: u32 = 52;
-    pub const ORDER_ID: u32 = 37;
-    pub const CL_ORD_ID: u32 = 11;
+    pub const ORDER_ID: u32 = 37; // Unique order ID assigned by the exchange, for the sell side to track orders
+    pub const CL_ORD_ID: u32 = 11;  // Client order ID, unique per order, for the buy side to track their orders
     pub const EXEC_ID: u32 = 17;
     pub const EXEC_TYPE: u32 = 150;
     pub const ORD_STATUS: u32 = 39;

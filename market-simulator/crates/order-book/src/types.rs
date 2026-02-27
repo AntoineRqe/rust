@@ -50,31 +50,32 @@ impl OrderEvent {
         }
     }
 
-    pub fn check_valid(&self) -> bool {
-        if self.side != Side::Buy && self.side != Side::Sell {
-            return false;
+    pub fn check_valid(&self) -> Result<(), &'static str> {
+         if self.side != Side::Buy && self.side != Side::Sell {
+            return Err("Invalid side");
         }
         if self.order_type != OrderType::LimitOrder && self.order_type != OrderType::MarketOrder {
-            return false;
+            return Err("Invalid order type");
         }
         if self.quantity == 0 {
-            return false;
+            return Err("Quantity cannot be zero");
         }
         if self.price.raw() < 0 {
-            return false;
+            return Err("Price cannot be negative");
         }
         if self.order_id.iter().all(|&b| b == 0) {
-            return false;
+            return Err("Order ID cannot be empty");
         }
         if self.sender_id.iter().all(|&b| b == 0) {
-            return false;
+            return Err("Sender ID cannot be empty");
         }
         if self.target_id.iter().all(|&b| b == 0) {
-            return false;
+            return Err("Target ID cannot be empty");
         }
-        true
+        Ok(())
     }
 }
+
 impl std::fmt::Display for OrderEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -174,7 +175,7 @@ impl std::fmt::Display for OrderResult {
 /// Price represented as integer with implicit 8 decimal places
 /// e.g. 123.45678900 -> 12_345_678_900
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Price(i64);
+pub struct Price(pub i64);
 
 
 impl Price {

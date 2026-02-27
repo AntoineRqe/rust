@@ -17,3 +17,10 @@ pub fn parse_u64_ascii(bytes: &[u8]) -> Option<u64> {
     }
     Some(result)
 }
+
+///Remove trailing zeros from a fixed-size byte array and return a subslice containing only the valid data.
+#[inline(always)]
+pub fn field_str(f: &[u8]) -> &[u8] {
+    let len = f.iter().position(|&b| b == 0).unwrap_or(f.len());
+    &f[..len]
+}
