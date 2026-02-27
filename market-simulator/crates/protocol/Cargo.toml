@@ -8,6 +8,7 @@ order-book = { path = "../order-book" }
 memory = { path = "../memory" }
 utils = { path = "../utils" }
 spsc.workspace = true
+crossbeam.workspace = true
 
 [features]
 default = ["branchless", "simd"]

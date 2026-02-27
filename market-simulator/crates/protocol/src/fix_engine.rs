@@ -2,15 +2,25 @@ use std::sync::atomic::AtomicBool;
 
 use crate::fix;
 use order_book::types::{OrderEvent, Price, Side};
-use spsc::spsc_lock_free::{Producer, Consumer};
+use spsc::spsc_lock_free::{Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use crossbeam::queue::ArrayQueue;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct FixRawMsg<const N: usize> {
     pub len: u16,
     pub data: [u8; N],
+}
+
+impl<const N: usize> Default for FixRawMsg<N> {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            data: [0u8; N],
+        }
+    }
 }
 
 /// A handle to control the FIX engine thread, allowing for graceful shutdown.
@@ -28,14 +38,14 @@ impl<'scope> ScopedFixEngineHandle<'scope> {
 
 pub fn spawn_scoped<'scope, 'env>(
     scope: &'scope std::thread::Scope<'scope, 'env>,
-    fix_in:  Consumer<'env, FixRawMsg<1024>, 1024>,
-    fix_out: Producer<'env, OrderEvent, 1024>,
+    fifo_in:  Arc<ArrayQueue<FixRawMsg<1024>>>,
+    fifo_out: Producer<'env, OrderEvent, 1024>,
 ) -> ScopedFixEngineHandle<'scope> {
     let running = Arc::new(AtomicBool::new(true));
 
     let mut engine = FixEngine {
-        fifo_in:  fix_in,
-        fifo_out: fix_out,
+        fifo_in:  fifo_in,
+        fifo_out: fifo_out,
         counter:  0,
         running:  Arc::clone(&running),
     };
@@ -47,7 +57,7 @@ pub fn spawn_scoped<'scope, 'env>(
 /// A simple FIX engine that reads raw FIX messages from an input queue, parses them, and pushes structured order events to an output queue. This is a very basic implementation that only handles New Order Single messages and extracts a few fields for demonstration purposes.
 /// In a real system, you would need to handle many more message types and fields, as well as error handling and performance optimizations.
 pub struct FixEngine<'a> {
-    fifo_in: Consumer<'a, FixRawMsg<1024>, 1024>,
+    fifo_in: Arc<ArrayQueue<FixRawMsg<1024>>>,
     fifo_out: Producer<'a, OrderEvent, 1024>,
     counter: usize,
     running: Arc<AtomicBool>,
@@ -55,10 +65,20 @@ pub struct FixEngine<'a> {
 
 impl<'a> FixEngine<'a> {
     
+    pub fn new(fifo_in: Arc<ArrayQueue<FixRawMsg<1024>>>, fifo_out: Producer<'a, OrderEvent, 1024>) -> Self {
+        Self {
+            fifo_in,
+            fifo_out,
+            counter: 0,
+            running: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     pub fn run(&mut self) {
         while self.running.load(Ordering::Relaxed) {
             // The pop already handles backoff when the queue is empty, so we can just wait for messages to arrive, we can use a busy loop here without sleeping
             if let Some(msg) = self.fifo_in.pop() {
+                println!("FixEngine: Processing message #{}", self.counter);
                 let mut parser = fix::FixParser::new(&msg.data[..msg.len as usize]);
                 let fields = parser.get_fields();
 
@@ -138,13 +158,12 @@ mod tests {
 
     #[test]
     fn test_fix_engine() {
-        let mut network_out_fix_in = RingBuffer::<FixRawMsg<1024>, 1024>::new();
-        let (network_out, fix_in) = network_out_fix_in.split();
+        let network_out_fix_in = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
         let mut fix_out_order_book_in = RingBuffer::<OrderEvent, 1024>::new();
         let (fix_out, order_book_in) = fix_out_order_book_in.split();
 
         std::thread::scope(|scope| {
-            let handle = spawn_scoped(scope, fix_in, fix_out);
+            let handle = spawn_scoped(scope, network_out_fix_in.clone(), fix_out);
 
             let fix_message = b"8=FIX.4.4\x019=0000\x0135=D\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0111=12345\x0154=1\x0138=1000000\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
 
@@ -157,7 +176,7 @@ mod tests {
                 },
             };
 
-            network_out.push(raw_msg).expect("Failed to push message");
+            network_out_fix_in.push(raw_msg).expect("Failed to push message");
 
             // spin wait instead of sleep
             let order_event = loop {

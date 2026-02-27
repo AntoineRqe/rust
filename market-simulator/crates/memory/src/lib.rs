@@ -3,7 +3,12 @@ use memmap2::MmapMut;
 use spsc::spsc_lock_free::{RingBuffer};
 use order_book::types::OrderEvent;
 
-pub fn open_shared_queue<const N: usize>(name: &str, create: bool) -> (MmapMut, &'static RingBuffer<OrderEvent, N>) {
+pub struct SharedQueue<const N: usize> {
+    _mmap: MmapMut,  // keeps the mapping alive
+    pub queue: &'static mut RingBuffer<OrderEvent, N>,
+}
+
+pub fn open_shared_queue<const N: usize>(name: &str, create: bool) -> SharedQueue<N> {
     let size = std::mem::size_of::<RingBuffer<OrderEvent, N>>();
 
     let file = match OpenOptions::new()
@@ -25,7 +30,10 @@ pub fn open_shared_queue<const N: usize>(name: &str, create: bool) -> (MmapMut, 
         unsafe { RingBuffer::init(queue_ptr) };
     }
 
-    let queue = unsafe { &*queue_ptr };
+    let queue = unsafe { &mut *queue_ptr };
 
-    (mmap, queue)
+    SharedQueue {
+        _mmap: mmap,
+        queue,
+    }
 }

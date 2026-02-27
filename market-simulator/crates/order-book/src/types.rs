@@ -239,3 +239,12 @@ impl Price {
         self.0
     }
 }
+
+impl std::fmt::Display for Price {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw = self.0;
+        let integer_part = raw / Self::SCALE;
+        let frac_part = (raw.abs() % Self::SCALE) as u64;
+        write!(f, "{}.{:08}", integer_part, frac_part)
+    }
+}

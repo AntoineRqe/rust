@@ -7,6 +7,7 @@ members = [
     "crates/logging",
     "crates/memory",
     "crates/utils",
+    "crates/server",
 ]
 
 # Shared dependencies across all crates
@@ -17,7 +18,21 @@ tracing-appender = "0.2"
 criterion = "0.8.2"
 hdrhistogram = "7.0"
 spsc = { path = "../spsc" }
+crossbeam = "0.8.2"
 
+# Main binary crate
+[package]
+name = "market-simulator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+server = { path = "crates/server" }
+protocol = { path = "crates/protocol" }
+order-book = { path = "crates/order-book" }
+crossbeam.workspace = true
+spsc.workspace = true
+memory = { path = "crates/memory" }
 
 # Optimization profiles
 [profile.dev]
