@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::time::Duration;
-use protocol::fix::{FixParser};
+use fix::parser::{FixParser};
 use std::sync::Mutex;
 
 // Global storage for results, populated during benchmarks

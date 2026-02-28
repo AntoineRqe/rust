@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 tracing.workspace = true
+spsc.workspace = true
 logging = { path = "../logging" }

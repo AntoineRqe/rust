@@ -3,7 +3,7 @@ resolver = "2"
 
 members = [
     "crates/order-book",
-    "crates/protocol",
+    "crates/protocol/FIX",
     "crates/logging",
     "crates/memory",
     "crates/utils",
@@ -28,7 +28,7 @@ edition = "2024"
 
 [dependencies]
 server = { path = "crates/server" }
-protocol = { path = "crates/protocol" }
+fix = { path = "crates/protocol/FIX" }
 order-book = { path = "crates/order-book" }
 crossbeam.workspace = true
 spsc.workspace = true

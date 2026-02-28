@@ -18,7 +18,7 @@ pub struct OrderEvent {
     pub quantity: u64, // In FIX, qty is a float but we will use integer for simplicity (e.g. 100.0 -> 100)
     pub side: Side,
     pub order_type: OrderType,
-    pub order_id: [u8; 20], // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub order_id: OrderId, // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub sender_id: [u8; 20], // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub target_id: [u8; 20], // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
@@ -31,7 +31,7 @@ impl Default for OrderEvent {
             quantity: 0,
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -40,7 +40,7 @@ impl Default for OrderEvent {
 }
 
 impl OrderEvent {
-    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, order_id: [u8; 20], sender_id: [u8; 20], target_id: [u8; 20], timestamp: u64) -> Self {
+    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, order_id: OrderId, sender_id: [u8; 20], target_id: [u8; 20], timestamp: u64) -> Self {
         Self {
             price,
             quantity,
@@ -65,9 +65,6 @@ impl OrderEvent {
         }
         if self.price.raw() < 0 {
             return Err("Price cannot be negative");
-        }
-        if self.order_id.iter().all(|&b| b == 0) {
-            return Err("Order ID cannot be empty");
         }
         if self.sender_id.iter().all(|&b| b == 0) {
             return Err("Sender ID cannot be empty");
@@ -140,18 +137,44 @@ pub enum OrderStatus {
     Canceled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TradeId(pub [u8; 20]);
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OrderId(pub [u8; 20]);
+
+#[derive(Debug, Clone)]
 pub struct Trade {
     pub traded_price: Price,
     pub traded_quantity: u64,
-    pub trade_id: [u8; 20], // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub trade_id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
 }
+
+impl TradeId {
+    pub fn new() -> Self {
+        TradeId([0u8; 20]) // In a real implementation, you would want to generate unique IDs
+    }
+
+    pub fn increment(&mut self) {
+        for i in (0..self.0.len()).rev() {
+            if self.0[i] < 255 {
+                self.0[i] += 1;
+                break;
+            } else {
+                self.0[i] = 0; // Reset to zero and carry over to the next byte
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct OrderResult {
     pub original_price: Price,
     pub original_quantity: u64,
     pub trades: Vec<Trade>,
     pub side: Side,
     pub order_type: OrderType,
-    pub order_id: [u8; 20],
+    pub order_id: OrderId,
     pub status: OrderStatus,
     pub sender_id: [u8; 20],
     pub target_id: [u8; 20],

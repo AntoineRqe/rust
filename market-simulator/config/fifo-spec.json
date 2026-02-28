@@ -1,0 +1,26 @@
+{
+    "order-book": {
+        "in" : {
+            "type": "shared_queue",
+            "name": "fix_ob_queue",
+            "capacity": 1024
+        },
+        "out": {
+            "type": "shared_queue",
+            "name": "ob_trades_queue",
+            "capacity": 1024
+        }
+    },
+    "fix-engine": {
+        "in" : {
+            "type": "shared_queue",
+            "name": "fix_messages_queue",
+            "capacity": 1024
+        },
+        "out": {
+            "type": "shared_queue",
+            "name": "fix_ob_queue",
+            "capacity": 1024
+        }
+    }
+}

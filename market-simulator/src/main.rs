@@ -1,41 +1,34 @@
+use order_book::types::{OrderEvent, OrderResult};
+use order_book::order_book::{OrderBookEngine};
 use server::tcp::FixServer;
 use std::sync::Arc;
 use crossbeam::queue::ArrayQueue;
-use protocol::fix_engine::{FixEngine, FixRawMsg};
+use fix::engine::{FixEngine};
 use memory;
+use fix::engine::{RequestQueue};
 use std::net::TcpListener;
 
 fn main() {
-    let fix_engine_queue  = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
-    let order_book_queue = memory::open_shared_queue::<1024>("order_book_queue", true);
+    // inbound: network → fix engine → order book
+    let net_to_fix   = RequestQueue::new(ArrayQueue::new(1024));
+    let fix_to_ob    = memory::open_shared_queue::<1024, OrderEvent>("fix_to_order_book", true);
 
-    let (fix_engine_out, order_book_in) = order_book_queue.queue.split();
+    // outbound: order book → fix engine → network
+    let ob_to_fix = memory::open_shared_queue::<1024, OrderResult>("order_book_to_fix", true);
 
-    let mut order_book = order_book::order_book::OrderBook::new();
+    let (fix_tx, ob_rx) = fix_to_ob.queue.split();
+    let (ob_resp_tx, fix_resp_rx) = ob_to_fix.queue.split();
 
     // fix engine thread
-    let mut engine = FixEngine ::new(Arc::clone(&fix_engine_queue), fix_engine_out);
-    std::thread::spawn(move || engine.run());
+    let mut fix_engine = FixEngine ::new(Arc::clone(&net_to_fix), fix_tx, fix_resp_rx);
+    std::thread::spawn(move || fix_engine.run());
 
-    // order book thread
-    std::thread::spawn(move || {
-        loop {
-            if let Some(event) = order_book_in.pop() {
-                order_book.process_order(event);
-            } else {
-                std::hint::spin_loop();
-            }
-        }
-    });
+    // Book engine thread
+    let mut order_book_engine = OrderBookEngine::new(ob_rx, ob_resp_tx);
+    std::thread::spawn(move || order_book_engine.run());
 
     // tcp server — each client pushes directly into fifo_in
-    let server = FixServer::new(fix_engine_queue);
+    let server: FixServer<1024> = FixServer::new(net_to_fix);
     let listener = TcpListener::bind("127.0.0.1:9876").unwrap();
     server.accept_loop(listener);
 }
-
-/* ## Architecture
-```
-Client 1 ──┐
-Client 2 ──┼──▶ Arc<ArrayQueue<FixRawMsg>>  ──▶  FixEngine  ──▶  SPCP  ──▶  OrderBook
-Client 3 ──┘         (MPMC, lock-free)                         (SPSC, lock-free) */

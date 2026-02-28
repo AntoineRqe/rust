@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{cmp::Reverse, collections::BinaryHeap, sync::atomic::AtomicBool};
 use crate::types::{
     OrderEvent, OrderResult, OrderStatus,
     OrderType::{
@@ -11,9 +11,52 @@ use crate::types::{
         Buy,
         Sell
     },
-    Trade
+    Trade,
+    TradeId,
 };
 
+use spsc::spsc_lock_free::{Consumer, Producer};
+use std::sync::atomic::Ordering;
+
+pub struct OrderBookEngine<'a, const N: usize> {
+    fifo_in: Consumer<'a, OrderEvent, N>,
+    fifo_out: Producer<'a, OrderResult, N>,
+    order_book: OrderBook,
+    running: AtomicBool,
+}
+
+impl<'a, const N: usize> OrderBookEngine<'a, N> {
+    pub fn new(fifo_in: Consumer<'a, OrderEvent, N>, fifo_out: Producer<'a, OrderResult, N>) -> Self {
+        OrderBookEngine {
+            fifo_in,
+            fifo_out,
+            order_book: OrderBook::new(),
+            running: AtomicBool::new(true),
+        }
+    }
+
+    pub fn run(&mut self) {
+        while self.running.load(Ordering::Relaxed) {
+            if let Some(event) = self.fifo_in.pop() {
+                println!("Received order event: {}", event);
+                let mut result = self.order_book.process_order(event);
+                // Here you would typically send the result back to the FIX engine or log it
+                while let Err(res) = self.fifo_out.push(result) {
+                    result = res;
+                    std::hint::spin_loop(); // If the output queue is full, spin until there is space
+                }
+                println!("Processed order event");
+            } else {
+                std::hint::spin_loop(); // No events to process, spin until new events arrive
+            }
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        println!("OrderBookEngine: Stopped");
+    }
+}
 
 /// Represents the order book, maintaining separate heaps for bids and asks.
 /// Bids are stored in a max-heap (higher prices have priority), while asks are stored in a min-heap (lower prices have priority).
@@ -24,7 +67,7 @@ use crate::types::{
 pub struct OrderBook {
     pub bids: BinaryHeap<OrderEvent>,
     pub asks: BinaryHeap<Reverse<OrderEvent>>,
-    id_counter: [u8; 20], // Counter for generating unique trade IDs, using a fixed-size array for simplicity
+    id_counter: TradeId, // Counter for generating unique trade IDs, using a fixed-size array for simplicity
 }
 
 impl std::fmt::Display for OrderBook {
@@ -46,18 +89,7 @@ impl OrderBook {
             // Arbitrary initial capacity for the heaps to avoid frequent resizing; can be adjusted based on expected order volume.
             bids: BinaryHeap::with_capacity(1024),
             asks: BinaryHeap::with_capacity(1024),
-            id_counter: [0; 20], // Initialize the trade ID counter to zero
-        }
-    }
-
-    fn increment_trade_id(&mut self) {
-        for i in (0..self.id_counter.len()).rev() {
-            if self.id_counter[i] < 255 {
-                self.id_counter[i] += 1;
-                break;
-            } else {
-                self.id_counter[i] = 0; // Reset to zero and carry over to the next byte
-            }
+            id_counter: TradeId::new(), // Initialize the trade ID counter to zero
         }
     }
 
@@ -68,6 +100,7 @@ impl OrderBook {
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
     //#[instrument(level = "debug", skip(self, order), fields(order_id = order.order_id, side = ?order.side, price = order.price, quantity = order.quantity))]
     pub fn process_order(&mut self, order: OrderEvent) -> OrderResult {
+        println!("Processing order: ID={:?}, Side={:?}, Price={}, Quantity={}", order.order_id, order.side, order.price, order.quantity);
         match order.order_type {
             LimitOrder => self.process_limit_order(order),
             MarketOrder => self.process_market_order(order),
@@ -99,7 +132,7 @@ impl OrderBook {
             order_type: order.order_type,
             sender_id: order.sender_id,
             target_id: order.target_id,
-            order_id: order.order_id,
+            order_id: order.order_id.clone(),
             status: status.unwrap_or_else(|| {
                 if order.quantity == 0 {
                     OrderStatus::Filled
@@ -132,10 +165,10 @@ impl OrderBook {
                 trades.push(Trade {
                     traded_price: best_bid.price,
                     traded_quantity: trade_quantity,
-                    trade_id: self.id_counter, // Example trade ID
+                    trade_id: self.id_counter.clone(), // Example trade ID
                 });
 
-                self.increment_trade_id(); // Increment the trade ID counter
+                self.id_counter.increment(); // Increment the trade ID counter
         
                 if best_bid.quantity > 0 {
                     self.bids.push(best_bid);
@@ -179,9 +212,9 @@ impl OrderBook {
                 trades.push(Trade {
                     traded_price: best_ask.price,
                     traded_quantity: trade_quantity,
-                    trade_id: self.id_counter, // Example trade ID
+                    trade_id: self.id_counter.clone(), // Example trade ID
                 });
-                self.increment_trade_id(); // Increment the trade ID counter
+                self.id_counter.increment(); // Increment the trade ID counter
 
                 // If the best ask still has quantity remaining after the trade, push it back onto the asks
                 if best_ask.quantity > 0 {
@@ -256,6 +289,8 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::OrderId;
+
     use super::*;
 
     #[test]
@@ -268,7 +303,7 @@ mod tests {
             quantity: 10,
             side: Buy,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -278,7 +313,7 @@ mod tests {
             quantity: 5,
             side: Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -288,7 +323,7 @@ mod tests {
             quantity: 10,
             side: Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -303,7 +338,7 @@ mod tests {
         assert_eq!(result1.trades.len(), 0); // No trades executed,
         assert_eq!(result1.side, Buy);
         assert_eq!(result1.order_type, LimitOrder);
-        assert_eq!(result1.order_id, [0u8; 20]);
+        assert_eq!(result1.order_id, OrderId::default());
         assert_eq!(result1.status, OrderStatus::NotMatched);
 
         // The second order should be completely filled (5 units filled, 0 units remaining).
@@ -311,12 +346,8 @@ mod tests {
         assert_eq!(result2.trades.len(), 1); // 5 units * 99.0 price
         assert_eq!(result2.side, Sell);
         assert_eq!(result2.order_type, LimitOrder);
-        for i in 0..20 {
-            assert_eq!(result2.order_id[i], 0u8); // Order ID should be 0 for the second order
-        }
-        for i in 0..20 {
-            assert_eq!(result2.trades[0].trade_id[i], 0u8); // Trade ID should be 0 for the first trade
-        }
+        assert_eq!(result2.order_id, OrderId::default());
+        assert_eq!(result2.trades[0].trade_id, TradeId::new()); // Trade ID should be 0 for the first trade
         assert_eq!(result2.trades[0].traded_quantity, 5); // 5 units filled
         assert_eq!(result2.trades[0].traded_price, Price::from_f64(100.0)); // 100.0
         assert_eq!(result2.status, OrderStatus::Filled);
@@ -328,25 +359,18 @@ mod tests {
         assert_eq!(result3.trades[0].traded_price, Price::from_f64(100.0)); // 5 units * 100.0 price
         assert_eq!(result3.side, Sell);
         assert_eq!(result3.order_type, LimitOrder);
-        for i in 0..20 {
-            assert_eq!(result3.order_id[i], 0u8); // Order ID should be 0 for the third order
-        }
-        assert_eq!(result3.trades[0].trade_id[19], 1u8); // Trade ID should be 1 for the second trade
+        assert_eq!(result3.order_id, OrderId::default()); // Order ID should be 0 for the third order
+        assert_eq!(result3.trades[0].trade_id.0[19], 1); // Trade ID should be 1 for the second trade
         assert_eq!(result3.status, OrderStatus::PartiallyFilled);
 
         assert_eq!(order_book.bids.len(), 0); // One ask should remain in the order book
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
         assert_eq!(order_book.asks.peek().unwrap().0.price, Price::from_f64(98.0)); // The remaining ask should be the one at 98.0
         assert_eq!(order_book.asks.peek().unwrap().0.quantity, 5); // The remaining ask should have a quantity of 5
-        for i in 0..20 {
-            assert_eq!(order_book.asks.peek().unwrap().0.order_id[i], 0u8); // The remaining ask should have the same order ID as the third order
-        }
-         for i in 0..20 {
-            assert_eq!(order_book.asks.peek().unwrap().0.sender_id[i], 0u8); // The remaining ask should have the same sender ID as the third order
-        }
-         for i in 0..20 {
-            assert_eq!(order_book.asks.peek().unwrap().0.target_id[i], 0u8); // The remaining ask should have the same target ID as the third order
-        }
+        assert_eq!(order_book.asks.peek().unwrap().0.order_id, OrderId::default()); // The remaining ask should have the same order ID as the third order
+        assert_eq!(order_book.asks.peek().unwrap().0.sender_id, [0u8; 20]); // The remaining ask should have the same sender ID as the third order
+        assert_eq!(order_book.asks.peek().unwrap().0.target_id, [0u8; 20]); // The remaining ask should have the same target ID as the third order
+        assert_eq!(order_book.asks.peek().unwrap().0.target_id, [0u8; 20]); // The remaining ask should have the same target ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.order_type, LimitOrder); // The remaining ask should have the same order type as the third order
         // Give time for the logs to be flushed before the test ends
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -364,7 +388,7 @@ mod tests {
             quantity: 3,
             side: Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -374,7 +398,7 @@ mod tests {
             quantity: 5,
             side: Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -384,7 +408,7 @@ mod tests {
             quantity: 3,
             side: Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -394,7 +418,7 @@ mod tests {
             quantity: 10,
             side: Buy,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -411,10 +435,8 @@ mod tests {
         assert_eq!(result1.side, Sell);
         assert_eq!(result1.order_type, LimitOrder);
 
+        assert_eq!(result1.order_id, OrderId::default()); // Order ID should be 0 for the first order
         for i in 0..20 {
-            assert_eq!(result1.order_id[i], 0u8); // Order ID should be 0 for the first order
-        }
-         for i in 0..20 {
             assert_eq!(result1.sender_id[i], 0u8); // Sender ID should be 0 for the first order
         }
          for i in 0..20 {
@@ -427,10 +449,8 @@ mod tests {
         assert_eq!(result2.trades.len(), 0); // No trades executed,
         assert_eq!(result2.side, Sell);
         assert_eq!(result2.order_type, LimitOrder);
+        assert_eq!(result2.order_id, OrderId::default()); // Order ID should be 0 for the second order
         for i in 0..20 {
-            assert_eq!(result2.order_id[i], 0u8); // Order ID should be 0 for the second order
-        }
-         for i in 0..20 {
             assert_eq!(result2.sender_id[i], 0u8); // Sender ID should be 0 for the second order
         }
          for i in 0..20 {
@@ -443,15 +463,9 @@ mod tests {
         assert_eq!(result3.trades.len(), 0); // No trades executed,
         assert_eq!(result3.side, Sell);
         assert_eq!(result3.order_type, LimitOrder);
-        for i in 0..20 {
-            assert_eq!(result3.order_id[i], 0u8); // Order ID should be 0 for the third order
-        }
-         for i in 0..20 {
-            assert_eq!(result3.sender_id[i], 0u8); // Sender ID should be 0 for the third order
-        }
-         for i in 0..20 {
-            assert_eq!(result3.target_id[i], 0u8); // Target ID should be 0 for the third order
-        }
+        assert_eq!(result3.order_id, OrderId::default()); // Order ID should be 0 for the third order
+        assert_eq!(result3.sender_id, [0u8; 20]); // Sender ID should be 0 for the third order
+        assert_eq!(result3.target_id, [0u8; 20]); // Target ID should be 0 for the third order
         assert_eq!(result3.status, OrderStatus::NotMatched);
 
         // The fourth order should be completely filled (3 units filled at 97.0, 5 units filled at 98.0, and 2 units filled at 99.0).
@@ -465,29 +479,17 @@ mod tests {
         assert_eq!(result4.trades[2].traded_price, Price::from_f64(99.0)); // 2 units * 99.0 price
         assert_eq!(result4.side, Side::Buy);
         assert_eq!(result4.order_type, LimitOrder);
-        for i in 0..20 {
-            assert_eq!(result4.order_id[i], 0u8); // Order ID should be 0 for the fourth order
-        }
-         for i in 0..20 {
-            assert_eq!(result4.sender_id[i], 0u8); // Sender ID should be 0 for the fourth order
-        }
-         for i in 0..20 {
-            assert_eq!(result4.target_id[i], 0u8); // Target ID should be 0 for the fourth order
-        }
+        assert_eq!(result4.order_id, OrderId::default()); // Order ID should be 0 for the fourth order
+        assert_eq!(result4.sender_id, [0u8; 20]); // Sender ID should be 0 for the fourth order
+        assert_eq!(result4.target_id, [0u8; 20]); // Target ID should be 0 for the fourth order
         assert_eq!(result4.status, OrderStatus::Filled);
 
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
         assert_eq!(order_book.asks.peek().unwrap().0.price, Price::from_f64(99.0)); // The remaining ask should be the one at 99.0
         assert_eq!(order_book.asks.peek().unwrap().0.quantity, 1); // The remaining ask should have a quantity of 1
-        for i in 0..20 {
-            assert_eq!(order_book.asks.peek().unwrap().0.order_id[i], 0u8); // The remaining ask should have the same order ID as the first order
-        }
-         for i in 0..20 {
-            assert_eq!(order_book.asks.peek().unwrap().0.sender_id[i], 0u8); // The remaining ask should have the same sender ID as the first order
-        }
-         for i in 0..20 {
-            assert_eq!(order_book.asks.peek().unwrap().0.target_id[i], 0u8); // The remaining ask should have the same target ID as the first order
-        }
+        assert_eq!(order_book.asks.peek().unwrap().0.order_id, OrderId::default()); // The remaining ask should have the same order ID as the first order
+        assert_eq!(order_book.asks.peek().unwrap().0.sender_id, [0u8; 20]); // The remaining ask should have the same sender ID as the first order
+        assert_eq!(order_book.asks.peek().unwrap().0.target_id, [0u8; 20]); // The remaining ask should have the same target ID as the first order
         assert_eq!(order_book.asks.peek().unwrap().0.order_type, LimitOrder);
 // The remaining ask should have the same order type as the first order
 
@@ -508,7 +510,7 @@ mod tests {
             quantity: 5,
             side: Side::Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -518,7 +520,7 @@ mod tests {
             quantity: 5,
             side: Side::Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -528,7 +530,7 @@ mod tests {
             quantity: 10,
             side: Side::Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -538,7 +540,7 @@ mod tests {
             quantity: 12,
             side: Side::Buy,
             order_type: MarketOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -554,13 +556,9 @@ mod tests {
         assert_eq!(result1.trades.len(), 0); // No trades executed
         assert_eq!(result1.side, Sell);
         assert_eq!(result1.order_type, LimitOrder);
-        assert_eq!(result1.order_id, [0u8; 20]);
-         for i in 0..20 {
-            assert_eq!(result1.sender_id[i], 0u8); // Sender ID should be 0 for the first order
-        }
-         for i in 0..20 {
-            assert_eq!(result1.target_id[i], 0u8); // Target ID should be 0 for the first order
-        }
+        assert_eq!(result1.order_id, OrderId::default());
+        assert_eq!(result1.sender_id, [0u8; 20]);
+        assert_eq!(result1.target_id, [0u8; 20]);
         assert_eq!(result1.status, OrderStatus::NotMatched);
 
         assert_eq!(result2.original_price, Price::from_f64(98.0));
@@ -585,36 +583,32 @@ mod tests {
          for i in 0..20 {
             assert_eq!(result3.target_id[i], 0u8); // Target ID should be 0 for the third order
         }
-         for i in 0..20 {
-            assert_eq!(result3.order_id[i], 0u8); // Order ID should be 0 for the third order
-        }
+        assert_eq!(result3.order_id, OrderId::default());
+        assert_eq!(result3.sender_id, [0u8; 20]);
+        assert_eq!(result3.target_id, [0u8; 20]);
         assert_eq!(result3.status, OrderStatus::NotMatched);
 
         // The fourth order should be completely filled (5 units filled at 98.0 and 7 units filled at 99.0).
         assert_eq!(result4.original_price, Price::from_f64(f64::INFINITY)); // Market orders are treated as having an infinitely high price
         assert_eq!(result4.trades.len(), 2); // 2 trades executed
-        assert_eq!(result4.trades[0].trade_id[19], 0u8); // Trade ID should be 1 for the first two trades
+        assert_eq!(result4.trades[0].trade_id, TradeId::default()); // Trade ID should be 1 for the first two trades
         assert_eq!(result4.trades[0].traded_quantity, 5); // 5 units filled
         assert_eq!(result4.trades[0].traded_price, Price::from_f64(98.0)); // 5 units * 98.0 price
-        assert_eq!(result4.trades[1].trade_id[19], 1u8); // Trade ID should be 2 for the second trade
+        assert_eq!(result4.trades[1].trade_id.0[19], 1); // Trade ID should be 2 for the second trade
         assert_eq!(result4.trades[1].traded_quantity, 7); // 7 units filled
         assert_eq!(result4.trades[1].traded_price, Price::from_f64(98.0)); // 7 units * 98.0 price
         assert_eq!(result4.side, Buy);
         assert_eq!(result4.order_type, MarketOrder);
-        assert_eq!(result4.order_id, [0u8; 20]); // Order ID should be 0 for the fourth order
-         for i in 0..20 {
-            assert_eq!(result4.sender_id[i], 0u8); // Sender ID should be 0 for the fourth order
-        }
-         for i in 0..20 {
-            assert_eq!(result4.target_id[i], 0u8); // Target ID should be 0 for the fourth order
-        }
+        assert_eq!(result4.order_id, OrderId::default()); // Order ID should be 0 for the fourth order
+        assert_eq!(result4.sender_id, [0u8; 20]); // Sender ID should be 0 for the fourth order
+        assert_eq!(result4.target_id, [0u8; 20]); // Target ID should be 0 for the fourth order
         assert_eq!(result4.status, OrderStatus::Filled);
 
         // Check the remaining orders in the order book after processing the market order
         assert_eq!(order_book.asks.len(), 2); // Two asks should remain in the order book
         assert_eq!(order_book.asks.peek().unwrap().0.price, Price::from_f64(98.0)); // The remaining ask should be the one at 98.0
         assert_eq!(order_book.asks.peek().unwrap().0.quantity, 3); // The remaining ask should have a quantity of 3.0
-        assert_eq!(order_book.asks.peek().unwrap().0.order_id, [0u8; 20]); // The remaining ask should have the same order ID as the third order
+        assert_eq!(order_book.asks.peek().unwrap().0.order_id, OrderId::default()); // The remaining ask should have the same order ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.sender_id, [0u8; 20]); // The remaining ask should have the same sender ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.target_id, [0u8; 20]); // The remaining ask should have the same target ID as the third order
         assert_eq!(order_book.asks.peek().unwrap().0.order_type, LimitOrder); // The remaining ask should have the same order type as the third order
@@ -632,7 +626,7 @@ mod tests {
             quantity: 10,
             side: Buy,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -642,7 +636,7 @@ mod tests {
             quantity: 5,
             side: Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -667,7 +661,7 @@ mod tests {
             quantity: 10,
             side: Buy,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -677,7 +671,7 @@ mod tests {
             quantity: 5,
             side: Sell,
             order_type: LimitOrder,
-            order_id: [0u8; 20],
+            order_id: OrderId::default(),
             sender_id: [0u8; 20],
             target_id: [0u8; 20],
             timestamp: 0,
@@ -692,7 +686,7 @@ mod tests {
         assert_eq!(bids.len(), 1); // One bid should be in the order book
         assert_eq!(bids[0].price, Price::from_f64(100.0)); // The bid should have the correct price
         assert_eq!(bids[0].quantity, 10); // The bid should have the correct quantity
-        assert_eq!(bids[0].order_id, [0u8; 20]); // The bid should have the correct order ID
+        assert_eq!(bids[0].order_id, OrderId::default()); // The bid should have the correct order ID
         assert_eq!(bids[0].sender_id, [0u8; 20]); // The bid should have the correct sender ID
         assert_eq!(bids[0].target_id, [0u8; 20]); // The bid should have the correct target ID
         assert_eq!(bids[0].order_type, LimitOrder); // The bid should have the correct order type
@@ -700,7 +694,7 @@ mod tests {
         assert_eq!(asks.len(), 1); // One ask should be in the order book
         assert_eq!(asks[0].price, Price::from_f64(102.0)); // The ask should have the correct price
         assert_eq!(asks[0].quantity, 5); // The ask should have the correct quantity
-        assert_eq!(asks[0].order_id, [0u8; 20]); // The ask should have the correct order ID
+        assert_eq!(asks[0].order_id, OrderId::default()); // The ask should have the correct order ID
         assert_eq!(asks[0].sender_id, [0u8; 20]); // The ask should have the correct sender ID
         assert_eq!(asks[0].target_id, [0u8; 20]); // The ask should have the correct target ID
         assert_eq!(asks[0].order_type, LimitOrder); // The ask should have the correct order type
