@@ -9,6 +9,7 @@ members = [
     "crates/utils",
     "crates/server",
     "crates/execution-report",
+    "crates/types",
 ]
 
 # Shared dependencies across all crates
@@ -35,6 +36,7 @@ crossbeam.workspace = true
 spsc.workspace = true
 memory = { path = "crates/memory" }
 execution-report = { path = "crates/execution-report" }
+types = { path = "crates/types" }
 
 # Optimization profiles
 [profile.dev]

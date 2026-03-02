@@ -1,5 +1,5 @@
 use std::{cmp::Reverse, collections::BinaryHeap, sync::atomic::AtomicBool};
-use crate::types::{
+use types::{
     OrderEvent, OrderResult, OrderStatus,
     OrderType,
     Price,
@@ -131,6 +131,7 @@ impl OrderBook {
                     OrderStatus::New
                 }
             }),
+            timestamp: utils::UtcTimestamp::now().to_unix_ms(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
         }
     }
 
@@ -278,7 +279,7 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{EntityId, FixedString, OrderId, Price, Side};
+    use types::{EntityId, FixedString, OrderId, Price, Side};
     use super::*;
 
     const SYMBOL: FixedString = FixedString::from_ascii("TEST_SYMBOL000000000");

@@ -1,6 +1,5 @@
 use std::{cmp::Ordering};
 use std::ops::Deref;
-use hex;
 
 /// Represents an order in the order book.
 /// Orders are compared based on price for sorting in the order book.
@@ -13,7 +12,6 @@ use hex;
 /// - `order_type`: The type of the order (limit or market).
 /// - `id`: A unique identifier for the order.
 /// - `broker_id`: The identifier of the broker placing the order.
-#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct OrderEvent {
     pub price: Price,
@@ -116,6 +114,60 @@ impl Ord for OrderEvent {
     }
 }
 
+impl TradeId {
+    pub fn new() -> Self {
+        TradeId([0u8; 20]) // In a real implementation, you would want to generate unique IDs
+    }
+
+    pub fn increment(&mut self) {
+        for i in (0..self.0.len()).rev() {
+            if self.0[i] < 255 {
+                self.0[i] += 1;
+                break;
+            } else {
+                self.0[i] = 0; // Reset to zero and carry over to the next byte
+            }
+        }
+    }
+}
+
+/// Represents a trade that occurs when an order is matched in the order book.
+/// Arguments:
+/// - `price`: The price at which the trade occurred.
+/// - `quantity`: The quantity that was traded.
+/// - `id`: A unique identifier for the trade.
+#[derive(Debug, Clone)]
+pub struct Trade {
+    pub price: Price,
+    pub quantity: u64,
+    pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderResult {
+    pub trades: Vec<Trade>,
+    pub status: OrderStatus,
+    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+}
+
+impl std::fmt::Display for OrderResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OrderResult {{ status: {:?} }}\n",
+            self.status
+        )?;
+        for trade in &self.trades {
+            write!(
+                f,
+                "  Trade {{ price: {}, quantity: {}, id: {:?} }}\n",
+                trade.price.raw(), trade.quantity, trade.id
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Represents the side of an order (buy or sell).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -136,7 +188,7 @@ pub enum OrderType {
 /// - `Filled`: The order has been completely filled, meaning all quantity has been matched and there is no remaining quantity in the order book.
 /// - `NotMatched`: The order could not be matched with any existing orders in the order book, and remains in the order book as a new order.
 /// - `Canceled`: The order has been canceled and removed from the order book.
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum OrderStatus {
     New,
     PartiallyFilled,
@@ -212,52 +264,6 @@ impl AsRef<[u8]> for FixedString {
     }
 }
 
-
-#[derive(Debug)]
-pub struct ParseError;
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Failed to parse hex string")
-    }
-}
-
-impl std::error::Error for ParseError {}
-
-pub trait FromHexString: Sized {
-    fn from_hex(hex: &str) -> Result<Self, ParseError>;
-}
-
-impl FromHexString for EntityId {
-    fn from_hex(hex: &str) -> Result<Self, ParseError> {
-        let bytes = hex::decode(hex)
-            .map_err(|_| ParseError)?
-            .try_into()
-            .map_err(|_| ParseError)?;
-        Ok(EntityId(bytes))
-    }
-}
-
-impl FromHexString for OrderId {
-    fn from_hex(hex: &str) -> Result<Self, ParseError> {
-        let bytes = hex::decode(hex)
-            .map_err(|_| ParseError)?
-            .try_into()
-            .map_err(|_| ParseError)?;
-        Ok(OrderId(bytes))
-    }
-}
-
-impl FromHexString for FixedString {
-    fn from_hex(hex: &str) -> Result<Self, ParseError> {
-        let bytes = hex::decode(hex)
-            .map_err(|_| ParseError)?
-            .try_into()
-            .map_err(|_| ParseError)?;
-        Ok(FixedString(bytes))
-    }
-}
-
 impl EntityId {
     pub const fn from_ascii(s: &str) -> Self {
         let mut bytes = [0u8; 20];
@@ -294,53 +300,6 @@ impl FixedString {
             i += 1;
         }
         FixedString(bytes)
-    }
-}
-#[derive(Debug, Clone)]
-pub struct Trade {
-    pub price: Price,
-    pub quantity: u64,
-    pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
-}
-
-impl TradeId {
-    pub fn new() -> Self {
-        TradeId([0u8; 20]) // In a real implementation, you would want to generate unique IDs
-    }
-
-    pub fn increment(&mut self) {
-        for i in (0..self.0.len()).rev() {
-            if self.0[i] < 255 {
-                self.0[i] += 1;
-                break;
-            } else {
-                self.0[i] = 0; // Reset to zero and carry over to the next byte
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct OrderResult {
-    pub trades: Vec<Trade>,
-    pub status: OrderStatus,
-}
-
-impl std::fmt::Display for OrderResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "OrderResult {{ status: {:?} }}\n",
-            self.status
-        )?;
-        for trade in &self.trades {
-            write!(
-                f,
-                "  Trade {{ price: {}, quantity: {}, id: {:?} }}\n",
-                trade.price.raw(), trade.quantity, trade.id
-            )?;
-        }
-        Ok(())
     }
 }
 

@@ -1,6 +1,8 @@
 /// Pre-defined FIX tags we care about on the hot path.
 /// Using constants rather than an enum avoids match overhead.
 pub mod tags {
+    pub const BEGIN_STRING: u32 = 8;
+    pub const BODY_LENGTH: u32 = 9;
     pub const MSG_TYPE: u32 = 35;
     pub const SENDER_COMP_ID: u32 = 49;
     pub const TARGET_COMP_ID: u32 = 56;

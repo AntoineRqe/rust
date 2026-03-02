@@ -47,7 +47,7 @@ impl <'a, const N: usize> FixServer<N> {
                     let mut msg = FixRawMsg::default();
                     msg.len = n as u16;
                     msg.data[..n].copy_from_slice(&buf[..n]);
-                    msg.queue = Some(Arc::clone(&response_queue));
+                    msg.resp_queue = Some(Arc::clone(&response_queue));
 
                     while let Err(backup_msg) = queue.push(msg) {
                         msg = backup_msg;
@@ -55,7 +55,7 @@ impl <'a, const N: usize> FixServer<N> {
                     }
 
                     loop {
-                        if let Some(response) = response_queue.pop() {
+                        if let Some((_, response)) = response_queue.pop() {
                             println!("Sending response of {} bytes to client", response.len);
                             if let Err(e) = stream.write_all(&response.data[..response.len as usize]) {
                                 eprintln!("Failed to send response to client: {}", e);

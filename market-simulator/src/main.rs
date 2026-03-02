@@ -1,4 +1,4 @@
-use order_book::types::{OrderEvent, OrderResult};
+use types::{OrderEvent, OrderResult};
 use order_book::order_book::{OrderBookEngine};
 use server::tcp::FixServer;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ fn main() {
     let ob_to_er     = memory::open_shared_queue::<1024, (OrderEvent, OrderResult)>("order_book_to_execution_report", true);
 
     // outbound: execution report → fix engine → network
-    let er_to_fix     = memory::open_shared_queue::<1024, FixRawMsg<1024>>("execution_report_to_fix", true);
+    let er_to_fix     = memory::open_shared_queue::<1024, (u64, FixRawMsg<1024>)>("execution_report_to_fix", true);
 
     let (fix_tx, ob_rx) = fix_to_ob.queue.split();
     let (ob_tx, er_rx) = ob_to_er.queue.split();

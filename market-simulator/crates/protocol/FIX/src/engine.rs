@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
 use crate::tags::{tags, msg_types, side_code_set};
-use order_book::types::{OrderEvent, OrderId, Price, Side};
+use types::{OrderEvent, Price, Side};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use crossbeam::queue::{ArrayQueue};
 
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
-pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
+pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
 /// A simple FIX engine that reads raw FIX messages from an input queue, parses them, and pushes structured order events to an output queue. This is a very basic implementation that only handles New Order Single messages and extracts a few fields for demonstration purposes.
 #[repr(C)]
@@ -17,7 +17,7 @@ pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub struct FixRawMsg<const N: usize> {
     pub len: u16,
     pub data: [u8; N],
-    pub queue: Option<Arc<ArrayQueue<FixRawMsg<N>>>>, // Optional queue for sending responses back to the network layer, added for potential future use
+    pub resp_queue: Option<Arc<ArrayQueue<(u64, FixRawMsg<N>)>>>, // Optional queue for sending responses back to the network layer, added for potential future use
 }
 
 impl<const N: usize> Default for FixRawMsg<N> {
@@ -25,7 +25,7 @@ impl<const N: usize> Default for FixRawMsg<N> {
         Self {
             len: 0,
             data: [0u8; N],
-            queue: None,
+            resp_queue: None,
         }
     }
 }
@@ -47,7 +47,7 @@ pub fn spawn_scoped<'scope, 'env, const N: usize>(
     scope: &'scope std::thread::Scope<'scope, 'env>,
     request_in:  RequestQueue<N>,
     request_out: Producer<'env, OrderEvent, N>,
-    response_in: Consumer<'env, FixRawMsg<N>, N>,
+    response_in: Consumer<'env, (u64, FixRawMsg<N>), N>,
 ) -> ScopedFixEngineHandle<'scope> {
 
     let running = Arc::new(AtomicBool::new(true));
@@ -70,10 +70,10 @@ pub fn spawn_scoped<'scope, 'env, const N: usize>(
 pub struct FixEngine<'a, const N: usize> {
     request_in: Arc<ArrayQueue<FixRawMsg<N>>>,
     request_out: Producer<'a, OrderEvent, N>,
-    response_in: Consumer<'a, FixRawMsg<N>, N>, // For future use if we want to send execution reports back to the FIX engine
+    response_in: Consumer<'a, (u64, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
     counter: usize,
     running: Arc<AtomicBool>,
-    pending: HashMap<OrderId, Arc<ArrayQueue<FixRawMsg<N>>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
+    pending: HashMap<u64, Arc<ArrayQueue<(u64, FixRawMsg<N>)>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
 }
 
 impl<'a, const N: usize> FixEngine<'a, N> {
@@ -81,7 +81,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
     pub fn new(
         request_in: Arc<ArrayQueue<FixRawMsg<N>>>,
         request_out: Producer<'a, OrderEvent, N>,
-        response_in: Consumer<'a, FixRawMsg<N>, N>,
+        response_in: Consumer<'a, (u64, FixRawMsg<N>), N>,
     ) -> Self {
         Self {
             request_in: request_in,
@@ -168,7 +168,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             if let Some(mut msg) = self.request_in.pop() {
                 println!("FixEngine: Processing message #{}", self.counter);
 
-                let queue = msg.queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
+                let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
                 let order_event = match self.build_order(msg) {
                     Some(event) => event,
@@ -189,13 +189,17 @@ impl<'a, const N: usize> FixEngine<'a, N> {
 
                 self.counter += 1;
 
+                let key = utils::make_key(
+                    u32::from_le_bytes(order_event.sender_id.0[0..4].try_into().unwrap_or_default()), 
+                    u32::from_le_bytes(order_event.order_id.0[0..4].try_into().unwrap_or_default())
+                );
+
                 // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
-                if let Some(queue) = queue {
+                if let Some(resp_queue) = resp_queue {
                     println!("Storing response queue for order event #{}", self.counter);
-                    self.pending.insert(order_event.order_id, queue); // Store the response queue for this order event, using the order ID as the key
+                    self.pending.insert(key, resp_queue); // Store the response queue for this order event, using the combined key as the key
                 }
                 
-                let order_id = order_event.order_id; // Capture the order ID for later use in the response handling
                 // Push the structured order event to the order book queue.
                 match self.request_out.push(order_event) {
                     Ok(_) => { println!("FixEngine: Successfully pushed order event #{} to order book queue", self.counter); },
@@ -207,27 +211,21 @@ impl<'a, const N: usize> FixEngine<'a, N> {
 
                 // Waiting for the order result from the order book to send a response back to the client
                 // Ideally you would want to handle this asynchronously and not block the FIX engine thread, but for simplicity we will just wait here in this example
-                if let Some(_response) = self.response_in.pop() {
-                    println!("Received response from order book for order event #{}", self.counter);
-                    if let Some(queue) = self.pending.remove(&order_id) {
-                        println!("Sending response back to client for order event #{}", self.counter);
-                        let response = FixRawMsg {
-                            len: 0, // In a real implementation, you would want to populate this with actual response data
-                            data: [0u8; N],
-                            queue: None, // No need to store the queue in the response since we already have it in the pending map
-                        };
-                        match queue.push(response) {
-                            Ok(_) => { println!("Successfully pushed response back to client for order event #{}", self.counter); },
-                            Err(_) => { println!("Failed to push response back to client, dropping response"); },
+                loop {
+                    if let Some((key, _response)) = self.response_in.pop() {
+                        if let Some(resp_queue) = self.pending.remove(&key) {
+                            match resp_queue.push((key, _response)) {
+                                Ok(_) => { println!("Successfully pushed response back to client for order event #{}", self.counter); break; },
+                                Err(_) => { println!("Failed to push response back to client, dropping response"); },
+                            }
                         }
                     }
-                }
-
-                
+                }                
             }
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -240,15 +238,16 @@ mod tests {
     fn test_fix_engine() {
         // Inbound : net -> FIX -> order book
         let net_to_fix = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
+        let fix_to_net = Arc::new(ArrayQueue::<(u64, FixRawMsg<1024>)>::new(1024)); // For receiving responses back from the FIX engine, added for potential future use
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         // Outbound : order book -> FIX -> net
-        let mut ob_to_fix = RingBuffer::<FixRawMsg<1024>, 1024>::new();
+        let mut ob_to_fix = RingBuffer::<(u64, FixRawMsg<1024>), 1024>::new();
 
         let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
         let (_, ob_to_fix_rx) = ob_to_fix.split();
 
         std::thread::scope(|scope| {
-            let handle = spawn_scoped(scope, net_to_fix.clone(), fix_to_ob_tx, ob_to_fix_rx);
+            let handle = spawn_scoped(scope, Arc::clone(&net_to_fix), fix_to_ob_tx, ob_to_fix_rx);
 
             let fix_message = b"8=FIX.4.4\x019=0000\x0135=D\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0111=12345\x0154=1\x0138=1000000\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
 
@@ -259,7 +258,7 @@ mod tests {
                     data[..fix_message.len()].copy_from_slice(fix_message);
                     data
                 },
-                queue: Some(Arc::clone(&net_to_fix)), // Not using the response queue in this test, but could be set here if needed for future tests
+                resp_queue: Some(Arc::clone(&fix_to_net)), // Not using the response queue in this test, but could be set here if needed for future tests
             };
 
             net_to_fix.push(raw_msg).expect("Failed to push message");

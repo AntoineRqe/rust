@@ -70,19 +70,88 @@ impl UtcTimestamp {
         Some(Self { year, month, day, hour, minute, second, millis })
     }
 
+    pub fn to_fix_bytes(&self) -> [u8; 26] {
+        let mut buf = [0u8; 26];
+
+        let binding_year = number_to_bytes(self.year);
+        let year_bytes = binding_year.as_bytes();
+        let binding_month = number_to_bytes(self.month);
+        let month_bytes = binding_month.as_bytes();
+        let binding_day = number_to_bytes(self.day);
+        let day_bytes = binding_day.as_bytes();
+        let binding_hour = number_to_bytes(self.hour);
+        let hour_bytes = binding_hour.as_bytes();
+        let binding_minute = number_to_bytes(self.minute);
+        let minute_bytes = binding_minute.as_bytes();
+        let binding_second = number_to_bytes(self.second);
+        let second_bytes = binding_second.as_bytes();
+        let binding_millis = number_to_bytes(self.millis);
+        let millis_bytes = binding_millis.as_bytes();
+
+        copy_array(&mut buf[0..4], year_bytes);
+        if month_bytes.len() == 1 {
+            buf[4] = b'0'; // zero-pad month
+            copy_array(&mut buf[5..6], month_bytes);
+        } else {
+            copy_array(&mut buf[4..6], month_bytes);
+        }
+        if day_bytes.len() == 1 {
+            buf[6] = b'0'; // zero-pad day
+            copy_array(&mut buf[7..8], day_bytes);
+        } else {
+            copy_array(&mut buf[6..8], day_bytes);
+        }
+        buf[8] = b'-';
+
+        if hour_bytes.len() == 1 {
+             buf[9] = b'0'; // zero-pad hour
+             copy_array(&mut buf[10..11], hour_bytes);
+        } else {
+            copy_array(&mut buf[9..11], hour_bytes);
+        }
+        buf[11] = b':';
+        if minute_bytes.len() == 1 {
+            buf[12] = b'0'; // zero-pad minute
+            copy_array(&mut buf[13..14], minute_bytes);
+        } else {
+            copy_array(&mut buf[12..14], minute_bytes);
+        }
+        buf[14] = b':';
+        if second_bytes.len() == 1 {
+            buf[15] = b'0'; // zero-pad second
+            copy_array(&mut buf[16..17], second_bytes);
+        } else {
+            copy_array(&mut buf[15..17], second_bytes);
+        }
+
+        if self.millis > 0 {
+            buf[17] = b'.';
+            copy_array(&mut buf[18..21], millis_bytes);
+            return buf;
+        }
+
+        buf[17] = 0; // null-terminate if no millis
+        buf
+    }
+
+    pub fn now() -> Self {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        Self::from_unix_ms(now.as_millis() as u64)
+    }
+
     /// Convert to unix timestamp in milliseconds
-    pub fn to_unix_ms(&self) -> i64 {
+    pub fn to_unix_ms(&self) -> u64 {
         // days since unix epoch (1970-01-01)
-        let days = days_since_epoch(self.year, self.month, self.day) as i64;
+        let days = days_since_epoch(self.year, self.month, self.day) as u64;
         let ms = days        * 86_400_000
-               + self.hour   as i64 * 3_600_000
-               + self.minute as i64 *    60_000
-               + self.second as i64 *     1_000
-               + self.millis as i64;
+               + self.hour   as u64 * 3_600_000
+               + self.minute as u64 *    60_000
+               + self.second as u64 *     1_000
+               + self.millis as u64;
         ms
     }
 
-pub fn from_unix_ms(ms: i64) -> Self {
+pub fn from_unix_ms(ms: u64) -> Self {
     let days = ms.div_euclid(86_400_000);
     let time_ms = ms.rem_euclid(86_400_000);
 
@@ -178,6 +247,12 @@ fn days_since_epoch(year: u16, month: u8, day: u8) -> u32 {
     era * 146_097 + doe - 719_467  // was 719_468
 }
 
+/// Combine two 32-bit integers into a single 64-bit key, with `client_id` in the high 32 bits and `order_id` in the low 32 bits.
+#[inline(always)]
+pub fn make_key(client_id: u32, order_id: u32) -> u64 {
+    ((client_id as u64) << 32) | (order_id as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +274,14 @@ mod tests {
         let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123 };
         let unix_ms = ts.to_unix_ms();
         let ts_converted = UtcTimestamp::from_unix_ms(unix_ms);
+        assert_eq!(ts, ts_converted);
+    }
+
+    #[test]
+    fn test_utc_timestamp_fix_bytes() {
+        let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123 };
+        let fix_bytes = ts.to_fix_bytes();
+        let ts_converted = UtcTimestamp::from_fix_bytes(&fix_bytes).unwrap();
         assert_eq!(ts, ts_converted);
     }
 

@@ -10,3 +10,4 @@ logging = { path = "../logging" }
 order-book = { path = "../order-book" }
 fix = { path = "../protocol/FIX" }
 utils = { path = "../utils" }
+types = { path = "../types" }

@@ -7,6 +7,7 @@ edition = "2024"
 order-book = { path = "../../order-book" }
 memory = { path = "../../memory" }
 utils = { path = "../../utils" }
+types = { path = "../../types" }
 spsc.workspace = true
 crossbeam.workspace = true
 itoa = "1.0.17"
