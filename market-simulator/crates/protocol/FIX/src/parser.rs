@@ -2,13 +2,8 @@ use std::simd::{u8x64, cmp::SimdPartialEq};
 // My computer has avx512f SIMD register width, so I will use 64 bytes wide vectors.
 
 /// SOH delimiter byte (ASCII 0x01), separating tag=value pairs.
-const SOH: u8 = 0x01;
-const EQUALS: u8 = b'=';
-
-pub mod side_types {
-    pub const BUY: u32 = b'1' as u32;
-    pub const SELL: u32 = b'2' as u32;
-}
+pub const SOH: u8 = 0x01;
+pub const EQUALS: u8 = b'=';
 
 /// Both tag and value are slices into the original TCP payload -
 /// zero copies, zero allocations.
@@ -19,12 +14,13 @@ pub struct FixField<'a> {
 }
 
 /// FIX parser that operates on a byte slice, returning an iterator over FIX fields (tag=value pairs).
-pub struct FixParser<'a> {
+pub struct  FixParser<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
 /// A parsed FIX message, containing a vector of fields. Each field is a tag-value pair, where the tag is a u32 and the value is a byte slice referencing the original message data.
+#[derive(Debug)]
 pub struct FixMessage<'a> {
     pub fields: Vec<FixField<'a>>,
 }

@@ -24,6 +24,7 @@ pub mod tags {
     pub const BEGIN_SEQ_NO: u32 = 7;
     pub const END_SEQ_NO: u32 = 16;
     pub const CHECKSUM: u32 = 10;
+    pub const AVG_PX: u32 = 6;
 }
 
 /// Pre-defined FIX message types we care about on the hot path.
@@ -32,4 +33,67 @@ pub mod msg_types {
     pub const EXECUTION_REPORT: &[u8] = b"8";
     pub const ORDER_CANCEL_REQUEST: &[u8] = b"F";
     pub const ORDER_CANCEL_REPLACE_REQUEST: &[u8] = b"G";
+}
+/// Pre-defined FIX side types.
+pub mod side_code_set {
+    pub const BUY: &[u8] = b"1";
+    pub const SELL: &[u8] = b"2";
+    pub const BUY_MINUS: &[u8] = b"3";
+    pub const SELL_PLUS: &[u8] = b"4";
+    pub const SELL_SHORT: &[u8] = b"5";
+    pub const SELL_SHORT_EXEMPT: &[u8] = b"6";
+    pub const UNDISCLOSED: &[u8] = b"7";
+    pub const CROSS: &[u8] = b"8";
+    pub const CROSS_SHORT: &[u8] = b"9";
+    pub const CROSS_SHORT_EXEMPT: &[u8] = b"A";
+    pub const AS_DEFINED: &[u8] = b"B";
+    pub const OPPOSITE: &[u8] = b"C";
+    pub const SUBSCRIBE: &[u8] = b"D";
+    pub const REDEEM: &[u8] = b"E";
+    pub const LEND: &[u8] = b"F";
+    pub const BORROW: &[u8] = b"G";
+    pub const SELL_UNDISCLOSED: &[u8] = b"H";
+}
+
+pub mod ord_status_code_set {
+    pub const NEW: &[u8] = b"0";
+    pub const PARTIAL_FILL: &[u8] = b"1";
+    pub const FILL: &[u8] = b"2";
+    pub const DONE_FOR_DAY: &[u8] = b"3";
+    pub const CANCELED: &[u8] = b"4";
+    pub const REPLACE: &[u8] = b"5";
+    pub const PENDING_CANCEL: &[u8] = b"6";
+    pub const STOPPED: &[u8] = b"7";
+    pub const REJECTED: &[u8] = b"8";
+    pub const SUSPENDED: &[u8] = b"9";
+    pub const PENDING_NEW: &[u8] = b"A";
+    pub const CALCULATED: &[u8] = b"B";
+    pub const EXPIRED: &[u8] = b"C";
+    pub const ACCEPTED_FOR_BIDDING: &[u8] = b"D";
+    pub const PENDING_REPLACE: &[u8] = b"E";
+}
+
+pub mod exec_type_code_set {
+    pub const NEW: &[u8] = b"0";
+    pub const DONE_FOR_DAY: &[u8] = b"3";
+    pub const CANCELED: &[u8] = b"4";
+    pub const REPLACE: &[u8] = b"5";
+    pub const PENDING_CANCEL: &[u8] = b"6";
+    pub const STOPPED: &[u8] = b"7";
+    pub const REJECTED: &[u8] = b"8";
+    pub const SUSPENDED: &[u8] = b"9";
+    pub const PENDING_NEW: &[u8] = b"A";
+    pub const CALCULATED: &[u8] = b"B";
+    pub const EXPIRED: &[u8] = b"C";
+    pub const RESTATED: &[u8] = b"D";
+    pub const PENDING_REPLACE: &[u8] = b"E";
+    pub const TRADE: &[u8] = b"F";
+    pub const TRADE_CORRECT: &[u8] = b"G";
+    pub const TRADE_CANCEL: &[u8] = b"H";
+    pub const ORDER_STATUS: &[u8] = b"I";
+    pub const TRADE_IN_A_CLEANING_HOLD: &[u8] = b"J";
+    pub const TRADE_HAS_BEEN_RELEASED_TO_CLEARING: &[u8] = b"K";
+    pub const TRIGGERED_OR_ACTIVATED_BY_SYSTEM: &[u8] = b"L";
+    pub const LOCKED: &[u8] = b"M";
+    pub const RELEASED: &[u8] = b"N";
 }

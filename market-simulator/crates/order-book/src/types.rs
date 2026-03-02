@@ -1,4 +1,6 @@
 use std::{cmp::Ordering};
+use std::ops::Deref;
+use hex;
 
 /// Represents an order in the order book.
 /// Orders are compared based on price for sorting in the order book.
@@ -17,10 +19,12 @@ pub struct OrderEvent {
     pub price: Price,
     pub quantity: u64, // In FIX, qty is a float but we will use integer for simplicity (e.g. 100.0 -> 100)
     pub side: Side,
+    pub symbol: FixedString, // FIX Symbol can be up to 20 characters, we will use a fixed-size array for simplicity
     pub order_type: OrderType,
-    pub order_id: OrderId, // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
-    pub sender_id: [u8; 20], // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
-    pub target_id: [u8; 20], // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub cl_ord_id: OrderId, // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub order_id: OrderId, // FIX OrderID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub sender_id: EntityId, // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub target_id: EntityId, // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
@@ -31,24 +35,28 @@ impl Default for OrderEvent {
             quantity: 0,
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
+            cl_ord_id: OrderId::default(),
             order_id: OrderId::default(),
-            sender_id: [0u8; 20],
-            target_id: [0u8; 20],
+            sender_id: EntityId::default(),
+            target_id: EntityId::default(),
+            symbol: FixedString::default(),
             timestamp: 0,
         }
     }
 }
 
 impl OrderEvent {
-    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, order_id: OrderId, sender_id: [u8; 20], target_id: [u8; 20], timestamp: u64) -> Self {
+    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, cl_ord_id: OrderId, order_id: OrderId, sender_id: EntityId, target_id: EntityId, symbol: FixedString, timestamp: u64) -> Self {
         Self {
             price,
             quantity,
             side,
             order_type,
+            cl_ord_id,
             order_id,
             sender_id,
             target_id,
+            symbol,
             timestamp,
         }
     }
@@ -66,10 +74,10 @@ impl OrderEvent {
         if self.price.raw() < 0 {
             return Err("Price cannot be negative");
         }
-        if self.sender_id.iter().all(|&b| b == 0) {
+        if self.sender_id.0.iter().all(|&b| b == 0) {
             return Err("Sender ID cannot be empty");
         }
-        if self.target_id.iter().all(|&b| b == 0) {
+        if self.target_id.0.iter().all(|&b| b == 0) {
             return Err("Target ID cannot be empty");
         }
         Ok(())
@@ -80,8 +88,8 @@ impl std::fmt::Display for OrderEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?} }}",
-            self.price.raw(), self.quantity, self.side, self.order_type, self.order_id, self.sender_id, self.target_id
+            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {} }}",
+            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.order_id, self.sender_id, self.target_id, self.symbol, self.timestamp
         )
     }
 }
@@ -133,21 +141,166 @@ pub enum OrderStatus {
     New,
     PartiallyFilled,
     Filled,
-    NotMatched,
     Canceled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TradeId(pub [u8; 20]);
+pub struct FixedString(pub [u8; 20]);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TradeId(pub [u8; 20]);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Hash)]
 pub struct OrderId(pub [u8; 20]);
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Hash)]
+pub struct EntityId(pub [u8; 20]);
+
+impl Deref for EntityId {
+    type Target = [u8; 20];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Deref for FixedString {
+    type Target = [u8; 20];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Deref for OrderId {
+    type Target = [u8; 20];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Deref for TradeId {
+    type Target = [u8; 20];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for OrderId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for TradeId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for EntityId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for FixedString {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+
+#[derive(Debug)]
+pub struct ParseError;
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Failed to parse hex string")
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+pub trait FromHexString: Sized {
+    fn from_hex(hex: &str) -> Result<Self, ParseError>;
+}
+
+impl FromHexString for EntityId {
+    fn from_hex(hex: &str) -> Result<Self, ParseError> {
+        let bytes = hex::decode(hex)
+            .map_err(|_| ParseError)?
+            .try_into()
+            .map_err(|_| ParseError)?;
+        Ok(EntityId(bytes))
+    }
+}
+
+impl FromHexString for OrderId {
+    fn from_hex(hex: &str) -> Result<Self, ParseError> {
+        let bytes = hex::decode(hex)
+            .map_err(|_| ParseError)?
+            .try_into()
+            .map_err(|_| ParseError)?;
+        Ok(OrderId(bytes))
+    }
+}
+
+impl FromHexString for FixedString {
+    fn from_hex(hex: &str) -> Result<Self, ParseError> {
+        let bytes = hex::decode(hex)
+            .map_err(|_| ParseError)?
+            .try_into()
+            .map_err(|_| ParseError)?;
+        Ok(FixedString(bytes))
+    }
+}
+
+impl EntityId {
+    pub const fn from_ascii(s: &str) -> Self {
+        let mut bytes = [0u8; 20];
+        let s_bytes = s.as_bytes();
+        let mut i = 0;
+        while i < s_bytes.len() && i < 20 {
+            bytes[i] = s_bytes[i];
+            i += 1;
+        }
+        EntityId(bytes)
+    }
+}
+
+impl OrderId {
+    pub const fn from_ascii(s: &str) -> Self {
+        let mut bytes = [0u8; 20];
+        let s_bytes = s.as_bytes();
+        let mut i = 0;
+        while i < s_bytes.len() && i < 20 {
+            bytes[i] = s_bytes[i];
+            i += 1;
+        }
+        OrderId(bytes)
+    }
+}
+
+impl FixedString {
+    pub const fn from_ascii(s: &str) -> Self {
+        let mut bytes = [0u8; 20];
+        let s_bytes = s.as_bytes();
+        let mut i = 0;
+        while i < s_bytes.len() && i < 20 {
+            bytes[i] = s_bytes[i];
+            i += 1;
+        }
+        FixedString(bytes)
+    }
+}
 #[derive(Debug, Clone)]
 pub struct Trade {
-    pub traded_price: Price,
-    pub traded_quantity: u64,
-    pub trade_id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub price: Price,
+    pub quantity: u64,
+    pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
 }
 
 impl TradeId {
@@ -169,29 +322,22 @@ impl TradeId {
 
 #[derive(Debug)]
 pub struct OrderResult {
-    pub original_price: Price,
-    pub original_quantity: u64,
     pub trades: Vec<Trade>,
-    pub side: Side,
-    pub order_type: OrderType,
-    pub order_id: OrderId,
     pub status: OrderStatus,
-    pub sender_id: [u8; 20],
-    pub target_id: [u8; 20],
 }
 
 impl std::fmt::Display for OrderResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderResult {{ original_price: {}, original_quantity: {}, side: {:?}, order_type: {:?}, order_id: {:?}, status: {:?}, sender_id: {:?}, target_id: {:?} }}\n",
-            self.original_price.raw(), self.original_quantity, self.side, self.order_type, self.order_id, self.status, self.sender_id, self.target_id
+            "OrderResult {{ status: {:?} }}\n",
+            self.status
         )?;
         for trade in &self.trades {
             write!(
                 f,
-                "  Trade {{ traded_price: {}, traded_quantity: {}, trade_id: {:?} }}\n",
-                trade.traded_price.raw(), trade.traded_quantity, trade.trade_id
+                "  Trade {{ price: {}, quantity: {}, id: {:?} }}\n",
+                trade.price.raw(), trade.quantity, trade.id
             )?;
         }
         Ok(())

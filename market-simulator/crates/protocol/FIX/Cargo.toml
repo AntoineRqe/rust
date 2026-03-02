@@ -9,6 +9,7 @@ memory = { path = "../../memory" }
 utils = { path = "../../utils" }
 spsc.workspace = true
 crossbeam.workspace = true
+itoa = "1.0.17"
 
 [features]
 default = ["branchless", "simd"]

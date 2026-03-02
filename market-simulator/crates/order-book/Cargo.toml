@@ -7,3 +7,4 @@ edition = "2024"
 tracing.workspace = true
 spsc.workspace = true
 logging = { path = "../logging" }
+hex = "0.4.3"
