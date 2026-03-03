@@ -293,6 +293,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "crossbeam",
+ "crossbeam-channel",
  "hdrhistogram",
  "itoa",
  "lazy_static",
@@ -708,6 +709,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "crossbeam",
+ "crossbeam-channel",
  "fix",
  "spsc",
 ]

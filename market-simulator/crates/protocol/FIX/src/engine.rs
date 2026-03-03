@@ -17,7 +17,7 @@ pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 pub struct FixRawMsg<const N: usize> {
     pub len: u16,
     pub data: [u8; N],
-    pub resp_queue: Option<Arc<ArrayQueue<(u64, FixRawMsg<N>)>>>, // Optional queue for sending responses back to the network layer, added for potential future use
+    pub resp_queue: Option<crossbeam_channel::Sender<FixRawMsg<N>>>, // Optional queue for sending responses back to the network layer, added for potential future use
 }
 
 impl<const N: usize> Default for FixRawMsg<N> {
@@ -38,7 +38,15 @@ pub struct FixEngine<'a, const N: usize> {
     response_in: Consumer<'a, (u64, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
     counter: usize,
     running: Arc<AtomicBool>,
-    pending: HashMap<u64, Arc<ArrayQueue<(u64, FixRawMsg<N>)>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
+    pending: HashMap<u64, crossbeam_channel::Sender<FixRawMsg<N>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
+}
+
+impl<const N: usize> Drop for FixEngine<'_, N> {
+    fn drop(&mut self) {
+        println!("Dropping FixEngine, cleaning up resources");
+        self.running.store(false, Ordering::Relaxed);
+        // In a real implementation, you would also want to clean up any pending response queues and ensure all threads are properly shut down
+    }
 }
 
 impl<'a, const N: usize> FixEngine<'a, N> {
@@ -179,7 +187,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                 loop {
                     if let Some((key, _response)) = self.response_in.pop() {
                         if let Some(resp_queue) = self.pending.remove(&key) {
-                            match resp_queue.push((key, _response)) {
+                            match resp_queue.send(_response) {
                                 Ok(_) => { println!("Successfully pushed response back to client for order event #{}", self.counter); break; },
                                 Err(_) => { println!("Failed to push response back to client, dropping response"); },
                             }
@@ -208,15 +216,14 @@ mod tests {
     fn test_fix_engine() {
         // Inbound : net -> FIX -> order book
         let net_to_fix = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
-        let fix_to_net = Arc::new(ArrayQueue::<(u64, FixRawMsg<1024>)>::new(1024)); // For receiving responses back from the FIX engine, added for potential future use
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         // Outbound : order book -> FIX -> net
         let mut ob_to_fix = RingBuffer::<(u64, FixRawMsg<1024>), 1024>::new();
 
-        let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
-        let (_, ob_to_fix_rx) = ob_to_fix.split();
-
         std::thread::scope(|scope| {
+
+            let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
+            let (_, ob_to_fix_rx) = ob_to_fix.split();
 
             let mut handle = FixEngine::new(
                 Arc::clone(&net_to_fix),
@@ -224,7 +231,7 @@ mod tests {
                 ob_to_fix_rx,
             );
     
-            scope.spawn(move || {
+            let handle = scope.spawn(move || {
                 handle.run();
             });
             
@@ -237,7 +244,7 @@ mod tests {
                     data[..fix_message.len()].copy_from_slice(fix_message);
                     data
                 },
-                resp_queue: Some(Arc::clone(&fix_to_net)), // Not using the response queue in this test, but could be set here if needed for future tests
+                resp_queue: None, // Not using the response queue in this test, but could be set here if needed for future tests
             };
 
             net_to_fix.push(raw_msg).expect("Failed to push message");
@@ -257,6 +264,8 @@ mod tests {
             assert_eq!(order_event.quantity, 1_000_000);
             assert_eq!(order_event.price, Price(123_456_000));
             assert_eq!(order_event.side, Side::Buy);
+
+            println!("Test passed!");
         });
     }
 }

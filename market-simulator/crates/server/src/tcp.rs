@@ -1,9 +1,9 @@
 use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
-use fix::engine::{FixRawMsg, RequestQueue, ResponseQueue};
-use crossbeam::queue::ArrayQueue;
+use fix::engine::{FixRawMsg, RequestQueue};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use crossbeam_channel::{unbounded};
 
 pub struct FixServer<const N: usize> {
     fifo_in: RequestQueue<N>,
@@ -36,7 +36,8 @@ impl <'a, const N: usize> FixServer<N> {
         queue:   RequestQueue<N>,
         running: Arc<AtomicBool>,
     ) {
-        let response_queue: ResponseQueue<N> = Arc::new(ArrayQueue::new(1024));
+
+        let (response_tx, response_rx) = unbounded();
         let mut buf = [0u8; 4096];
 
         while running.load(Ordering::Relaxed) {
@@ -47,7 +48,7 @@ impl <'a, const N: usize> FixServer<N> {
                     let mut msg = FixRawMsg::default();
                     msg.len = n as u16;
                     msg.data[..n].copy_from_slice(&buf[..n]);
-                    msg.resp_queue = Some(Arc::clone(&response_queue));
+                    msg.resp_queue = Some(response_tx.clone());
 
                     while let Err(backup_msg) = queue.push(msg) {
                         msg = backup_msg;
@@ -55,7 +56,7 @@ impl <'a, const N: usize> FixServer<N> {
                     }
 
                     loop {
-                        if let Some((_, response)) = response_queue.pop() {
+                        if let Ok(response) = response_rx.recv() {
                             println!("Sending response of {} bytes to client", response.len);
                             if let Err(e) = stream.write_all(&response.data[..response.len as usize]) {
                                 eprintln!("Failed to send response to client: {}", e);

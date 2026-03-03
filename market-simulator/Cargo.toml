@@ -21,6 +21,7 @@ criterion = "0.8.2"
 hdrhistogram = "7.0"
 spsc = { path = "../spsc" }
 crossbeam = "0.8.2"
+crossbeam-channel = "0.5.15"
 
 # Main binary crate
 [package]
