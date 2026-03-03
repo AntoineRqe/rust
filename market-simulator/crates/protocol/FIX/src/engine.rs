@@ -30,41 +30,6 @@ impl<const N: usize> Default for FixRawMsg<N> {
     }
 }
 
-/// A handle to control the FIX engine thread, allowing for graceful shutdown.
-pub struct ScopedFixEngineHandle<'scope> {
-    running: Arc<AtomicBool>,
-    thread: std::thread::ScopedJoinHandle<'scope, ()>,
-}
-
-impl<'scope> ScopedFixEngineHandle<'scope> {
-    pub fn stop(self) {
-        self.running.store(false, Ordering::Relaxed);
-        self.thread.join().unwrap(); // wait for clean exit
-    }
-}
-
-pub fn spawn_scoped<'scope, 'env, const N: usize>(
-    scope: &'scope std::thread::Scope<'scope, 'env>,
-    request_in:  RequestQueue<N>,
-    request_out: Producer<'env, OrderEvent, N>,
-    response_in: Consumer<'env, (u64, FixRawMsg<N>), N>,
-) -> ScopedFixEngineHandle<'scope> {
-
-    let running = Arc::new(AtomicBool::new(true));
-
-    let mut engine = FixEngine {
-        request_in:  request_in,
-        request_out: request_out,
-        response_in: response_in,
-        counter:  0,
-        running:  Arc::clone(&running),
-        pending:  HashMap::new(),
-    };
-
-    let thread = scope.spawn(move || engine.run());
-    ScopedFixEngineHandle { running, thread }
-}
-
 /// A simple FIX engine that reads raw FIX messages from an input queue, parses them, and pushes structured order events to an output queue. This is a very basic implementation that only handles New Order Single messages and extracts a few fields for demonstration purposes.
 /// In a real system, you would need to handle many more message types and fields, as well as error handling and performance optimizations.
 pub struct FixEngine<'a, const N: usize> {
@@ -224,6 +189,11 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             }
         }
     }
+
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::Relaxed);
+    }
+
 }
 
 
@@ -247,8 +217,17 @@ mod tests {
         let (_, ob_to_fix_rx) = ob_to_fix.split();
 
         std::thread::scope(|scope| {
-            let handle = spawn_scoped(scope, Arc::clone(&net_to_fix), fix_to_ob_tx, ob_to_fix_rx);
 
+            let mut handle = FixEngine::new(
+                Arc::clone(&net_to_fix),
+                fix_to_ob_tx,
+                ob_to_fix_rx,
+            );
+    
+            scope.spawn(move || {
+                handle.run();
+            });
+            
             let fix_message = b"8=FIX.4.4\x019=0000\x0135=D\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0111=12345\x0154=1\x0138=1000000\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
 
             let raw_msg = FixRawMsg {
@@ -278,8 +257,6 @@ mod tests {
             assert_eq!(order_event.quantity, 1_000_000);
             assert_eq!(order_event.price, Price(123_456_000));
             assert_eq!(order_event.side, Side::Buy);
-
-            handle.stop();
         });
     }
 }

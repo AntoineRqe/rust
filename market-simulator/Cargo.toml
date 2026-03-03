@@ -37,6 +37,7 @@ spsc.workspace = true
 memory = { path = "crates/memory" }
 execution-report = { path = "crates/execution-report" }
 types = { path = "crates/types" }
+core_affinity = "0.8.3"
 
 # Optimization profiles
 [profile.dev]

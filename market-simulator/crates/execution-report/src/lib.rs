@@ -144,7 +144,7 @@ mod tests {
         let engine = ExecutionReportEngine::new(fifo_in_rx, fifo_out_tx);
         
         std::thread::scope(|s| {
-            let handle = s.spawn(|| {
+            let handle = s.spawn(move || {
                 engine.run();
             });
 
@@ -240,7 +240,6 @@ mod tests {
             let avg_px_field = parsed_report.fields.iter().find(|f| f.tag == tags::AVG_PX).expect("AVG_PX field missing");
             assert_eq!(avg_px_field.value, number_to_bytes(123_456_000u64).as_ref()); // 123.456 price, since only one trade executed
 
-            engine.stop();
             handle.join().unwrap();
         });
     }

@@ -25,16 +25,26 @@ fn main() {
 
     // execution report engine thread
     let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
-    std::thread::spawn(move || execution_report_engine.run());
+    std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: 2 });
+        execution_report_engine.run();
+    });
 
     // Book engine thread
     let mut order_book_engine = OrderBookEngine::new(ob_rx, ob_tx);
-    std::thread::spawn(move || order_book_engine.run());
+    std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: 4 });
+        order_book_engine.run();
+    });
 
     // fix engine thread
     let mut fix_engine = FixEngine ::new(Arc::clone(&net_to_fix), fix_tx, fix_resp_rx);
-    std::thread::spawn(move || fix_engine.run());
+    std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: 6 });
+        fix_engine.run();
+    });
 
+    core_affinity::set_for_current(core_affinity::CoreId { id: 0 });
     // tcp server — each client pushes directly into fifo_in
     let server: FixServer<1024> = FixServer::new(net_to_fix);
     let listener = TcpListener::bind("127.0.0.1:9876").unwrap();
