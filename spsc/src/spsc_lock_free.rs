@@ -1,8 +1,8 @@
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::cell::UnsafeCell;
-// use std::thread::{Thread};
-// use std::marker::PhantomData;
+use std::thread::{Thread};
+use std::marker::PhantomData;
 // use std::thread;
 
 
@@ -31,12 +31,12 @@ pub struct RingBuffer<T, const N: usize> {
 /// This allows for safe concurrent access from separate threads without needing to use Arc or other synchronization primitives.
 pub struct Producer<'a, T, const N: usize> {
     rb: &'a RingBuffer<T, N>,
-    // consumer_thread: Thread, // Store the consumer thread handle to allow for better synchronization in push when buffer is full, by yielding to the consumer thread
+    consumer_thread: Thread, // Store the consumer thread handle to allow for better synchronization in push when buffer is full, by yielding to the consumer thread
 }
 
 pub struct Consumer<'a, T, const N: usize> {
     rb: &'a RingBuffer<T, N>,
-    // _no_send: PhantomData<*const ()>, // Make Consumer !Send to prevent accidentally sending it to another thread, since it holds a reference to the RingBuffer which is shared with the Producer
+    _no_send: PhantomData<*const ()>, // Make Consumer !Send to prevent accidentally sending it to another thread, since it holds a reference to the RingBuffer which is shared with the Producer
 }
 
 // Safety: The RingBuffer can be safely sent between threads as long as T is Send
@@ -64,15 +64,25 @@ impl<T, const N: usize> Drop for RingBuffer<T, N> {
 }
 
 impl <'a, T, const N: usize> Producer<'a, T, N> {
+    /// Pushes an item into the ring buffer and wakes up the consumer thread if it was sleeping, to improve latency when buffer is full.
+    /// Returns Err(item) if the buffer is full.
     pub fn push(&self, item: T) -> Result<(), T> {
         match self.rb.push(item) {
             Ok(()) => {
+                // Wake up the consumer thread if it was sleeping which could be possibly sleeping is queue is empty.
+                self.consumer_thread.unpark(); // Wake up the consumer thread if it was sleeping, to improve latency when buffer is full
                 Ok(())
             },
             Err(item) => {
                 Err(item)
             }
         }
+    }
+
+    /// Pushes an item into the ring buffer.
+    /// Returns Err(item) if the buffer is full.
+    pub fn try_push(&self, item: T) -> Result<(), T> {
+        self.rb.push(item)
     }
 
     pub fn push_batch(&self, items: &[T]) -> usize 
@@ -83,12 +93,20 @@ impl <'a, T, const N: usize> Producer<'a, T, N> {
 }
 
 impl <'a, T, const N: usize> Consumer<'a, T, N> {
+    /// Pops an item from the ring buffer. If the buffer is empty, it will return None immediately without blocking.
+    pub fn try_pop(&self) -> Option<T> {
+        self.rb.pop()
+    }
+
+    /// Pops an item from the ring buffer. If the buffer is empty, it will block until an item is available.
     pub fn pop(&self) -> Option<T> {
-        match self.rb.pop() {
-            Some(item) => Some(item),
-            None => {
-                self.rb.pop() // Try again after being woken up
-            },
+        loop {
+            match self.rb.pop() {
+                Some(item) => return Some(item),
+                None => {
+                    std::thread::park(); // Block the current thread until it is unparked
+                }
+            }
         }
     }
 
@@ -127,11 +145,11 @@ impl<T, const N: usize> RingBuffer<T, N> {
         (
             Producer { 
                 rb: self,
-                // consumer_thread: std::thread::current(), // Store the consumer thread handle to allow for better synchronization in push when buffer is full, by yielding to the consumer thread
+                consumer_thread: std::thread::current(), // Store the consumer thread handle to allow for better synchronization in push when buffer is full, by yielding to the consumer thread
             },
             Consumer {
                 rb: self,
-                // _no_send: PhantomData, // Make Consumer !Send to prevent accidentally sending it to another thread, since it holds a reference to the RingBuffer which is shared with the Producer
+                _no_send: PhantomData, // Make Consumer !Send to prevent accidentally sending it to another thread, since it holds a reference to the RingBuffer which is shared with the Producer
             }
         )
     }
@@ -184,10 +202,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
             }
             
         }
-
-        // Synchronize with consumer to ensure we see the latest data, improve atomic load performance when buffer is not full
-        //fence(Ordering::Acquire);
-
+        
         unsafe {
              *self.buffer
                 .get()
@@ -386,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn spsc_threads() {
+    fn spsc_blocking() {
         use std::thread;
 
         let mut rb = RingBuffer::<usize, 1024>::new();
@@ -416,4 +431,34 @@ mod tests {
         });
     }
 
+    #[test]
+    fn spsc_non_blocking() {
+        use std::thread;
+
+        let mut rb = RingBuffer::<usize, 1024>::new();
+
+        thread::scope(|s| {
+            let (producer, consumer) = rb.split();
+
+            let prod = s.spawn(move || {
+                for i in 0..1_000_000 {
+                    loop {
+                        if producer.try_push(i).is_ok() {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let mut expected = 0;
+            while expected < 1_000_000 {
+                if let Some(v) = consumer.try_pop() {
+                    assert_eq!(v, expected);
+                    expected += 1;
+                }
+            }
+
+            prod.join().unwrap();
+        });
+    }
 }

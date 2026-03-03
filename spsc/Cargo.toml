@@ -18,7 +18,7 @@ crossbeam = "0.8.4"
 crossbeam-utils = "0.8.21"
 criterion = "0.8.2"
 hdrhistogram = "7.5.4"
-
+lazy_static = "1.4.0"
 
 
 [profile.profiling]
