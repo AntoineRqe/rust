@@ -519,5 +519,5 @@ fn print_summary(results: &[BenchResult]) {
     println!();
 }
 
-criterion_group!(benches, benchmark_throughput);
+criterion_group!(benches, benchmark_latency,benchmark_throughput);
 criterion_main!(benches);
