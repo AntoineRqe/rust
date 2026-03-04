@@ -121,6 +121,10 @@ impl <'a, T, const N: usize> Consumer<'a, T, N> {
     {
         self.rb.pop_batch(items)
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.rb.is_empty()
+    }
 }
 
 const SPIN_THRESHOLD: usize = 256;

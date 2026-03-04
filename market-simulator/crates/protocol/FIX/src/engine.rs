@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap};
 use std::sync::atomic::AtomicBool;
 
 use crate::tags::{tags, msg_types, side_code_set};
-use types::{OrderEvent, Price, Side};
+use types::{OrderEvent, Price, Side, StopHandle};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -37,16 +37,8 @@ pub struct FixEngine<'a, const N: usize> {
     request_out: Producer<'a, OrderEvent, N>,
     response_in: Consumer<'a, (u64, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
     counter: usize,
-    running: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
     pending: HashMap<u64, crossbeam_channel::Sender<FixRawMsg<N>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
-}
-
-impl<const N: usize> Drop for FixEngine<'_, N> {
-    fn drop(&mut self) {
-        println!("Dropping FixEngine, cleaning up resources");
-        self.running.store(false, Ordering::Relaxed);
-        // In a real implementation, you would also want to clean up any pending response queues and ensure all threads are properly shut down
-    }
 }
 
 impl<'a, const N: usize> FixEngine<'a, N> {
@@ -61,7 +53,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             request_out: request_out,
             response_in: response_in,
             counter: 0,
-            running: Arc::new(AtomicBool::new(true)),
+            shutdown: Arc::new(AtomicBool::new(false)),
             pending: HashMap::new(),
         }
     }
@@ -134,72 +126,79 @@ impl<'a, const N: usize> FixEngine<'a, N> {
         Some(order_event)
     }
 
-    pub fn run(&mut self) {
-        while self.running.load(Ordering::Relaxed) {
+    // Non blocking check for new inbound FIX messages, if there is a message, parse it and push the corresponding order event to the order book queue. In a real implementation, you would want to have more robust error handling and also handle different message types and fields.
+    fn run_inbound_request(&mut self) {
+        if let Some(mut msg) = self.request_in.pop() {
+
+            let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
+
+            let order_event = match self.build_order(msg) {
+                Some(event) => event,
+                None => {
+                    return; // Skip malformed messages
+                }
+            };
+
+            // Check validity of the parsed order event before pushing to the order book queue, this is important to avoid processing invalid events downstream
+            match order_event.check_valid() {
+                Ok(_) => {},
+                Err(e) => {
+                    println!("Invalid order event parsed: {}, skipping", e);
+                    return; // Skip invalid events
+                }
+            }
+
+            self.counter += 1;
+
+            let key = utils::make_key(
+                u32::from_le_bytes(order_event.sender_id.0[0..4].try_into().unwrap_or_default()), 
+                u32::from_le_bytes(order_event.order_id.0[0..4].try_into().unwrap_or_default())
+            );
+
+            // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
+            if let Some(resp_queue) = resp_queue {
+                self.pending.insert(key, resp_queue); // Store the response queue for this order event, using the combined key as the key
+            }
             
-            // The pop already handles backoff when the queue is empty, so we can just wait for messages to arrive, we can use a busy loop here without sleeping
-            if let Some(mut msg) = self.request_in.pop() {
-                println!("FixEngine: Processing message #{}", self.counter);
-
-                let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
-
-                let order_event = match self.build_order(msg) {
-                    Some(event) => event,
-                    None => {
-                        println!("Failed to parse FIX message, skipping");
-                        continue; // Skip malformed messages
-                    }
-                };
-
-                // Check validity of the parsed order event before pushing to the order book queue, this is important to avoid processing invalid events downstream
-                match order_event.check_valid() {
-                    Ok(_) => {},
-                    Err(e) => {
-                        println!("Invalid order event parsed: {}, skipping", e);
-                        continue; // Skip invalid events
-                    }
+            // Push the structured order event to the order book queue.
+            match self.request_out.try_push(order_event) {
+                Ok(_) => { println!("FixEngine: Successfully pushed order event #{} to order book queue", self.counter); },
+                Err(e) => {
+                    println!("Failed to push order event to order book queue: {}, skipping", e);
+                    return; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
                 }
-
-                self.counter += 1;
-
-                let key = utils::make_key(
-                    u32::from_le_bytes(order_event.sender_id.0[0..4].try_into().unwrap_or_default()), 
-                    u32::from_le_bytes(order_event.order_id.0[0..4].try_into().unwrap_or_default())
-                );
-
-                // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
-                if let Some(resp_queue) = resp_queue {
-                    println!("Storing response queue for order event #{}", self.counter);
-                    self.pending.insert(key, resp_queue); // Store the response queue for this order event, using the combined key as the key
-                }
-                
-                // Push the structured order event to the order book queue.
-                match self.request_out.push(order_event) {
-                    Ok(_) => { println!("FixEngine: Successfully pushed order event #{} to order book queue", self.counter); },
-                    Err(e) => {
-                        println!("Failed to push order event to order book queue: {}, skipping", e);
-                        continue; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
-                    }
-                }
-
-                // Waiting for the order result from the order book to send a response back to the client
-                // Ideally you would want to handle this asynchronously and not block the FIX engine thread, but for simplicity we will just wait here in this example
-                loop {
-                    if let Some((key, _response)) = self.response_in.pop() {
-                        if let Some(resp_queue) = self.pending.remove(&key) {
-                            match resp_queue.send(_response) {
-                                Ok(_) => { println!("Successfully pushed response back to client for order event #{}", self.counter); break; },
-                                Err(_) => { println!("Failed to push response back to client, dropping response"); },
-                            }
-                        }
-                    }
-                }                
             }
         }
     }
 
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
+    /// Non blocking check for outbound responses from the order book engine, and if there is a response, send it back to the client using the stored response queue. This is a very basic implementation that assumes the response contains the same key as the original order event, in a real implementation you would want to have a more robust way to correlate responses with requests, and also handle cases where the client has disconnected or the response queue is full.
+    fn run_outbound_response(&mut self) {
+        if let Some((key, _response)) = self.response_in.try_pop() {
+            if let Some(resp_queue) = self.pending.remove(&key) {
+                match resp_queue.send(_response) {
+                    Ok(_) => { println!("Successfully pushed response back to client for order event #{}", self.counter); },
+                    Err(_) => { println!("Failed to push response back to client, dropping response"); },
+                }
+            }
+        }
+    }
+
+    pub fn run(&mut self) {
+        loop {
+            self.run_inbound_request();
+            self.run_outbound_response();
+
+            if self.shutdown.load(Ordering::Relaxed) && self.pending.is_empty() {
+                break;
+            }
+        }
+    }
+
+    pub fn stop_handle(&self) -> StopHandle{
+        StopHandle {
+            shutdown: Arc::clone(&self.shutdown),
+            thread: None,
+        }
     }
 
 }
@@ -231,7 +230,9 @@ mod tests {
                 ob_to_fix_rx,
             );
     
-            let handle = scope.spawn(move || {
+            let stop_handle = handle.stop_handle();
+
+            let engine = scope.spawn(move || {
                 handle.run();
             });
             
@@ -251,13 +252,12 @@ mod tests {
 
             // spin wait instead of sleep
             let order_event = loop {
-                if let Some(event) = fix_to_ob_rx.pop() {
+                if let Some(event) = fix_to_ob_rx.try_pop() {
                     break event;
                 }
                 std::hint::spin_loop();
             };
-
-            println!("Received order event from FIX engine: {:?}", order_event);
+    
             assert_eq!(field_str(order_event.cl_ord_id.as_ref()),  b"12345");
             assert_eq!(field_str(order_event.sender_id.as_ref()), b"SENDER");
             assert_eq!(field_str(order_event.target_id.as_ref()), b"TARGET");
@@ -265,7 +265,11 @@ mod tests {
             assert_eq!(order_event.price, Price(123_456_000));
             assert_eq!(order_event.side, Side::Buy);
 
-            println!("Test passed!");
+            // Stop the FIX engine thread
+            stop_handle.stop();
+
+            // Wait a bit to ensure the FIX engine has stopped before ending the test, in a real implementation you would want a more robust way to ensure the thread has stopped
+            engine.join().expect("Failed to join FIX engine thread");
         });
     }
 }

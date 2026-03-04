@@ -1,21 +1,17 @@
 use std::{cmp::Reverse, collections::BinaryHeap, sync::atomic::AtomicBool};
 use types::{
-    OrderEvent, OrderResult, OrderStatus,
-    OrderType,
-    Price,
-    Side,
-    Trade,
-    TradeId,
+    OrderEvent, OrderResult, OrderStatus, OrderType, Price, Side, StopHandle, Trade, TradeId
 };
 
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 pub struct OrderBookEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, OrderEvent, N>,
     fifo_out: Producer<'a, (OrderEvent, OrderResult), N>,
     order_book: OrderBook,
-    running: AtomicBool,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
@@ -24,34 +20,36 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             fifo_in,
             fifo_out,
             order_book: OrderBook::new(),
-            running: AtomicBool::new(true),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn run(&mut self) {
-        while self.running.load(Ordering::Relaxed) {
-            if let Some(event) = self.fifo_in.pop() {
-                println!("Received order event: {}", event);
+        loop {
+            if let Some(event) = self.fifo_in.try_pop() {
                 // WARNING: Fix the clone here, we should avoid cloning the event if possible.
                 // Ideally, we would want to process the event in place and then send a reference to the result back to the FIX engine.
                 // However, this would require changing the design of the queues to allow for references or using some form of shared memory.
                 // For now, we will clone the event to keep it simple, but this is an area that can be optimized in the future.
                 let result = self.order_book.process_order(event.clone());
                 let mut execution_report_input = (event, result);
-                while let Err((event_er, result_er)) = self.fifo_out.push(execution_report_input) {
+                while let Err((event_er, result_er)) = self.fifo_out.try_push(execution_report_input) {
                     execution_report_input = (event_er, result_er);
                     std::hint::spin_loop(); // If the output queue is full, spin until there is space
                 }
-                println!("Processed order event");
-            } else {
-                std::hint::spin_loop(); // No events to process, spin until new events arrive
+            }
+
+            if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
+                break;
             }
         }
     }
 
-    pub fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        println!("OrderBookEngine: Stopped");
+    pub fn stop_handle(&mut self) -> StopHandle {
+        StopHandle {
+            shutdown: Arc::clone(&self.shutdown),
+            thread: None, // We can set this to Some(handle) if we want to join the thread later
+        }
     }
 }
 
@@ -279,6 +277,8 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+
     use types::{EntityId, FixedString, OrderId, Price, Side};
     use super::*;
 
@@ -644,5 +644,89 @@ mod tests {
         assert_eq!(asks[0].sender_id, SENDER); // The ask should have the correct sender ID
         assert_eq!(asks[0].target_id, TARGET); // The ask should have the correct target ID
         assert_eq!(asks[0].order_type, OrderType::LimitOrder); // The ask should have the correct order type
+    }
+
+    #[test]
+    fn test_engine(){
+        let mut inbound_queue = spsc::spsc_lock_free::RingBuffer::<OrderEvent, 1024>::new();
+        let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
+
+        thread::scope(|s| {
+            let(inbound_producer, inbound_consumer) = inbound_queue.split();
+            let(outbound_producer, outbound_consumer) = outbound_queue.split();
+
+            let mut engine = OrderBookEngine::new(
+                inbound_consumer,
+                outbound_producer,
+            );
+
+            let stop_handle = engine.stop_handle();
+            
+            let handle = s.spawn(move || {
+                engine.run();
+            });
+
+            // Send some orders to the engine
+            let order = OrderEvent {
+                price: Price::from_f64(100.0),
+                quantity: 10,
+                side: Side::Buy,
+                order_type: OrderType::LimitOrder,
+                order_id: ORDER_ID,
+                cl_ord_id: CL_ORD_ID,
+                sender_id: SENDER,
+                target_id: TARGET,
+                symbol: SYMBOL,
+                timestamp: 0,
+            };
+
+            inbound_producer.push(order).unwrap();
+            // Give some time for the engine to process the order
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            let (order_event, order_result) = loop {
+                if let Some((order_event, order_result)) = outbound_consumer.try_pop() {
+                    break (order_event, order_result);
+                }
+            };
+
+            assert!(order_event.price == Price::from_f64(100.0));
+            assert!(order_result.trades.len() == 0);
+
+            assert!(order_result.status == OrderStatus::New);
+            
+            // Send a matching sell order to the engine
+            let order2 = OrderEvent {
+                price: Price::from_f64(100.0),
+                quantity: 10,
+                side: Side::Sell,
+                order_type: OrderType::LimitOrder,
+                order_id: ORDER_ID,
+                cl_ord_id: CL_ORD_ID,
+                sender_id: SENDER,
+                target_id: TARGET,
+                symbol: SYMBOL,
+                timestamp: 0,
+            };
+
+            inbound_producer.push(order2).unwrap();
+            // Give some time for the engine to process the order
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            let (order_event2, order_result2) = loop {
+                if let Some((order_event, order_result)) = outbound_consumer.try_pop() {
+                    break (order_event, order_result);
+                }
+            };
+
+            assert!(order_event2.price == Price::from_f64(100.0));
+            assert!(order_result2.trades.len() == 1); // One trade should be executed for the matching orders
+            assert!(order_result2.status == OrderStatus::Filled); // Both orders should be filled
+
+
+            stop_handle.stop();
+            handle.join().unwrap();
+        });
+            // We can add tests for the engine here, but since it relies on the order book, we can focus on testing the order book functionality first.
     }
 }

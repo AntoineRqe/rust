@@ -376,3 +376,23 @@ impl std::fmt::Display for Price {
         write!(f, "{}.{:08}", integer_part, frac_part)
     }
 }
+
+use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool};
+
+#[derive(Debug)]
+pub struct StopHandle {
+    pub shutdown: Arc<AtomicBool>,
+    pub thread: Option<Arc<OnceLock<std::thread::Thread>>>, // Handle to the FIX engine thread, used for graceful shutdown
+}
+
+impl StopHandle {
+    pub fn stop(&self) {
+        self.shutdown.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = &self.thread {
+            if let Some(thread) = thread.get() {
+                thread.unpark();
+            }
+        }
+    }
+}
