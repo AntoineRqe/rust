@@ -148,6 +148,7 @@ pub struct Trade {
 pub struct OrderResult {
     pub trades: Vec<Trade>,
     pub status: OrderStatus,
+    pub original_quantity: FixedPointArithmetic, // The original quantity of the order before any trades occurred, added for potential future use in execution reports
     pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
@@ -156,7 +157,7 @@ impl std::fmt::Display for OrderResult {
         write!(
             f,
             "OrderResult {{ status: {:?} }}\n",
-            self.status
+            self.status,
         )?;
         for trade in &self.trades {
             write!(

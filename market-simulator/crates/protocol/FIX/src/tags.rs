@@ -27,6 +27,7 @@ pub mod tags {
     pub const END_SEQ_NO: u32 = 16;
     pub const CHECKSUM: u32 = 10;
     pub const AVG_PX: u32 = 6;
+    pub const CHECK_SUM: u32 = 10;
 }
 
 /// Pre-defined FIX message types we care about on the hot path.

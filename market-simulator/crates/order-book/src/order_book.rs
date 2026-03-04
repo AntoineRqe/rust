@@ -129,6 +129,7 @@ impl OrderBook {
                     OrderStatus::New
                 }
             }),
+            original_quantity,
             timestamp: utils::UtcTimestamp::now().to_unix_ms(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
         }
     }

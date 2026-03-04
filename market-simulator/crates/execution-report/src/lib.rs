@@ -80,11 +80,15 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             types::Side::Sell => self.build_field(tags::SIDE, side_code_set::SELL, &mut report, &mut cursor),
         }
 
+        self.build_field(tags::PRICE, &order.price.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::LEAVES_QTY, &order.quantity.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::CUM_QTY, &order_result.trades.iter().map(|t| t.quantity).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
+
         // Switch sender and target for the execution report since it's going back to the client
         self.build_field(tags::SENDER_COMP_ID, &order.target_id.as_ref(), &mut report, &mut cursor); 
         self.build_field(tags::TARGET_COMP_ID, &order.sender_id.as_ref(), &mut report, &mut cursor);
         self.build_field(tags::SYMBOL, &order.symbol.as_ref(), &mut report, &mut cursor);
-        self.build_field(tags::ORDER_QTY, &order.quantity.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_QTY, &order_result.original_quantity.to_fix_bytes(), &mut report, &mut cursor);
         self.build_field(tags::SENDING_TIME, &utils::UtcTimestamp::now().to_fix_bytes(), &mut report, &mut cursor);
     
         if !order_result.trades.is_empty() {
@@ -94,6 +98,8 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         }
 
         self.build_field(tags::BODY_LENGTH, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor); // Body length is everything after the BodyLength field (which is 2 bytes for tag and equals sign)
+        self.build_field(tags::CHECK_SUM, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor);
+
         report.len = cursor as u16;
         report
     }
@@ -171,6 +177,7 @@ mod tests {
                 trades: vec![],
                 status: types::OrderStatus::New,
                 timestamp: UtcTimestamp::now().to_unix_ms(), // Current timestamp in milliseconds since epoch
+                original_quantity: types::FixedPointArithmetic(1_000_000),
             };
 
             match fifo_in_tx.push((order_event.clone(), order_result)) {
@@ -225,6 +232,7 @@ mod tests {
                 trades: vec![types::Trade { id: types::TradeId::default(), quantity: types::FixedPointArithmetic::from_f64(50.0), price: types::FixedPointArithmetic::from_f64(123.456) }],
                 status: types::OrderStatus::PartiallyFilled,
                 timestamp: utils::UtcTimestamp::now().to_unix_ms(), // Current timestamp in milliseconds since epoch
+                original_quantity: types::FixedPointArithmetic::from_f64(1_000_000.0),
             };
 
             match fifo_in_tx.push((sell_order_event, sell_order_result)) {

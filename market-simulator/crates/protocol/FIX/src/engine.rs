@@ -7,6 +7,7 @@ use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use crossbeam::queue::{ArrayQueue};
+use utils::field_str;
 
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
@@ -153,6 +154,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
             if let Some(resp_queue) = resp_queue {
                 self.pending.insert(order_event.sender_id, resp_queue);
+                println!("Stored response queue for order event #{} with sender ID {:?}", self.counter, field_str(order_event.sender_id.as_ref()));
             }
             
             // Push the structured order event to the order book queue.

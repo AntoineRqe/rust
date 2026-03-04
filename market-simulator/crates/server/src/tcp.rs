@@ -50,9 +50,11 @@ impl <'a, const N: usize> FixServer<N> {
 
         while !shutdown.load(Ordering::Relaxed) {
             match stream.read(&mut buf) {
-                Ok(0) => break, // no message, client closed connection
+                Ok(0) => {
+                    eprintln!("Client disconnected");
+                    break
+                }, // no message, client closed connection
                 Ok(n) => {
-                    println!("Received {} bytes from client", n);
                     let mut msg = FixRawMsg::default();
                     msg.len = n as u16;
                     msg.data[..n].copy_from_slice(&buf[..n]);
@@ -65,7 +67,6 @@ impl <'a, const N: usize> FixServer<N> {
 
                     loop {
                         if let Ok(response) = response_rx.recv() {
-                            println!("Sending response of {} bytes to client", response.len);
                             if let Err(e) = stream.write_all(&response.data[..response.len as usize]) {
                                 eprintln!("Failed to send response to client: {}", e);
                                 break;
