@@ -1,4 +1,4 @@
-use types::{OrderEvent, OrderResult, StopHandle};
+use types::{EntityId, OrderEvent, OrderResult, StopHandle};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use fix::{engine::FixRawMsg, tags::{exec_type_code_set, msg_types, ord_status_code_set, side_code_set, tags::{self}}};
@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 pub struct ExecutionReportEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
-    fifo_out: Producer<'a, (u64, FixRawMsg<N>), N>,
+    fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>,
     shutdown: Arc<AtomicBool>,
 }
 
 impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>, fifo_out: Producer<'a, (u64, FixRawMsg<N>), N>) -> Self {
+    pub fn new(fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>, fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>) -> Self {
         Self { fifo_in, fifo_out, shutdown: Arc::new(AtomicBool::new(false)) }
     }
 
@@ -100,11 +100,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
         let raw_report = self.build_execution_report(exec_report);
-
-        let key = utils::make_key(
-            u32::from_le_bytes(exec_report.0.sender_id.0[0..4].try_into().unwrap_or_default()), 
-            u32::from_le_bytes(exec_report.0.order_id.0[0..4].try_into().unwrap_or_default())
-        );
+        let key = exec_report.0.sender_id;
 
         match self.fifo_out.push((key, raw_report)) {
             Ok(_) => println!("Pushed execution report into output queue"),
@@ -143,7 +139,7 @@ mod tests {
     #[test]
     fn test_execution_report_engine() {
         let mut rb_in = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
-        let mut rb_out = spsc::spsc_lock_free::RingBuffer::<(u64, FixRawMsg<1024>), 1024>::new();
+        let mut rb_out = spsc::spsc_lock_free::RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
         let (fifo_in_tx, fifo_in_rx) = rb_in.split();
         let (fifo_out_tx, fifo_out_rx) = rb_out.split();
         let engine = ExecutionReportEngine::new(fifo_in_rx, fifo_out_tx);

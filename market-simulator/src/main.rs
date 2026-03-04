@@ -1,4 +1,4 @@
-use types::{OrderEvent, OrderResult};
+use types::{EntityId, OrderEvent, OrderResult};
 use order_book::order_book::{OrderBookEngine};
 use server::tcp::FixServer;
 use std::sync::Arc;
@@ -9,14 +9,15 @@ use fix::engine::{RequestQueue};
 use execution_report::{ExecutionReportEngine};
 use std::net::TcpListener;
 
-fn main() {
+fn start_market() {
+
     // inbound: network → fix engine → order book -> exection report
     let net_to_fix   = RequestQueue::new(ArrayQueue::new(1024));
     let fix_to_ob    = memory::open_shared_queue::<1024, OrderEvent>("fix_to_order_book", true);
     let ob_to_er     = memory::open_shared_queue::<1024, (OrderEvent, OrderResult)>("order_book_to_execution_report", true);
 
     // outbound: execution report → fix engine → network
-    let er_to_fix     = memory::open_shared_queue::<1024, (u64, FixRawMsg<1024>)>("execution_report_to_fix", true);
+    let er_to_fix     = memory::open_shared_queue::<1024, (EntityId, FixRawMsg<1024>)>("execution_report_to_fix", true);
 
     let (fix_tx, ob_rx) = fix_to_ob.queue.split();
     let (ob_tx, er_rx) = ob_to_er.queue.split();
@@ -49,4 +50,8 @@ fn main() {
     let server: FixServer<1024> = FixServer::new(net_to_fix);
     let listener = TcpListener::bind("127.0.0.1:9876").unwrap();
     server.accept_loop(listener);
+}
+
+fn main() {
+    start_market();
 }

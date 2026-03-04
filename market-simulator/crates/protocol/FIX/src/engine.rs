@@ -2,7 +2,7 @@ use std::{collections::HashMap};
 use std::sync::atomic::AtomicBool;
 
 use crate::tags::{tags, msg_types, side_code_set};
-use types::{OrderEvent, Price, Side, StopHandle};
+use types::{EntityId, OrderEvent, Price, Side, StopHandle};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -35,10 +35,10 @@ impl<const N: usize> Default for FixRawMsg<N> {
 pub struct FixEngine<'a, const N: usize> {
     request_in: Arc<ArrayQueue<FixRawMsg<N>>>,
     request_out: Producer<'a, OrderEvent, N>,
-    response_in: Consumer<'a, (u64, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
+    response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
     counter: usize,
     shutdown: Arc<AtomicBool>,
-    pending: HashMap<u64, crossbeam_channel::Sender<FixRawMsg<N>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
+    pending: HashMap<EntityId, crossbeam_channel::Sender<FixRawMsg<N>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
 }
 
 impl<'a, const N: usize> FixEngine<'a, N> {
@@ -46,7 +46,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
     pub fn new(
         request_in: Arc<ArrayQueue<FixRawMsg<N>>>,
         request_out: Producer<'a, OrderEvent, N>,
-        response_in: Consumer<'a, (u64, FixRawMsg<N>), N>,
+        response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
     ) -> Self {
         Self {
             request_in: request_in,
@@ -150,14 +150,9 @@ impl<'a, const N: usize> FixEngine<'a, N> {
 
             self.counter += 1;
 
-            let key = utils::make_key(
-                u32::from_le_bytes(order_event.sender_id.0[0..4].try_into().unwrap_or_default()), 
-                u32::from_le_bytes(order_event.order_id.0[0..4].try_into().unwrap_or_default())
-            );
-
             // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
             if let Some(resp_queue) = resp_queue {
-                self.pending.insert(key, resp_queue); // Store the response queue for this order event, using the combined key as the key
+                self.pending.insert(order_event.sender_id, resp_queue);
             }
             
             // Push the structured order event to the order book queue.
@@ -174,7 +169,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
     /// Non blocking check for outbound responses from the order book engine, and if there is a response, send it back to the client using the stored response queue. This is a very basic implementation that assumes the response contains the same key as the original order event, in a real implementation you would want to have a more robust way to correlate responses with requests, and also handle cases where the client has disconnected or the response queue is full.
     fn run_outbound_response(&mut self) {
         if let Some((key, _response)) = self.response_in.try_pop() {
-            if let Some(resp_queue) = self.pending.remove(&key) {
+            if let Some(resp_queue) = self.pending.get(&key) {
                 match resp_queue.send(_response) {
                     Ok(_) => { println!("Successfully pushed response back to client for order event #{}", self.counter); },
                     Err(_) => { println!("Failed to push response back to client, dropping response"); },
@@ -217,7 +212,7 @@ mod tests {
         let net_to_fix = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         // Outbound : order book -> FIX -> net
-        let mut ob_to_fix = RingBuffer::<(u64, FixRawMsg<1024>), 1024>::new();
+        let mut ob_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
 
         std::thread::scope(|scope| {
 
