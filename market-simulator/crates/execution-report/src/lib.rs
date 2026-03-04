@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use fix::{engine::FixRawMsg, tags::{exec_type_code_set, msg_types, ord_status_code_set, side_code_set, tags::{self}}};
 use utils::{field_str, number_to_bytes};
 use std::sync::Arc;
-
+use types::FixedPointArithmetic;
 
 pub struct ExecutionReportEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
@@ -84,13 +84,13 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         self.build_field(tags::SENDER_COMP_ID, &order.target_id.as_ref(), &mut report, &mut cursor); 
         self.build_field(tags::TARGET_COMP_ID, &order.sender_id.as_ref(), &mut report, &mut cursor);
         self.build_field(tags::SYMBOL, &order.symbol.as_ref(), &mut report, &mut cursor);
-        self.build_field(tags::ORDER_QTY, &number_to_bytes(order.quantity).as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_QTY, &order.quantity.to_fix_bytes(), &mut report, &mut cursor);
         self.build_field(tags::SENDING_TIME, &utils::UtcTimestamp::now().to_fix_bytes(), &mut report, &mut cursor);
     
         if !order_result.trades.is_empty() {
-            self.build_field(tags::LAST_PX, &number_to_bytes(order_result.trades.iter().map(|t| t.price.raw() as u64).sum::<u64>()).as_ref(), &mut report, &mut cursor);
-            self.build_field(tags::LAST_QTY, &number_to_bytes(order_result.trades.iter().map(|t| t.quantity).sum::<u64>()).as_ref(), &mut report, &mut cursor);
-            self.build_field(tags::AVG_PX, &number_to_bytes(order_result.trades.iter().map(|t| t.price.raw() as u64).sum::<u64>() / order_result.trades.len() as u64).as_ref(), &mut report, &mut cursor);
+            self.build_field(tags::LAST_PX, &order_result.trades.iter().map(|t| t.price).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
+            self.build_field(tags::LAST_QTY, &order_result.trades.iter().map(|t| t.quantity).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
+            self.build_field(tags::AVG_PX, &(order_result.trades.iter().map(|t| t.price).sum::<FixedPointArithmetic>() / FixedPointArithmetic::from_number(order_result.trades.len() as i64)).to_fix_bytes(), &mut report, &mut cursor);
         }
 
         self.build_field(tags::BODY_LENGTH, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor); // Body length is everything after the BodyLength field (which is 2 bytes for tag and equals sign)
@@ -159,8 +159,8 @@ mod tests {
                 cl_ord_id: types::OrderId::from_ascii("CLORD12345"),
                 order_id: types::OrderId::from_ascii("ORDERID"),
                 side: types::Side::Buy,
-                price: types::Price(123_456_000), // 123.456 in FIX price format (8 decimal places)
-                quantity: 100,
+                price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
+                quantity: types::FixedPointArithmetic(1_000_000),
                 sender_id: types::EntityId::from_ascii("SENDER"),
                 target_id: types::EntityId::from_ascii("TARGET"),
                 symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
@@ -199,7 +199,7 @@ mod tests {
             let symbol_field = parsed_report.fields.iter().find(|f| f.tag == tags::SYMBOL).expect("SYMBOL field missing");
             assert_eq!(symbol_field.value, field_str(&order_event.symbol.as_ref()));
             let order_qty_field = parsed_report.fields.iter().find(|f| f.tag == tags::ORDER_QTY).expect("ORDER_QTY field missing");
-            assert_eq!(order_qty_field.value, number_to_bytes(order_event.quantity).as_ref());
+            assert_eq!(order_qty_field.value, field_str(&order_event.quantity.to_fix_bytes()));
             // let last_qty_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_QTY).expect("LAST_QTY field missing");
             // assert_eq!(last_qty_field.value, number_to_bytes(0u64).as_ref()); // No trades executed, so LAST_QTY should be 0
             // let last_px_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_PX).expect("LAST_PX field missing");
@@ -213,8 +213,8 @@ mod tests {
                 cl_ord_id: types::OrderId::from_ascii("CLORD54321"),
                 order_id: types::OrderId::from_ascii("ORDERID2"),
                 side: types::Side::Sell,
-                price: types::Price(123_456_000), // 123.456 in FIX price format (8 decimal places)
-                quantity: 50,
+                price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
+                quantity: types::FixedPointArithmetic(1_000_000),
                 sender_id: types::EntityId::from_ascii("SENDER2"),
                 target_id: types::EntityId::from_ascii("TARGET2"),
                 symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
@@ -222,7 +222,7 @@ mod tests {
             };
 
             let sell_order_result = types::OrderResult {
-                trades: vec![types::Trade { id: types::TradeId::default(), quantity: 50, price: types::Price(123_456_000) }],
+                trades: vec![types::Trade { id: types::TradeId::default(), quantity: types::FixedPointArithmetic::from_f64(50.0), price: types::FixedPointArithmetic::from_f64(123.456) }],
                 status: types::OrderStatus::PartiallyFilled,
                 timestamp: utils::UtcTimestamp::now().to_unix_ms(), // Current timestamp in milliseconds since epoch
             };
@@ -239,11 +239,11 @@ mod tests {
             let parsed_report = fix_parser.get_fields();    
 
             let last_qty_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_QTY).expect("LAST_QTY field missing");
-            assert_eq!(last_qty_field.value, number_to_bytes(50u64).as_ref()); // 50 units filled
+            assert_eq!(last_qty_field.value, field_str(&FixedPointArithmetic::from_f64(50.0).to_fix_bytes())); // 50 units filled
             let last_px_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_PX).expect("LAST_PX field missing");
-            assert_eq!(last_px_field.value, number_to_bytes(123_456_000u64).as_ref()); // 123.456 price
+            assert_eq!(last_px_field.value, field_str(&FixedPointArithmetic::from_f64(123.456).to_fix_bytes())); // 123.456 price
             let avg_px_field = parsed_report.fields.iter().find(|f| f.tag == tags::AVG_PX).expect("AVG_PX field missing");
-            assert_eq!(avg_px_field.value, number_to_bytes(123_456_000u64).as_ref()); // 123.456 price, since only one trade executed
+            assert_eq!(avg_px_field.value, field_str(&FixedPointArithmetic::from_f64(123.456).to_fix_bytes())); // 123.456 price, since only one trade executed
 
             stop_handle.shutdown.store(true, Ordering::Relaxed);
             handle.join().unwrap();

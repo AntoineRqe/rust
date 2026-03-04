@@ -712,6 +712,7 @@ dependencies = [
  "crossbeam-channel",
  "fix",
  "spsc",
+ "types",
 ]
 
 [[package]]

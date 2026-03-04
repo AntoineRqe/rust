@@ -1,5 +1,6 @@
 use std::{cmp::Ordering};
 use std::ops::Deref;
+use std::iter::Sum;
 
 /// Represents an order in the order book.
 /// Orders are compared based on price for sorting in the order book.
@@ -14,8 +15,8 @@ use std::ops::Deref;
 /// - `broker_id`: The identifier of the broker placing the order.
 #[derive(Debug, Clone)]
 pub struct OrderEvent {
-    pub price: Price,
-    pub quantity: u64, // In FIX, qty is a float but we will use integer for simplicity (e.g. 100.0 -> 100)
+    pub price: FixedPointArithmetic,
+    pub quantity: FixedPointArithmetic, // In FIX, qty is a float but we will use integer for simplicity (e.g. 100.0 -> 100)
     pub side: Side,
     pub symbol: FixedString, // FIX Symbol can be up to 20 characters, we will use a fixed-size array for simplicity
     pub order_type: OrderType,
@@ -29,8 +30,8 @@ pub struct OrderEvent {
 impl Default for OrderEvent {
     fn default() -> Self {
         Self {
-            price: Price::PRICE_ZERO,
-            quantity: 0,
+            price: FixedPointArithmetic::ZERO,
+            quantity: FixedPointArithmetic::ZERO,
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::default(),
@@ -44,7 +45,7 @@ impl Default for OrderEvent {
 }
 
 impl OrderEvent {
-    pub fn new(price: Price, quantity: u64, side: Side, order_type: OrderType, cl_ord_id: OrderId, order_id: OrderId, sender_id: EntityId, target_id: EntityId, symbol: FixedString, timestamp: u64) -> Self {
+    pub fn new(price: FixedPointArithmetic, quantity: FixedPointArithmetic, side: Side, order_type: OrderType, cl_ord_id: OrderId, order_id: OrderId, sender_id: EntityId, target_id: EntityId, symbol: FixedString, timestamp: u64) -> Self {
         Self {
             price,
             quantity,
@@ -66,11 +67,11 @@ impl OrderEvent {
         if self.order_type != OrderType::LimitOrder && self.order_type != OrderType::MarketOrder {
             return Err("Invalid order type");
         }
-        if self.quantity == 0 {
+        if self.quantity == FixedPointArithmetic::ZERO {
             return Err("Quantity cannot be zero");
         }
-        if self.price.raw() < 0 {
-            return Err("Price cannot be negative");
+        if self.price == FixedPointArithmetic::ZERO {
+            return Err("Price cannot be zero");
         }
         if self.sender_id.0.iter().all(|&b| b == 0) {
             return Err("Sender ID cannot be empty");
@@ -138,8 +139,8 @@ impl TradeId {
 /// - `id`: A unique identifier for the trade.
 #[derive(Debug, Clone)]
 pub struct Trade {
-    pub price: Price,
-    pub quantity: u64,
+    pub price: FixedPointArithmetic,
+    pub quantity: FixedPointArithmetic,
     pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
 }
 
@@ -306,11 +307,11 @@ impl FixedString {
 /// Price represented as integer with implicit 8 decimal places
 /// e.g. 123.45678900 -> 12_345_678_900
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Price(pub i64);
+pub struct FixedPointArithmetic(pub i64);
 
 
-impl Price {
-    pub const PRICE_ZERO: Price = Price(0);
+impl FixedPointArithmetic {
+    pub const ZERO: FixedPointArithmetic = FixedPointArithmetic(0);
     pub const SCALE: i64 = 100_000_000; // 10^8
 
     pub fn from_fix_bytes(bytes: &[u8]) -> Option<Self> {
@@ -352,23 +353,117 @@ impl Price {
         let scale = 10_i64.pow((8 - frac_digits) as u32);
         let raw = integer_part * Self::SCALE + frac_part * scale;
 
-        Some(Price(if negative { -raw } else { raw }))
+        Some(FixedPointArithmetic(if negative { -raw } else { raw }))
+    }
+
+    pub fn to_fix_bytes(self) -> [u8; 20] {
+        let mut buf = [0u8; 20];
+        let raw = self.0;
+        let negative = raw < 0;
+        let abs_raw = raw.abs();
+        let integer_part = abs_raw / Self::SCALE;
+        let frac_part = abs_raw % Self::SCALE;
+
+        let mut i = 0;
+        if negative {
+            buf[i] = b'-';
+            i += 1;
+        }
+
+        // Write integer part
+        let int_str = integer_part.to_string();
+        for b in int_str.as_bytes() {
+            buf[i] = *b;
+            i += 1;
+        }
+
+        buf[i] = b'.';
+        i += 1;
+
+        // Write fractional part, zero-padded to 8 digits
+        let frac_str = format!("{:08}", frac_part);
+        for b in frac_str.as_bytes() {
+            buf[i] = *b;
+            i += 1;
+        }
+
+        buf
     }
 
     pub fn from_f64(price: f64) -> Self {
-        Price((price * Self::SCALE as f64).round() as i64)
+        FixedPointArithmetic((price * Self::SCALE as f64).round() as i64)
     }
     
     pub fn from_raw(raw: i64) -> Self {
-        Price(raw)
+        FixedPointArithmetic(raw)
     }
 
     pub fn raw(self) -> i64 {
         self.0
     }
+
+    pub fn from_number<T: Into<i64>>(num: T) -> Self {
+        FixedPointArithmetic::from_raw(num.into() * Self::SCALE)
+    }
 }
 
-impl std::fmt::Display for Price {
+impl Sum for FixedPointArithmetic {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let mut total: i64 = 0;
+        for price in iter {
+            total += price.0;
+        }
+        FixedPointArithmetic::from_raw(total)
+    }
+}
+
+impl std::ops::Add for FixedPointArithmetic {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        FixedPointArithmetic::from_raw(self.0 + other.0)
+    }
+}
+
+impl std::ops::Sub for FixedPointArithmetic {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        FixedPointArithmetic::from_raw(self.0 - other.0)
+    }
+}
+
+impl std::ops::Mul for FixedPointArithmetic {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        // (a * b) / SCALE to maintain the fixed-point representation
+        FixedPointArithmetic::from_raw(((self.0 as i128 * other.0 as i128) / Self::SCALE as i128) as i64)
+    }
+}
+
+impl std::ops::Div for FixedPointArithmetic {
+    type Output = Self;
+
+    fn div(self, other: Self) -> Self {
+        // (a * SCALE) / b to maintain the fixed-point representation
+        FixedPointArithmetic::from_raw(((self.0 as i128 * Self::SCALE as i128) / other.0 as i128) as i64)
+    }
+}
+
+impl std::ops::AddAssign for FixedPointArithmetic {
+    fn add_assign(&mut self, other: Self) {
+        self.0 += other.0;
+    }
+}
+
+impl std::ops::SubAssign for FixedPointArithmetic {
+    fn sub_assign(&mut self, other: Self) {
+        self.0 -= other.0;
+    }
+}
+
+impl std::fmt::Display for FixedPointArithmetic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let raw = self.0;
         let integer_part = raw / Self::SCALE;

@@ -2,7 +2,7 @@ use std::{collections::HashMap};
 use std::sync::atomic::AtomicBool;
 
 use crate::tags::{tags, msg_types, side_code_set};
-use types::{EntityId, OrderEvent, Price, Side, StopHandle};
+use types::{EntityId, FixedPointArithmetic, OrderEvent, Side, StopHandle};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -84,7 +84,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                     }
                 },
                 tags::PRICE => {
-                    if let Some(price) = Price::from_fix_bytes(field.value) {
+                    if let Some(price) = FixedPointArithmetic::from_fix_bytes(field.value) {
                         order_event.price = price;
                     } else {
                         return None; // Invalid price format
@@ -106,7 +106,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                     utils::copy_array(&mut order_event.target_id.0, field.value);
                 },
                 tags::ORDER_QTY => {
-                    if let Some(qty) = utils::bytes_to_number::<u64>(field.value) {
+                    if let Some(qty) = FixedPointArithmetic::from_fix_bytes(field.value) {
                         order_event.quantity = qty;
                     } else {
                         return None; // Invalid quantity format
@@ -256,8 +256,8 @@ mod tests {
             assert_eq!(field_str(order_event.cl_ord_id.as_ref()),  b"12345");
             assert_eq!(field_str(order_event.sender_id.as_ref()), b"SENDER");
             assert_eq!(field_str(order_event.target_id.as_ref()), b"TARGET");
-            assert_eq!(order_event.quantity, 1_000_000);
-            assert_eq!(order_event.price, Price(123_456_000));
+            assert_eq!(order_event.quantity, FixedPointArithmetic::from_number(1000000));
+            assert_eq!(order_event.price, FixedPointArithmetic::from_f64(1.23456));
             assert_eq!(order_event.side, Side::Buy);
 
             // Stop the FIX engine thread

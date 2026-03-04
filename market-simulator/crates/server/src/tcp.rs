@@ -4,15 +4,16 @@ use fix::engine::{FixRawMsg, RequestQueue};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{unbounded};
+use types::StopHandle;
 
 pub struct FixServer<const N: usize> {
     fifo_in: RequestQueue<N>,
-    running: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl <'a, const N: usize> FixServer<N> {
     pub fn new(fifo_in: RequestQueue<N>) -> Self {
-        Self { fifo_in, running: Arc::new(AtomicBool::new(true)) }
+        Self { fifo_in, shutdown: Arc::new(AtomicBool::new(false)) }
     }
 
     pub fn accept_loop(&self, listener: TcpListener) {
@@ -22,25 +23,32 @@ impl <'a, const N: usize> FixServer<N> {
             stream.set_nodelay(true).unwrap();
 
             let queue = Arc::clone(&self.fifo_in);
-            let running = Arc::clone(&self.running);
+            let shutdown = Arc::clone(&self.shutdown);
 
             // Spawn a thread to handle this client connection
             std::thread::spawn(move || {
-                Self::handle_client(stream, queue, running);
+                Self::handle_client(stream, queue, shutdown);
             });
+        }
+    }
+
+    pub fn handle_shutdown(&self) -> StopHandle {
+        StopHandle { 
+            shutdown: Arc::clone(&self.shutdown),
+            thread: None,
         }
     }
 
     fn handle_client(
         mut stream: TcpStream,
         queue:   RequestQueue<N>,
-        running: Arc<AtomicBool>,
+        shutdown: Arc<AtomicBool>,
     ) {
 
         let (response_tx, response_rx) = unbounded();
         let mut buf = [0u8; 4096];
 
-        while running.load(Ordering::Relaxed) {
+        while !shutdown.load(Ordering::Relaxed) {
             match stream.read(&mut buf) {
                 Ok(0) => break, // no message, client closed connection
                 Ok(n) => {
