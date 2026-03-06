@@ -201,7 +201,7 @@ pub enum OrderStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FixedString(pub [u8; 20]);
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy,PartialEq, Eq, Default)]
 pub struct TradeId(pub [u8; 20]);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Hash)]
@@ -391,8 +391,8 @@ impl FixedPointArithmetic {
         buf
     }
 
-    pub fn from_f64(price: f64) -> Self {
-        FixedPointArithmetic((price * Self::SCALE as f64).round() as i64)
+    pub fn from_f64(number: f64) -> Self {
+        FixedPointArithmetic((number * Self::SCALE as f64).round() as i64)
     }
     
     pub fn from_raw(raw: i64) -> Self {

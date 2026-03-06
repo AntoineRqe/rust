@@ -1,4 +1,5 @@
-use std::{cmp::Reverse, collections::BinaryHeap, sync::atomic::AtomicBool};
+use std::collections::VecDeque;
+use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 use types::{
     FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, TradeId
 };
@@ -60,8 +61,8 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 /// - `asks`: A binary heap containing sell orders, sorted by price in ascending order (using `Reverse` to achieve min-heap behavior).
 /// - `id_counter`: A counter used to generate unique trade IDs for matched orders.
 pub struct OrderBook {
-    pub bids: BinaryHeap<OrderEvent>,
-    pub asks: BinaryHeap<Reverse<OrderEvent>>,
+    pub bids: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
+    pub asks: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     id_counter: TradeId, // Counter for generating unique trade IDs, using a fixed-size array for simplicity
 }
 
@@ -73,7 +74,7 @@ impl std::fmt::Display for OrderBook {
         }
         write!(f, "\nBid")?;
         for bid in self.bids.iter() {
-            write!(f, "\n{}", bid)?;
+            write!(f, "\n{}", bid.0)?;
         }
         Ok(())
     }
@@ -82,8 +83,8 @@ impl OrderBook {
     pub fn new() -> Self {
         OrderBook {
             // Arbitrary initial capacity for the heaps to avoid frequent resizing; can be adjusted based on expected order volume.
-            bids: BinaryHeap::with_capacity(1024),
-            asks: BinaryHeap::with_capacity(1024),
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
             id_counter: TradeId::new(), // Initialize the trade ID counter to zero
         }
     }
@@ -141,32 +142,39 @@ impl OrderBook {
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
     fn process_sell_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
         let original_quantity = order.quantity;
-        let mut trades: Vec<Trade> = Vec::with_capacity(10);
+        let mut trades: Vec<Trade> = Vec::with_capacity(16); // 16 for now, to be adjusted based on expected trade volume per order
+        while let Some((&best_bid_price, _ )) = self.bids.first_key_value() {
+            if best_bid_price >= order.price {
+                // There is a matching bid, so we need to process the trades against the orders in the best bid queue
+                let mut best_bid_queue = self.bids.pop_first().unwrap().1;
 
-        while let Some(best_bid) = self.bids.peek() {
-            if best_bid.price >= order.price {
-                let mut best_bid = self.bids.pop().unwrap();
-                let trade_quantity = order.quantity.min(best_bid.quantity);
-                // Process the trade here (e.g., update quantities, record the trade, etc.)
-                best_bid.quantity -= trade_quantity;
+                while let Some(mut best_bid) = best_bid_queue.pop_front() {
+                    let trade_quantity = order.quantity.min(best_bid.quantity);
+                    // Process the trade here (e.g., update quantities, record the trade, etc.)
+                    best_bid.quantity -= trade_quantity;
+                    order.quantity -= trade_quantity;
 
-                // Add the trade to the list of trades for this order
-                trades.push(Trade {
-                    price: best_bid.price,
-                    quantity: trade_quantity,
-                    id: self.id_counter.clone(), // Example trade ID
-                });
+                    // Add the trade to the list of trades for this order
+                    trades.push(Trade {
+                        price: best_bid.price,
+                        quantity: trade_quantity,
+                        id: self.id_counter, // Example trade ID
+                    });
 
-                self.id_counter.increment(); // Increment the trade ID counter
-        
-                if best_bid.quantity > FixedPointArithmetic::ZERO {
-                    self.bids.push(best_bid);
-                }
-                // Update the incoming order's quantity
-                order.quantity -= trade_quantity;
+                    self.id_counter.increment(); // Increment the trade ID counter
+            
+                    if best_bid.quantity > FixedPointArithmetic::ZERO {
+                        best_bid_queue.push_front(best_bid);
+                    }
+                    // Update the incoming order's quantity
 
-                if order.quantity == FixedPointArithmetic::ZERO {
-                    return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
+                    if order.quantity == FixedPointArithmetic::ZERO {
+                        if !best_bid_queue.is_empty() {
+                            self.bids.insert(best_bid_price, best_bid_queue);
+                        }
+
+                        return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
+                    }
                 }
             } else {
                 break;
@@ -176,7 +184,10 @@ impl OrderBook {
         let order_result = self.generate_order_result(&order, None, original_quantity, trades);
 
         if order.quantity > FixedPointArithmetic::ZERO {
-            self.asks.push(Reverse(order));
+            self.asks
+            .entry(order.price)
+            .or_insert_with(VecDeque::new)
+            .push_back(order);
         }
 
         order_result
@@ -190,30 +201,37 @@ impl OrderBook {
     fn process_buy_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
         let original_quantity = order.quantity;
         let mut trades: Vec<Trade> = Vec::with_capacity(10);
+        while let Some((&best_ask_price, _)) = self.asks.first_key_value() {
+            if best_ask_price <= order.price {
+                let mut best_ask_queue = self.asks.pop_first().unwrap().1; // Remove the best ask queue from the asks heap to process it
+                
+                while let Some(mut best_ask) = best_ask_queue.pop_front() {
+                    let trade_quantity = order.quantity.min(best_ask.quantity);
+                    // Process the trade here (e.g., update quantities, record the trade, etc.)
+                    best_ask.quantity -= trade_quantity;
+                    order.quantity -= trade_quantity;
 
-        while let Some(Reverse(best_ask)) = self.asks.peek() {
-            if best_ask.price <= order.price {
-                let mut best_ask = self.asks.pop().unwrap().0;
-                let trade_quantity = order.quantity.min(best_ask.quantity);
-                // Process the trade here (e.g., update quantities, record the trade, etc.)
-                best_ask.quantity -= trade_quantity;
-                // Add the trade to the list of trades for this order
-                trades.push(Trade {
-                    price: best_ask.price,
-                    quantity: trade_quantity,
-                    id: self.id_counter.clone(), // Example trade ID
-                });
-                self.id_counter.increment(); // Increment the trade ID counter
+                    // Add the trade to the list of trades for this order
+                    trades.push(Trade {
+                        price: best_ask.price,
+                        quantity: trade_quantity,
+                        id: self.id_counter, // Example trade ID
+                    });
+                    self.id_counter.increment(); // Increment the trade ID counter
 
-                // If the best ask still has quantity remaining after the trade, push it back onto the asks
-                if best_ask.quantity > FixedPointArithmetic::ZERO {
-                    self.asks.push(Reverse(best_ask));
-                }
-                // Update the incoming order's quantity
-                order.quantity -= trade_quantity;
+                    // If the best ask still has quantity remaining after the trade, push it back onto the asks
+                    if best_ask.quantity > FixedPointArithmetic::ZERO {
+                        best_ask_queue.push_front(best_ask);
+                    }
 
-                if order.quantity == FixedPointArithmetic::ZERO {
-                    return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
+                    // Update the incoming order's quantity
+                    if order.quantity == FixedPointArithmetic::ZERO {
+                        if !best_ask_queue.is_empty() {
+                            self.asks.insert(best_ask_price, best_ask_queue.clone());
+                        }
+
+                        return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
+                    }
                 }
             } else {
                 break;
@@ -223,7 +241,10 @@ impl OrderBook {
         let order_result = self.generate_order_result(&order, None, original_quantity, trades);
 
         if order.quantity > FixedPointArithmetic::ZERO {
-            self.bids.push(order);
+            self.bids
+            .entry(order.price)
+            .or_insert_with(VecDeque::new)
+            .push_back(order);
         }
 
         order_result
@@ -243,14 +264,18 @@ impl OrderBook {
     /// Returns:
     /// - An `Option<&OrderEvent>` containing a reference to the best bid if it exists
     pub fn get_best_bid(&self) -> Option<&OrderEvent> {
-        self.bids.peek()
+        self.bids
+        .first_key_value()
+        .and_then(|(_price, queue)| queue.front())
     }
 
     /// Gets the best ask from the order book, which is the lowest-priced sell order. Since asks are stored in a min-heap using `Reverse`, we need to access the inner `OrderEvent` from the `Reverse` wrapper.
     /// Returns:
     /// - An `Option<&OrderEvent>` containing a reference to the best ask if it exists, or `None` if there are no asks in the order book.
     pub fn get_best_ask(&self) -> Option<&OrderEvent> {
-        self.asks.peek().map(|reverse_order| &reverse_order.0)
+        self.asks
+        .first_key_value()
+        .and_then(|(_price, queue)| queue.front())
     }
 
     /// Calculates the spread of the order book, which is the difference between the best ask price and the best bid price. If either the best bid or best ask is not available, it returns `None`.
@@ -270,8 +295,8 @@ impl OrderBook {
     /// - A `Vec<OrderEvent>` containing the orders for the specified side of the order book. For bids, it returns the orders directly from the `bids` heap, and for asks, it extracts the inner `OrderEvent` from the `Reverse` wrapper in the `asks` heap.
     pub fn dump_order_book(&self, side: Side) -> Vec<OrderEvent> {
         match side {
-            Side::Buy => self.bids.iter().cloned().collect(),
-            Side::Sell => self.asks.iter().map(|reverse_order| reverse_order.0.clone()).collect(),
+            Side::Buy => self.bids.iter().flat_map(|(_price, queue)| queue.iter().cloned()).collect(),
+            Side::Sell => self.asks.iter().flat_map(|(_price, queue)| queue.iter().cloned()).collect(),
         }
     }
 }
@@ -288,6 +313,78 @@ mod tests {
     const TARGET: EntityId = EntityId::from_ascii("TARGET0000000000000");
     const CL_ORD_ID: OrderId = OrderId::from_ascii("12345");
     const ORDER_ID: OrderId = OrderId::from_ascii("54321");
+
+    #[test]
+    fn test_order_book_initialization() {
+        let order_book = OrderBook::new();
+        assert!(order_book.get_best_bid().is_none());
+        assert!(order_book.get_best_ask().is_none());
+        assert!(order_book.get_spread().is_none());
+    }
+
+    #[test]
+    fn test_single_limit_order() {
+        let mut order_book = OrderBook::new();
+        let order = OrderEvent {
+            price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
+            quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
+            side: Side::Buy,
+            order_type: OrderType::LimitOrder,
+            order_id: ORDER_ID,
+            cl_ord_id: CL_ORD_ID,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL, // Set the symbol for the order
+            timestamp: 0,
+        };
+
+        let result = order_book.process_order(order);
+
+        assert_eq!(result.trades.len(), 0); // No trades executed
+        assert_eq!(result.status, OrderStatus::New);
+        assert_eq!(order_book.get_best_bid().unwrap().price, FixedPointArithmetic::from_f64(100.0)); // Best bid should be the price of the order
+        assert_eq!(order_book.get_best_bid().unwrap().quantity, FixedPointArithmetic::from_f64(10.0)); // Best bid quantity should be the quantity of the order
+    }
+
+    #[test]
+    fn test_trade_with_same_price() {
+        let mut order_book = OrderBook::new();
+        let order1 = OrderEvent {
+            price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
+            quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
+            side: Side::Buy,
+            order_type: OrderType::LimitOrder,
+            order_id: ORDER_ID,
+            cl_ord_id: CL_ORD_ID,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL, // Set the symbol for the order
+            timestamp: 0,
+        };
+        let order2 = OrderEvent {
+            price: FixedPointArithmetic::from_f64(100.0),
+            quantity: FixedPointArithmetic::from_f64(5.0),
+            side: Side::Sell,
+            order_type: OrderType::LimitOrder,
+            order_id: ORDER_ID,
+            cl_ord_id: CL_ORD_ID,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL, // Set the symbol for the order
+            timestamp: 0,
+        };
+
+        let result1 = order_book.process_order(order1);
+        let result2 = order_book.process_order(order2);
+
+        assert_eq!(result1.trades.len(), 0); // No trades executed for the first order
+        assert_eq!(result1.status, OrderStatus::New);
+
+        assert_eq!(result2.trades.len(), 1); // One trade executed for the second order
+        assert_eq!(result2.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
+        assert_eq!(result2.trades[0].price, FixedPointArithmetic::from_f64(100.0)); // Trade price should be 100.0
+        assert_eq!(result2.status, OrderStatus::Filled);
+    }
 
     #[test]
     fn test_limit_orders_single_trade() {
@@ -354,12 +451,12 @@ mod tests {
 
         assert_eq!(order_book.bids.len(), 0); // One ask should remain in the order book
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
-        assert_eq!(order_book.asks.peek().unwrap().0.price, FixedPointArithmetic::from_f64(98.0)); // The remaining ask should be the one at 98.0
-        assert_eq!(order_book.asks.peek().unwrap().0.quantity, FixedPointArithmetic::from_f64(5.0)); // The remaining ask should have a quantity of 5
-        assert_eq!(order_book.asks.peek().unwrap().0.order_id, ORDER_ID); // The remaining ask should have the same order ID as the third order
-        assert_eq!(order_book.asks.peek().unwrap().0.sender_id, SENDER); // The remaining ask should have the same sender ID as the third order
-        assert_eq!(order_book.asks.peek().unwrap().0.target_id, TARGET); // The remaining ask should have the same target ID as the third order
-        assert_eq!(order_book.asks.peek().unwrap().0.order_type, OrderType::LimitOrder); // The remaining ask should have the same order type as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().key(), &FixedPointArithmetic::from_f64(98.0)); // The remaining ask should be the one at 98.0
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().quantity, FixedPointArithmetic::from_f64(5.0)); // The remaining ask should have a quantity of 5
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_id, ORDER_ID); // The remaining ask should have the same order ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().sender_id, SENDER); // The remaining ask should have the same sender ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().target_id, TARGET); // The remaining ask should have the same target ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_type, OrderType::LimitOrder); // The remaining ask should have the same order type as the third order
         // Give time for the logs to be flushed before the test ends
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -448,12 +545,12 @@ mod tests {
         assert_eq!(result4.status, OrderStatus::Filled);
 
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
-        assert_eq!(order_book.asks.peek().unwrap().0.price, FixedPointArithmetic::from_f64(99.0)); // The remaining ask should be the one at 99.0
-        assert_eq!(order_book.asks.peek().unwrap().0.quantity, FixedPointArithmetic::from_f64(1.0)); // The remaining ask should have a quantity of 1
-        assert_eq!(order_book.asks.peek().unwrap().0.order_id, ORDER_ID); // The remaining ask should have the same order ID as the first order
-        assert_eq!(order_book.asks.peek().unwrap().0.sender_id, SENDER); // The remaining ask should have the same sender ID as the first order
-        assert_eq!(order_book.asks.peek().unwrap().0.target_id, TARGET); // The remaining ask should have the same target ID as the first order
-        assert_eq!(order_book.asks.peek().unwrap().0.order_type, OrderType::LimitOrder);
+        assert_eq!(order_book.asks.first_entry().unwrap().key(), &FixedPointArithmetic::from_f64(99.0)); // The remaining ask should be the one at 99.0
+        assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().quantity, FixedPointArithmetic::from_f64(1.0)); // The remaining ask should have a quantity of 1
+        assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().order_id, ORDER_ID); // The remaining ask should have the same order ID as the first order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().sender_id, SENDER); // The remaining ask should have the same sender ID as the first order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().target_id, TARGET); // The remaining ask should have the same target ID as the first order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().order_type, OrderType::LimitOrder);
 // The remaining ask should have the same order type as the first order
 
         assert!(order_book.bids.is_empty()); // No bids should remain in the order book
@@ -544,14 +641,14 @@ mod tests {
 
         // Check the remaining orders in the order book after processing the market order
         assert_eq!(order_book.asks.len(), 2); // Two asks should remain in the order book
-        assert_eq!(order_book.asks.peek().unwrap().0.price, FixedPointArithmetic::from_f64(98.0)); // The remaining ask should be the one at 98.0
-        assert_eq!(order_book.asks.peek().unwrap().0.quantity, FixedPointArithmetic::from_f64(3.0)); // The remaining ask should have a quantity of 3.0
-        assert_eq!(order_book.asks.peek().unwrap().0.order_id, ORDER_ID); // The remaining ask should have the same order ID as the third order
-        assert_eq!(order_book.asks.peek().unwrap().0.sender_id, SENDER); // The remaining ask should have the same sender ID as the third order
-        assert_eq!(order_book.asks.peek().unwrap().0.target_id, TARGET); // The remaining ask should have the same target ID as the third order
-        assert_eq!(order_book.asks.peek().unwrap().0.order_type, OrderType::LimitOrder); // The remaining ask should have the same order type as the third order
-        assert_eq!(order_book.asks.iter().nth(1).unwrap().0.price, FixedPointArithmetic::from_f64(99.0)); // The second remaining ask should be the one at 99.0
-        assert_eq!(order_book.asks.iter().nth(1).unwrap().0.quantity, FixedPointArithmetic::from_f64(5.0)); // The second remaining ask should have a quantity of 5.0
+        assert_eq!(order_book.asks.first_entry().unwrap().key(), &FixedPointArithmetic::from_f64(98.0)); // The remaining ask should be the one at 98.0
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().quantity, FixedPointArithmetic::from_f64(3.0)); // The remaining ask should have a quantity of 3.0
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_id, ORDER_ID); // The remaining ask should have the same order ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().sender_id, SENDER); // The remaining ask should have the same sender ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().target_id, TARGET); // The remaining ask should have the same target ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_type, OrderType::LimitOrder); // The remaining ask should have the same order type as the third order
+        assert_eq!(order_book.asks.iter().nth(1).unwrap().0, &FixedPointArithmetic::from_f64(99.0)); // The second remaining ask should be the one at 99.0
+        assert_eq!(order_book.asks.iter().nth(1).unwrap().1.get(0).unwrap().quantity, FixedPointArithmetic::from_f64(5.0)); // The second remaining ask should have a quantity of 5.0
 
     }
 
