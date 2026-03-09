@@ -22,6 +22,7 @@ hdrhistogram = "7.0"
 spsc = { path = "../spsc" }
 crossbeam = "0.8.2"
 crossbeam-channel = "0.5.15"
+lazy_static = "1.4.0"
 
 # Main binary crate
 [package]
@@ -61,3 +62,16 @@ inherits = "release"
 codegen-units = 16
 debug = true
 strip = false
+
+[[bench]]
+name = "benches"
+harness = false
+path = "benches/benches.rs"
+
+[dev-dependencies]
+criterion.workspace = true
+hdrhistogram.workspace = true
+lazy_static.workspace = true
+execution-report = { path = "crates/execution-report" }
+types = { path = "crates/types" }
+fix = { path = "crates/protocol/FIX" }

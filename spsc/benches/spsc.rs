@@ -171,7 +171,7 @@ fn benchmark_latency_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
             for i in 0..iters {
-                if i > 0 {
+                if i > 0 { // Send the first item immediately, then wait for consumer signal on subsequent items
                     // Wait for consumer to signal that it popped the last item
                     while !ready_producer.load(std::sync::atomic::Ordering::Acquire) {
                         std::hint::spin_loop();

@@ -91,7 +91,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         self.build_field(tags::ORDER_QTY, &order_result.original_quantity.to_fix_bytes(), &mut report, &mut cursor);
         self.build_field(tags::SENDING_TIME, &utils::UtcTimestamp::now().to_fix_bytes(), &mut report, &mut cursor);
     
-        if !order_result.trades.is_empty() {
+        if order_result.trades.len() > 0 {
             self.build_field(tags::LAST_PX, &order_result.trades.iter().map(|t| t.price).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
             self.build_field(tags::LAST_QTY, &order_result.trades.iter().map(|t| t.quantity).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
             self.build_field(tags::AVG_PX, &(order_result.trades.iter().map(|t| t.price).sum::<FixedPointArithmetic>() / FixedPointArithmetic::from_number(order_result.trades.len() as i64)).to_fix_bytes(), &mut report, &mut cursor);
@@ -105,13 +105,17 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     }
 
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
-        let raw_report = self.build_execution_report(exec_report);
+        let mut raw_report = self.build_execution_report(exec_report);
         let key = exec_report.0.sender_id;
 
-        match self.fifo_out.push((key, raw_report)) {
-            Ok(_) => println!("Pushed execution report into output queue"),
-            Err(e) => panic!("Failed to push execution report into output queue: {:?}", e),
-        }
+        loop {
+            if let Err((_, report)) = self.fifo_out.try_push((key, raw_report)) {
+                raw_report = report;
+                std::hint::spin_loop();
+            } else {
+                break;
+            }
+        }   
     }
 
     fn build_field(&self, tag: u32, value: &[u8], report: &mut FixRawMsg<N>, cursor: &mut usize) {
@@ -138,7 +142,9 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 
 #[cfg(test)]
 mod tests {
-    use utils::UtcTimestamp;
+    use std::time::Instant;
+
+    use types::Trades;
 
     use super::*;
 
@@ -170,18 +176,18 @@ mod tests {
                 sender_id: types::EntityId::from_ascii("SENDER"),
                 target_id: types::EntityId::from_ascii("TARGET"),
                 symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
-                timestamp: UtcTimestamp::now().to_unix_ms(), // Current timestamp in milliseconds since epoch
+                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
 
             let order_result = types::OrderResult {
-                trades: vec![],
+                trades: types::Trades::default(),
                 status: types::OrderStatus::New,
-                timestamp: UtcTimestamp::now().to_unix_ms(), // Current timestamp in milliseconds since epoch
+                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
                 original_quantity: types::FixedPointArithmetic(1_000_000),
             };
 
             match fifo_in_tx.push((order_event.clone(), order_result)) {
-                Ok(_) => println!("Pushed order event into engine"),
+                Ok(_) => {},
                 Err(e) => panic!("Failed to push order event into engine: {:?}", e),
             }
 
@@ -220,23 +226,30 @@ mod tests {
                 cl_ord_id: types::OrderId::from_ascii("CLORD54321"),
                 order_id: types::OrderId::from_ascii("ORDERID2"),
                 side: types::Side::Sell,
-                price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
+                price: types::FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
                 quantity: types::FixedPointArithmetic(1_000_000),
                 sender_id: types::EntityId::from_ascii("SENDER2"),
                 target_id: types::EntityId::from_ascii("TARGET2"),
                 symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
-                timestamp: utils::UtcTimestamp::now().to_unix_ms(), // Current timestamp in milliseconds since epoch
+                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
 
-            let sell_order_result = types::OrderResult {
-                trades: vec![types::Trade { id: types::TradeId::default(), quantity: types::FixedPointArithmetic::from_f64(50.0), price: types::FixedPointArithmetic::from_f64(123.456) }],
+            let mut sell_order_result = types::OrderResult {
+                trades: Trades::default(),
                 status: types::OrderStatus::PartiallyFilled,
-                timestamp: utils::UtcTimestamp::now().to_unix_ms(), // Current timestamp in milliseconds since epoch
+                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
                 original_quantity: types::FixedPointArithmetic::from_f64(1_000_000.0),
             };
 
+            sell_order_result.trades.add_trade(types::Trade {
+                price: types::FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
+                quantity: types::FixedPointArithmetic(5_000_000_000), // 50 units in FIX quantity format (6 decimal places)
+                id: types::TradeId::default()   ,
+                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+            }).expect("Failed to add trade to OrderResult");
+            
             match fifo_in_tx.push((sell_order_event, sell_order_result)) {
-                Ok(_) => println!("Pushed sell order event into engine"),
+                Ok(_) => {},
                 Err(e) => panic!("Failed to push sell order event into engine: {:?}", e),
             }
 

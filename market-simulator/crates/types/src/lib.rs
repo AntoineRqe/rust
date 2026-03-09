@@ -1,5 +1,6 @@
+use std::time::Instant;
 use std::{cmp::Ordering};
-use std::ops::Deref;
+use std::ops::{Deref, Index};
 use std::iter::Sum;
 
 /// Represents an order in the order book.
@@ -13,7 +14,7 @@ use std::iter::Sum;
 /// - `order_type`: The type of the order (limit or market).
 /// - `id`: A unique identifier for the order.
 /// - `broker_id`: The identifier of the broker placing the order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct OrderEvent {
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic, // In FIX, qty is a float but we will use integer for simplicity (e.g. 100.0 -> 100)
@@ -24,7 +25,7 @@ pub struct OrderEvent {
     pub order_id: OrderId, // FIX OrderID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub sender_id: EntityId, // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub target_id: EntityId, // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
-    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+    pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
 impl Default for OrderEvent {
@@ -39,13 +40,13 @@ impl Default for OrderEvent {
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
             symbol: FixedString::default(),
-            timestamp: 0,
+            timestamp: Instant::now(),
         }
     }
 }
 
 impl OrderEvent {
-    pub fn new(price: FixedPointArithmetic, quantity: FixedPointArithmetic, side: Side, order_type: OrderType, cl_ord_id: OrderId, order_id: OrderId, sender_id: EntityId, target_id: EntityId, symbol: FixedString, timestamp: u64) -> Self {
+    pub fn new(price: FixedPointArithmetic, quantity: FixedPointArithmetic, side: Side, order_type: OrderType, cl_ord_id: OrderId, order_id: OrderId, sender_id: EntityId, target_id: EntityId, symbol: FixedString, timestamp: Instant) -> Self {
         Self {
             price,
             quantity,
@@ -87,7 +88,7 @@ impl std::fmt::Display for OrderEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {} }}",
+            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {:?} }}",
             self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.order_id, self.sender_id, self.target_id, self.symbol, self.timestamp
         )
     }
@@ -137,19 +138,75 @@ impl TradeId {
 /// - `price`: The price at which the trade occurred.
 /// - `quantity`: The quantity that was traded.
 /// - `id`: A unique identifier for the trade.
-#[derive(Debug, Clone)]
+/// - `timestamp`: The timestamp when the trade occurred.
+#[derive(Debug, Clone, Copy)]
 pub struct Trade {
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic,
     pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
-#[derive(Debug, Clone)]
+/// Represents the result of processing an order, including any trades that occurred and the final status of the order.
+#[derive(Debug, Clone, Copy)]
+pub struct Trades<const N: usize> {
+    pub trades: [Trade; N], // Fixed-size array for trades, adjust size as needed
+    count: usize, // Number of valid trades in the array
+}
+
+impl<const N: usize> Default for Trades<N> {
+    fn default() -> Self {
+        Self {
+            trades: [Trade {
+                price: FixedPointArithmetic::ZERO,
+                quantity: FixedPointArithmetic::ZERO,
+                id: TradeId::new(),
+                timestamp: Instant::now(),
+            }; N],
+            count: 0,
+        }
+    }
+}
+
+impl<const N: usize> Trades<N> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+
+    pub fn add_trade(&mut self, trade: Trade) -> Result<(), &'static str> {
+        if self.count < self.trades.len() {
+            self.trades[self.count] = trade;
+            self.count += 1;
+            Ok(())
+        } else {
+            Err("Trade array is full")
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Trade> {
+        self.trades[..self.count].iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+}
+
+impl<const N: usize> Index<usize> for Trades<N> {
+    type Output = Trade;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.trades[index]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct OrderResult {
-    pub trades: Vec<Trade>,
+    pub trades: Trades<4>, // Fixed-size array for trades, adjust size as needed
     pub status: OrderStatus,
     pub original_quantity: FixedPointArithmetic, // The original quantity of the order before any trades occurred, added for potential future use in execution reports
-    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+    pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
 impl std::fmt::Display for OrderResult {
@@ -159,7 +216,8 @@ impl std::fmt::Display for OrderResult {
             "OrderResult {{ status: {:?} }}\n",
             self.status,
         )?;
-        for trade in &self.trades {
+        for i in 0..self.trades.len() {
+            let trade = self.trades[i];
             write!(
                 f,
                 "  Trade {{ price: {}, quantity: {}, id: {:?} }}\n",
@@ -190,7 +248,7 @@ pub enum OrderType {
 /// - `Filled`: The order has been completely filled, meaning all quantity has been matched and there is no remaining quantity in the order book.
 /// - `NotMatched`: The order could not be matched with any existing orders in the order book, and remains in the order book as a new order.
 /// - `Canceled`: The order has been canceled and removed from the order book.
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum OrderStatus {
     New,
     PartiallyFilled,
@@ -198,7 +256,7 @@ pub enum OrderStatus {
     Canceled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FixedString(pub [u8; 20]);
 
 #[derive(Debug, Clone, Copy,PartialEq, Eq, Default)]
@@ -215,6 +273,13 @@ impl Deref for EntityId {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl std::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
+        write!(f, "{}", s.trim_matches(char::from(0)))
     }
 }
 

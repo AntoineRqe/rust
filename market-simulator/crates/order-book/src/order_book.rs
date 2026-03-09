@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 use types::{
-    FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, TradeId
+    FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, Trades, TradeId
 };
 
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct OrderBookEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, OrderEvent, N>,
@@ -118,7 +119,7 @@ impl OrderBook {
 
     /// Generates an `OrderResult` based on the processed order, including trade ID and status.
     /// The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
-    fn generate_order_result(&mut self, order: &OrderEvent, status: Option<OrderStatus>, original_quantity: FixedPointArithmetic, trades: Vec<Trade>) -> OrderResult {
+    fn generate_order_result(&mut self, order: &OrderEvent, status: Option<OrderStatus>, original_quantity: FixedPointArithmetic, trades: Trades<4>) -> OrderResult {
         OrderResult {
             trades,
             status: status.unwrap_or_else(|| {
@@ -131,7 +132,7 @@ impl OrderBook {
                 }
             }),
             original_quantity,
-            timestamp: utils::UtcTimestamp::now().to_unix_ms(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
+            timestamp: Instant::now(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
         }
     }
 
@@ -142,7 +143,7 @@ impl OrderBook {
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
     fn process_sell_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
         let original_quantity = order.quantity;
-        let mut trades: Vec<Trade> = Vec::with_capacity(16); // 16 for now, to be adjusted based on expected trade volume per order
+        let mut trades = Trades::default();
         while let Some((&best_bid_price, _ )) = self.bids.first_key_value() {
             if best_bid_price >= order.price {
                 // There is a matching bid, so we need to process the trades against the orders in the best bid queue
@@ -155,11 +156,15 @@ impl OrderBook {
                     order.quantity -= trade_quantity;
 
                     // Add the trade to the list of trades for this order
-                    trades.push(Trade {
+                    if let Err(_) = trades.add_trade(Trade {
                         price: best_bid.price,
                         quantity: trade_quantity,
                         id: self.id_counter, // Example trade ID
-                    });
+                        timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                    }) {
+                        // Maximum Trades reached
+                        eprintln!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
+                    }
 
                     self.id_counter.increment(); // Increment the trade ID counter
             
@@ -200,7 +205,7 @@ impl OrderBook {
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
     fn process_buy_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
         let original_quantity = order.quantity;
-        let mut trades: Vec<Trade> = Vec::with_capacity(10);
+        let mut trades = Trades::default();
         while let Some((&best_ask_price, _)) = self.asks.first_key_value() {
             if best_ask_price <= order.price {
                 let mut best_ask_queue = self.asks.pop_first().unwrap().1; // Remove the best ask queue from the asks heap to process it
@@ -212,11 +217,16 @@ impl OrderBook {
                     order.quantity -= trade_quantity;
 
                     // Add the trade to the list of trades for this order
-                    trades.push(Trade {
+                    if let Err(_) = trades.add_trade(Trade {
                         price: best_ask.price,
                         quantity: trade_quantity,
                         id: self.id_counter, // Example trade ID
-                    });
+                        timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                    }) {
+                        // Maximum Trades reached
+                        eprintln!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
+                    }
+
                     self.id_counter.increment(); // Increment the trade ID counter
 
                     // If the best ask still has quantity remaining after the trade, push it back onto the asks
@@ -303,7 +313,7 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{thread, time::Instant};
 
     use types::{EntityId, FixedString, OrderId, Side};
     use super::*;
@@ -335,7 +345,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let result = order_book.process_order(order);
@@ -359,7 +369,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0),
@@ -371,7 +381,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let result1 = order_book.process_order(order1);
@@ -401,7 +411,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(99.0),
@@ -413,7 +423,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -425,7 +435,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let result1 = order_book.process_order(order1);
@@ -478,7 +488,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -490,7 +500,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
             price: FixedPointArithmetic::from_f64(97.0),
@@ -502,7 +512,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order4 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0),
@@ -514,7 +524,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let result1 = order_book.process_order(order1);
@@ -575,7 +585,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -587,7 +597,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -599,7 +609,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order4 = OrderEvent {
             price: FixedPointArithmetic::from_f64(0.0), // Price is ignored for market orders
@@ -611,7 +621,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let result1 = order_book.process_order(order1);
@@ -666,7 +676,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(102.0),
@@ -678,7 +688,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
         order_book.process_order(order1);
@@ -705,7 +715,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(102.0),
@@ -717,7 +727,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
-            timestamp: 0,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
         order_book.process_order(order1);
@@ -775,7 +785,7 @@ mod tests {
                 sender_id: SENDER,
                 target_id: TARGET,
                 symbol: SYMBOL,
-                timestamp: 0,
+                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
             };
 
             inbound_producer.push(order).unwrap();
@@ -804,7 +814,7 @@ mod tests {
                 sender_id: SENDER,
                 target_id: TARGET,
                 symbol: SYMBOL,
-                timestamp: 0,
+                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
             };
 
             inbound_producer.push(order2).unwrap();

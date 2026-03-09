@@ -7,7 +7,6 @@ use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use crossbeam::queue::{ArrayQueue};
-use utils::field_str;
 
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
@@ -115,7 +114,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                 },
                 tags::SENDING_TIME => {
                     if let Some(timestamp) = utils::UtcTimestamp::from_fix_bytes(field.value) {
-                        order_event.timestamp = timestamp.to_unix_ms() as u64;
+                        order_event.timestamp = timestamp.to_instant();
                     } else {
                         return None; // Invalid timestamp format
                     }
@@ -144,7 +143,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             match order_event.check_valid() {
                 Ok(_) => {},
                 Err(e) => {
-                    println!("Invalid order event parsed: {}, skipping", e);
+                    eprintln!("Invalid order event parsed: {}, skipping", e);
                     return; // Skip invalid events
                 }
             }
@@ -154,14 +153,13 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
             if let Some(resp_queue) = resp_queue {
                 self.pending.insert(order_event.sender_id, resp_queue);
-                println!("Stored response queue for order event #{} with sender ID {:?}", self.counter, field_str(order_event.sender_id.as_ref()));
             }
             
             // Push the structured order event to the order book queue.
             match self.request_out.try_push(order_event) {
-                Ok(_) => { println!("FixEngine: Successfully pushed order event #{} to order book queue", self.counter); },
+                Ok(_) => {},
                 Err(e) => {
-                    println!("Failed to push order event to order book queue: {}, skipping", e);
+                    eprintln!("Failed to push order event to order book queue: {}, skipping", e);
                     return; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
                 }
             }
@@ -173,8 +171,8 @@ impl<'a, const N: usize> FixEngine<'a, N> {
         if let Some((key, _response)) = self.response_in.try_pop() {
             if let Some(resp_queue) = self.pending.get(&key) {
                 match resp_queue.send(_response) {
-                    Ok(_) => { println!("Successfully pushed response back to client for order event #{}", self.counter); },
-                    Err(_) => { println!("Failed to push response back to client, dropping response"); },
+                    Ok(_) => {},
+                    Err(_) => { eprintln!("Failed to push response back to client, dropping response"); },
                 }
             }
         }
@@ -185,7 +183,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             self.run_inbound_request();
             self.run_outbound_response();
 
-            if self.shutdown.load(Ordering::Relaxed) && self.pending.is_empty() {
+            if self.shutdown.load(Ordering::Relaxed) && self.response_in.is_empty() && self.request_in.is_empty() {
                 break;
             }
         }

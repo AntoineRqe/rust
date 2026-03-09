@@ -6,7 +6,7 @@ It relies on `use std::net::{TcpListener, TcpStream}` for handling TCP connectio
 
 Each time a new client connects, the server spawns a new thread to handle the communication with that client, allowing for concurrent handling of multiple clients. The server listens for incoming FIX messages, processes them by sending orders to the order book and receiving execution reports, and then sends the appropriate responses back to the clients.
 
-Warning:  There is not limitation on the number of threads that can be spawned for handling client connections, so in a production environment, it would be important to implement a thread pool or other concurrency management strategy to prevent resource exhaustion.
+**Warning**:  There is not limitation on the number of threads that can be spawned for handling client connections, so in a production environment, it would be important to implement a thread pool or other concurrency management strategy to prevent resource exhaustion.
 
 ## Architecture
 

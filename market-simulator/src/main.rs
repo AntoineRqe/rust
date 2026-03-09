@@ -12,7 +12,7 @@ use std::net::TcpListener;
 fn start_market() {
 
     // inbound: network → fix engine → order book -> exection report
-    let net_to_fix   = RequestQueue::new(ArrayQueue::new(1024));
+    let net_to_fix   = RequestQueue::new(ArrayQueue::new(256));
     let fix_to_ob    = memory::open_shared_queue::<1024, OrderEvent>("fix_to_order_book", true);
     let ob_to_er     = memory::open_shared_queue::<1024, (OrderEvent, OrderResult)>("order_book_to_execution_report", true);
 

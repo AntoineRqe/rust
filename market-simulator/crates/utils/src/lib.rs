@@ -40,6 +40,8 @@ pub struct UtcTimestamp {
     pub minute: u8,
     pub second: u8,
     pub millis: u16,
+    pub micros: Option<u16>,
+    pub nanos: Option<u16>,
 }
 
 impl UtcTimestamp {
@@ -67,7 +69,14 @@ impl UtcTimestamp {
             0
         };
 
-        Some(Self { year, month, day, hour, minute, second, millis })
+        Some(Self { year, month, day, hour, minute, second, millis, micros: None, nanos: None })
+    }
+
+    pub fn to_instant(&self) -> std::time::Instant {
+        let unix_ms = self.to_unix_ms();
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let offset_ms = unix_ms.saturating_sub(now_ms);
+        std::time::Instant::now() + std::time::Duration::from_millis(offset_ms)
     }
 
     pub fn to_fix_bytes(&self) -> [u8; 26] {
@@ -173,7 +182,7 @@ pub fn from_unix_ms(ms: u64) -> Self {
 
     Self {
         year: y as u16, month: m as u8, day: d as u8,
-        hour, minute, second, millis,
+        hour, minute, second, millis, micros: None, nanos: None
     }
 }
 }
@@ -271,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_utc_timestamp_unix_conversion() {
-        let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123 };
+        let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123, micros: None, nanos: None };
         let unix_ms = ts.to_unix_ms();
         let ts_converted = UtcTimestamp::from_unix_ms(unix_ms);
         assert_eq!(ts, ts_converted);
@@ -279,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_utc_timestamp_fix_bytes() {
-        let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123 };
+        let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123, micros: None, nanos: None };
         let fix_bytes = ts.to_fix_bytes();
         let ts_converted = UtcTimestamp::from_fix_bytes(&fix_bytes).unwrap();
         assert_eq!(ts, ts_converted);

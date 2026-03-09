@@ -403,9 +403,12 @@ name = "market-simulator"
 version = "0.1.0"
 dependencies = [
  "core_affinity",
+ "criterion",
  "crossbeam",
  "execution-report",
  "fix",
+ "hdrhistogram",
+ "lazy_static",
  "memory",
  "order-book",
  "server",
