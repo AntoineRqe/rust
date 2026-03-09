@@ -240,6 +240,7 @@ pub enum Side {
 pub enum OrderType {
     LimitOrder,
     MarketOrder,
+    CancelOrder,
 }
 
 /// Represents the status of an order after processing.
@@ -253,7 +254,8 @@ pub enum OrderStatus {
     New,
     PartiallyFilled,
     Filled,
-    Canceled,
+    Cancelled,
+    CancelRejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -277,6 +279,13 @@ impl Deref for EntityId {
 }
 
 impl std::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
+        write!(f, "{}", s.trim_matches(char::from(0)))
+    }
+}
+
+impl std::fmt::Display for OrderId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
         write!(f, "{}", s.trim_matches(char::from(0)))

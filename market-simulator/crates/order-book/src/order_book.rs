@@ -1,7 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 use types::{
-    FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, Trades, TradeId
+    FixedPointArithmetic, OrderEvent, OrderId, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, TradeId, Trades
 };
 
 use spsc::spsc_lock_free::{Consumer, Producer};
@@ -55,6 +55,18 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     }
 }
 
+struct OrderRef {
+    side: Side,
+    price: FixedPointArithmetic,
+    position: usize, // Position in the order queue at the given price level
+}
+
+impl OrderRef {
+    fn new(side: Side, price: FixedPointArithmetic, position: usize) -> Self {
+        OrderRef { side, price, position }
+    }
+}
+
 /// Represents the order book, maintaining separate heaps for bids and asks.
 /// Bids are stored in a max-heap (higher prices have priority), while asks are stored in a min-heap (lower prices have priority).
 /// The order book processes incoming orders, matches them against existing orders, and updates the order book accordingly.
@@ -65,6 +77,7 @@ pub struct OrderBook {
     pub bids: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     pub asks: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     id_counter: TradeId, // Counter for generating unique trade IDs, using a fixed-size array for simplicity
+    order_map: HashMap<OrderId, OrderRef>, // Map to track orders by their ID for efficient cancellation
 }
 
 impl std::fmt::Display for OrderBook {
@@ -87,6 +100,7 @@ impl OrderBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             id_counter: TradeId::new(), // Initialize the trade ID counter to zero
+            order_map: HashMap::new(), // Initialize the order map
         }
     }
 
@@ -100,6 +114,7 @@ impl OrderBook {
         match order.order_type {
             OrderType::LimitOrder => self.process_limit_order(order),
             OrderType::MarketOrder => self.process_market_order(order),
+            OrderType::CancelOrder => self.process_cancel_order(order),
         }
     }
 
@@ -117,9 +132,53 @@ impl OrderBook {
         }
     }
 
+    fn process_cancel_order(&mut self, order: OrderEvent) -> OrderResult {
+        if let Some(order_ref) = self.order_map.get(&order.order_id) {
+            let order_queue = match order_ref.side {
+                Side::Buy => self.bids.get_mut(&order_ref.price),
+                Side::Sell => self.asks.get_mut(&order_ref.price),
+            };
+
+            if let Some(queue) = order_queue {
+                if order_ref.position < queue.len() {
+
+                    match queue.remove(order_ref.position) {
+                        Some(_) => {
+                            // Remove the price entry from the order if no more orders are left at that price level
+                            if queue.is_empty() {
+                                match order_ref.side {
+                                    Side::Buy => self.bids.remove(&order_ref.price),
+                                    Side::Sell => self.asks.remove(&order_ref.price),
+                                };
+                            }
+                        }
+                        None => eprintln!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, order_ref.position),
+                    }
+
+                    self.order_map.remove(&order.order_id); // Remove the order from the map after cancellation)
+
+                    return OrderResult {
+                        trades: Trades::default(),
+                        status: OrderStatus::Cancelled,
+                        original_quantity: order.quantity,
+                        timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                    };
+                }
+            }
+        }
+
+        // If we reach this point, it means the order was not found or could not be cancelled
+        OrderResult {
+            trades: Trades::default(),
+            status: OrderStatus::CancelRejected,
+            original_quantity: order.quantity,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+        }
+    }
+
     /// Generates an `OrderResult` based on the processed order, including trade ID and status.
     /// The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
-    fn generate_order_result(&mut self, order: &OrderEvent, status: Option<OrderStatus>, original_quantity: FixedPointArithmetic, trades: Trades<4>) -> OrderResult {
+    fn generate_order_result(&mut self, order: &OrderEvent, status: Option<OrderStatus>, original_quantity: FixedPointArithmetic, trades: Trades<4>) -> OrderResult {                        
         OrderResult {
             trades,
             status: status.unwrap_or_else(|| {
@@ -134,6 +193,14 @@ impl OrderBook {
             original_quantity,
             timestamp: Instant::now(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
         }
+    }
+
+    fn add_order_to_map(&mut self, order: &OrderEvent) {
+        let position = match order.side {
+            Side::Buy => self.bids.get(&order.price).map_or(0, |queue| queue.len()),
+            Side::Sell => self.asks.get(&order.price).map_or(0, |queue| queue.len()),
+        };
+        self.order_map.insert(order.order_id, OrderRef::new(order.side, order.price, position));
     }
 
     /// Processes a sell limit order by matching it against the best available bids in the order book. If the order is not fully filled, it is added to the asks heap.
@@ -170,9 +237,12 @@ impl OrderBook {
             
                     if best_bid.quantity > FixedPointArithmetic::ZERO {
                         best_bid_queue.push_front(best_bid);
+                    } else {
+                        // Remove the existing order from the order map if it has been completely filled
+                        self.order_map.remove(&best_bid.order_id);
                     }
-                    // Update the incoming order's quantity
 
+                    // Update the incoming order's quantity
                     if order.quantity == FixedPointArithmetic::ZERO {
                         if !best_bid_queue.is_empty() {
                             self.bids.insert(best_bid_price, best_bid_queue);
@@ -189,10 +259,15 @@ impl OrderBook {
         let order_result = self.generate_order_result(&order, None, original_quantity, trades);
 
         if order.quantity > FixedPointArithmetic::ZERO {
+            // Add for future cancellation/modification (Before adding to order book for coherent queue positioning in the order map)
+            self.add_order_to_map(&order);
+
             self.asks
             .entry(order.price)
             .or_insert_with(VecDeque::new)
             .push_back(order);
+
+            // Add the order to the order map for potential future cancellation
         }
 
         order_result
@@ -232,6 +307,9 @@ impl OrderBook {
                     // If the best ask still has quantity remaining after the trade, push it back onto the asks
                     if best_ask.quantity > FixedPointArithmetic::ZERO {
                         best_ask_queue.push_front(best_ask);
+                    } else {
+                        // Remove the existing order from the order map if it has been completely filled
+                        self.order_map.remove(&best_ask.order_id);
                     }
 
                     // Update the incoming order's quantity
@@ -251,6 +329,10 @@ impl OrderBook {
         let order_result = self.generate_order_result(&order, None, original_quantity, trades);
 
         if order.quantity > FixedPointArithmetic::ZERO {
+            // Add for future cancellation/modification
+            self.add_order_to_map(&order);
+
+            // Add the remaining order to the order book if it was not fully filled
             self.bids
             .entry(order.price)
             .or_insert_with(VecDeque::new)
@@ -330,6 +412,81 @@ mod tests {
         assert!(order_book.get_best_bid().is_none());
         assert!(order_book.get_best_ask().is_none());
         assert!(order_book.get_spread().is_none());
+    }
+
+    #[test]
+    fn test_cancel_order() {
+        let mut order_book = OrderBook::new();
+        let order = OrderEvent {
+            price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
+            quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
+            side: Side::Buy,
+            order_type: OrderType::LimitOrder,
+            order_id: ORDER_ID,
+            cl_ord_id: CL_ORD_ID,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL, // Set the symbol for the order
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+        };
+
+        let result = order_book.process_order(order);
+        assert_eq!(result.status, OrderStatus::New);
+
+        let cancel_order = OrderEvent {
+            price: FixedPointArithmetic::ZERO, // Price is not relevant for cancel orders
+            quantity: FixedPointArithmetic::ZERO, // Quantity is not relevant for cancel orders
+            side: Side::Buy, // Side is not relevant for cancel orders, but we can set it to match the original order
+            order_type: OrderType::CancelOrder,
+            order_id: ORDER_ID, // Use the same order ID to identify which order to cancel
+            cl_ord_id: CL_ORD_ID,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL, // Set the symbol for the cancel order
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+        };
+
+        let cancel_result = order_book.process_order(cancel_order);
+        assert_eq!(cancel_result.status, OrderStatus::Cancelled);
+        assert!(order_book.asks.is_empty()); // There should be no asks in the order book
+        assert!(order_book.bids.is_empty()); // There should be no bids in the order book
+        assert!(order_book.order_map.is_empty()); // There should be no asks in the order book
+
+        // Testing cancellation of a sell order
+        let order = OrderEvent {
+            price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
+            quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
+            side: Side::Sell,
+            order_type: OrderType::LimitOrder,
+            order_id: ORDER_ID,
+            cl_ord_id: CL_ORD_ID,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL, // Set the symbol for the order
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+        };
+
+        let result = order_book.process_order(order);
+        assert_eq!(result.status, OrderStatus::New);
+
+        let cancel_order = OrderEvent {
+            price: FixedPointArithmetic::ZERO, // Price is not relevant for cancel orders
+            quantity: FixedPointArithmetic::ZERO, // Quantity is not relevant for cancel orders
+            side: Side::Sell, // Side is not relevant for cancel orders, but we can set it to match the original order
+            order_type: OrderType::CancelOrder,
+            order_id: ORDER_ID, // Use the same order ID to identify which order to cancel
+            cl_ord_id: CL_ORD_ID,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL, // Set the symbol for the cancel order
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+        };
+
+        let cancel_result = order_book.process_order(cancel_order);
+        assert_eq!(cancel_result.status, OrderStatus::Cancelled);
+        assert_eq!(order_book.get_best_ask(), None); // The best ask should be removed after cancellation
+        assert!(order_book.order_map.is_empty()); // There should be no asks in the order book
+
     }
 
     #[test]
