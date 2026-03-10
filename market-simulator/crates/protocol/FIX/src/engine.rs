@@ -61,7 +61,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
     fn build_order(
         &self,
         msg: FixRawMsg<N>,
-    ) -> Option<OrderEvent> {
+    ) -> Result<OrderEvent, &'static str> {
         let mut order_event = OrderEvent::default();
 
         let mut parser = crate::parser::FixParser::new(&msg.data[..msg.len as usize]);
@@ -72,22 +72,26 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                 tags::MSG_TYPE => {
                     match field.value {
                         // Only handling New Order Single for this example, but could add more message types here
-                        msg_types::NEW_ORDER_SINGLE => {},
-                        _ => return None, // Unsupported message type
+                        msg_types::NEW_ORDER_SINGLE => {
+                        },
+                        msg_types::ORDER_CANCEL_REQUEST=> {
+                            order_event.order_type = types::OrderType::CancelOrder;
+                        },
+                        _ => return Err("Unsupported message type"), // Unsupported message type
                     }
                 },
                 tags::SIDE => {
                     match field.value {
                         side_code_set::BUY => order_event.side = Side::Buy,
                         side_code_set::SELL => order_event.side = Side::Sell,
-                        _ => return None, // Unsupported side code
+                        _ => return Err("Unsupported side code"), // Unsupported side code
                     }
                 },
                 tags::PRICE => {
                     if let Some(price) = FixedPointArithmetic::from_fix_bytes(field.value) {
                         order_event.price = price;
                     } else {
-                        return None; // Invalid price format
+                        return Err("Invalid price format"); // Invalid price format
                     }
                 },
                 tags::ORDER_ID => {
@@ -96,6 +100,11 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                 tags::CL_ORD_ID => {
                     utils::copy_array(&mut order_event.cl_ord_id.0, field.value);
                 },
+                tags::ORIG_CL_ORD_ID => {
+                    let mut orig_cl_ord_id = types::OrderId::default();
+                    utils::copy_array(&mut orig_cl_ord_id.0, field.value);
+                    order_event.orig_cl_ord_id = Some(orig_cl_ord_id);
+                },  
                 tags::SYMBOL => {
                     utils::copy_array(&mut order_event.symbol.0, field.value);
                 },
@@ -109,21 +118,21 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                     if let Some(qty) = FixedPointArithmetic::from_fix_bytes(field.value) {
                         order_event.quantity = qty;
                     } else {
-                        return None; // Invalid quantity format
+                        return Err("Invalid quantity format"); // Invalid quantity format
                     }
                 },
                 tags::SENDING_TIME => {
                     if let Some(timestamp) = utils::UtcTimestamp::from_fix_bytes(field.value) {
                         order_event.timestamp = timestamp.to_instant();
                     } else {
-                        return None; // Invalid timestamp format
+                        return Err("Invalid timestamp format"); // Invalid timestamp format
                     }
                 },
                 _ => continue, // Skip unsupported tags
             }
         }
 
-        Some(order_event)
+        Ok(order_event)
     }
 
     // Non blocking check for new inbound FIX messages, if there is a message, parse it and push the corresponding order event to the order book queue. In a real implementation, you would want to have more robust error handling and also handle different message types and fields.
@@ -133,8 +142,9 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
             let order_event = match self.build_order(msg) {
-                Some(event) => event,
-                None => {
+                Ok(event) => event,
+                Err(e) => {
+                    eprintln!("Failed to parse FIX message: {}, skipping", e);
                     return; // Skip malformed messages
                 }
             };
@@ -264,6 +274,61 @@ mod tests {
             stop_handle.stop();
 
             // Wait a bit to ensure the FIX engine has stopped before ending the test, in a real implementation you would want a more robust way to ensure the thread has stopped
+            engine.join().expect("Failed to join FIX engine thread");
+        });
+    }
+
+    #[test]
+    fn test_fix_engine_cancel_request_with_orig_cl_ord_id() {
+        let net_to_fix = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
+        let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
+        let mut ob_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
+
+        std::thread::scope(|scope| {
+            let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
+            let (_, ob_to_fix_rx) = ob_to_fix.split();
+
+            let mut handle = FixEngine::new(
+                Arc::clone(&net_to_fix),
+                fix_to_ob_tx,
+                ob_to_fix_rx,
+            );
+
+            let stop_handle = handle.stop_handle();
+
+            let engine = scope.spawn(move || {
+                handle.run();
+            });
+
+            let fix_message = b"8=FIX.4.4\x019=0000\x0135=F\x0149=SENDER\x0156=TARGET\x0134=2\x0152=20240219-12:31:00.000\x0111=CXL-1\x0141=ORD-12345\x0154=1\x0138=100\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
+
+            let raw_msg = FixRawMsg {
+                len: fix_message.len() as u16,
+                data: {
+                    let mut data = [0u8; 1024];
+                    data[..fix_message.len()].copy_from_slice(fix_message);
+                    data
+                },
+                resp_queue: None,
+            };
+
+            net_to_fix.push(raw_msg).expect("Failed to push message");
+
+            let order_event = loop {
+                if let Some(event) = fix_to_ob_rx.try_pop() {
+                    break event;
+                }
+                std::hint::spin_loop();
+            };
+
+            assert_eq!(order_event.order_type, types::OrderType::CancelOrder);
+            assert!(order_event.orig_cl_ord_id.is_some());
+            assert_eq!(
+                field_str(order_event.orig_cl_ord_id.unwrap().as_ref()),
+                b"ORD-12345"
+            );
+
+            stop_handle.stop();
             engine.join().expect("Failed to join FIX engine thread");
         });
     }

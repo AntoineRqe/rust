@@ -32,6 +32,9 @@ def reset_seq():
 def fix_now():
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H:%M:%S")
 
+def make_cl_ord_id(prefix="ORD"):
+    return f"{prefix}-{int(time.time()*1000)}"
+
 def fld(tag, val):
     return f"{tag}={val}{SOH}"
 
@@ -55,12 +58,20 @@ def parse_fix(raw: bytes) -> dict:
             except ValueError: pass
     return fields
 
-def build_nos(sender, target, symbol, side, qty, price):
-    now = fix_now(); oid = f"ORD-{int(time.time()*1000)}"
+def build_nos(sender, target, symbol, side, qty, price, cl_ord_id=None):
+    now = fix_now(); oid = cl_ord_id or make_cl_ord_id("ORD")
     return _wrap(
         fld(35,"D")+fld(49,sender)+fld(56,target)+fld(34,next_seq())+fld(52,now)
         +fld(11,oid)+fld(21,1)+fld(55,symbol)+fld(54,side)+fld(60,now)
         +fld(38,int(qty))+fld(40,2)+fld(44,f"{price:.4f}")
+    )
+
+def build_cancel(sender, target, symbol, side, qty, orig_cl_ord_id):
+    now = fix_now(); cancel_id = make_cl_ord_id("CXL")
+    return _wrap(
+        fld(35,"F")+fld(49,sender)+fld(56,target)+fld(34,next_seq())+fld(52,now)
+        +fld(11,cancel_id)+fld(41,orig_cl_ord_id)+fld(55,symbol)+fld(54,side)
+        +fld(38,int(qty))+fld(60,now)
     )
 
 def build_md_request(sender, target, symbol, depth=1):
@@ -113,6 +124,7 @@ class OrderBook:
         self.bids   = {}   # price -> qty  (float -> float)
         self.asks   = {}
         self.trades = []   # list of (price, qty, side, ts)
+        self.orders = {}   # cl_ord_id -> (side, price, qty)
         self.symbol = "—"
         self.last   = None
         self._lock  = threading.Lock()
@@ -132,6 +144,8 @@ class OrderBook:
             if msg_type == "8":
                 ord_status = fields.get(39, "")
                 side       = fields.get(54, "")
+                cl_ord_id  = fields.get(11, "")
+                orig_id    = fields.get(41, "")
                 last_px    = self._safe_float(fields.get(31))
                 last_qty   = self._safe_float(fields.get(32))
                 price      = self._safe_float(fields.get(44) or fields.get(6))
@@ -157,6 +171,8 @@ class OrderBook:
                             self.bids[price] = self.bids.get(price, 0) + qty
                         else:
                             self.asks[price] = self.asks.get(price, 0) + qty
+                        if cl_ord_id:
+                            self.orders[cl_ord_id] = (side, price, qty)
 
                 elif ord_status in ("4", "C"):  # Cancelled / Expired
                     if price > 0 and qty > 0:
@@ -164,6 +180,23 @@ class OrderBook:
                             self._remove_qty(self.bids, price, qty)
                         else:
                             self._remove_qty(self.asks, price, qty)
+                        if cl_ord_id:
+                            self.orders.pop(cl_ord_id, None)
+                    else:
+                        ref_id = orig_id or cl_ord_id
+                        if ref_id and ref_id in self.orders:
+                            ref_side, ref_price, ref_qty = self.orders.pop(ref_id)
+                            if ref_side == "1":
+                                self._remove_qty(self.bids, ref_price, ref_qty)
+                            else:
+                                self._remove_qty(self.asks, ref_price, ref_qty)
+                        else:
+                            if side == "1" and self.bids:
+                                best_bid = max(self.bids.keys())
+                                self.bids.pop(best_bid, None)
+                            elif side == "2" and self.asks:
+                                best_ask = min(self.asks.keys())
+                                self.asks.pop(best_ask, None)
 
             # ── MD Snapshot Full Refresh (W) ──────────────────────────────
             elif msg_type == "W":
@@ -542,6 +575,7 @@ class FIXTerminal(tk.Tk):
         self._send_lock   = threading.Lock()
         self._md_btns     = []
         self._book        = OrderBook()
+        self._last_order  = None
 
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -634,6 +668,12 @@ class FIXTerminal(tk.Tk):
                                   activebackground="#00c853", activeforeground=BG)
         self.send_btn.pack(fill=tk.X, padx=16, pady=(12,2))
 
+        self.cancel_btn = tk.Button(p, text="✖  CANCEL LAST", command=self._send_cancel,
+                        bg="#3a1010", fg=RED, font=UI_BOLD, relief=tk.FLAT,
+                        cursor="hand2", pady=7, state=tk.DISABLED,
+                        activebackground="#5a1a1a", activeforeground=RED)
+        self.cancel_btn.pack(fill=tk.X, padx=16, pady=(4,2))
+
         section("MARKET DATA", TEAL)
         for txt, cmd in [
             ("V  Market Data Request",       self._md_request),
@@ -714,6 +754,7 @@ class FIXTerminal(tk.Tk):
         self.conn_btn.config(state=tk.NORMAL, text="⏼  DISCONNECT",
                              bg="#3a1010", fg=RED, activebackground="#5a1a1a")
         self.send_btn.config(state=tk.NORMAL)
+        self.cancel_btn.config(state=tk.NORMAL if self._last_order else tk.DISABLED)
         self._set_md_state(tk.NORMAL)
         for e in self._conn_entries: e.config(state=tk.DISABLED)
 
@@ -731,6 +772,7 @@ class FIXTerminal(tk.Tk):
         self.conn_btn.config(state=tk.NORMAL, text="⏻  CONNECT",
                              bg=BLUE, fg=TEXT, activebackground="#1565c0")
         self.send_btn.config(state=tk.DISABLED)
+        self.cancel_btn.config(state=tk.DISABLED)
         self._set_md_state(tk.DISABLED)
         for e in self._conn_entries: e.config(state=tk.NORMAL)
 
@@ -835,12 +877,46 @@ class FIXTerminal(tk.Tk):
             qty    = float(self.v_qty.get())
             price  = float(self.v_price.get())
             side   = 1 if self.v_side == "BUY" else 2
+            cl_ord_id = make_cl_ord_id("ORD")
         except ValueError as exc:
             self._log("ERROR", f"Invalid input: {exc}", "err"); return
         lbl = "BUY" if side == 1 else "SELL"
+        self._last_order = {
+            "cl_ord_id": cl_ord_id,
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+            "price": price,
+        }
+        self.cancel_btn.config(state=tk.NORMAL)
         self._transmit(
-            build_nos(self.v_sender.get(), self.v_target.get(), symbol, side, qty, price),
-            f"SENT ▶  ({lbl} {int(qty)} {symbol} @ {price:.4f})", "send", self.send_btn)
+            build_nos(self.v_sender.get(), self.v_target.get(), symbol, side, qty, price, cl_ord_id),
+            f"SENT ▶  ({lbl} {int(qty)} {symbol} @ {price:.4f})  ClOrdID={cl_ord_id}", "send", self.send_btn)
+
+    def _send_cancel(self):
+        if self._sock is None:
+            self._log("ERROR", "Not connected.", "err")
+            return
+        if not self._last_order:
+            self._log("INFO", "No order available to cancel.", "info")
+            return
+
+        last = self._last_order
+        self._transmit(
+            build_cancel(
+                self.v_sender.get(),
+                self.v_target.get(),
+                last["symbol"],
+                last["side"],
+                last["qty"],
+                last["cl_ord_id"],
+            ),
+            f"SENT ▶  CANCEL (F)  OrigClOrdID={last['cl_ord_id']}  {last['symbol']}",
+            "send",
+            self.cancel_btn,
+        )
+        self._last_order = None
+        self.cancel_btn.config(state=tk.DISABLED)
 
     # ── market data dialogs ───────────────────────────────────────────────────
     def _md_request(self):

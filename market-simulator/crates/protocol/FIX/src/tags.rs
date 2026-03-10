@@ -10,6 +10,7 @@ pub mod tags {
     pub const SENDING_TIME: u32 = 52;
     pub const ORDER_ID: u32 = 37; // Unique order ID assigned by the exchange, for the sell side to track orders
     pub const CL_ORD_ID: u32 = 11;  // Client order ID, unique per order, for the buy side to track their orders
+    pub const ORIG_CL_ORD_ID: u32 = 41; // Original client order ID, used in cancel/replace requests to reference the original order
     pub const EXEC_ID: u32 = 17;
     pub const EXEC_TYPE: u32 = 150;
     pub const ORD_STATUS: u32 = 39;
@@ -36,6 +37,14 @@ pub mod msg_types {
     pub const EXECUTION_REPORT: &[u8] = b"8";
     pub const ORDER_CANCEL_REQUEST: &[u8] = b"F";
     pub const ORDER_CANCEL_REPLACE_REQUEST: &[u8] = b"G";
+    pub const HEARTBEAT: &[u8] = b"0";
+    pub const TEST_REQUEST: &[u8] = b"1";
+    pub const RESEND_REQUEST: &[u8] = b"2";
+    pub const REJECT: &[u8] = b"3";
+    pub const SEQUENCE_RESET: &[u8] = b"4";
+    pub const LOGOUT: &[u8] = b"5";
+    pub const LOGON: &[u8] = b"A";
+    pub const ORDER_CANCEL_REJECTION: &[u8] = b"9";
 }
 /// Pre-defined FIX side types.
 pub mod side_code_set {

@@ -22,6 +22,7 @@ pub struct OrderEvent {
     pub symbol: FixedString, // FIX Symbol can be up to 20 characters, we will use a fixed-size array for simplicity
     pub order_type: OrderType,
     pub cl_ord_id: OrderId, // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub orig_cl_ord_id: Option<OrderId>, // FIX OrigClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub order_id: OrderId, // FIX OrderID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub sender_id: EntityId, // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub target_id: EntityId, // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
@@ -36,6 +37,7 @@ impl Default for OrderEvent {
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::default(),
+            orig_cl_ord_id: None,
             order_id: OrderId::default(),
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
@@ -46,13 +48,26 @@ impl Default for OrderEvent {
 }
 
 impl OrderEvent {
-    pub fn new(price: FixedPointArithmetic, quantity: FixedPointArithmetic, side: Side, order_type: OrderType, cl_ord_id: OrderId, order_id: OrderId, sender_id: EntityId, target_id: EntityId, symbol: FixedString, timestamp: Instant) -> Self {
+    pub fn new(
+        price: FixedPointArithmetic,
+        quantity: FixedPointArithmetic,
+        side: Side,
+        order_type: OrderType,
+        cl_ord_id: OrderId,
+        orig_cl_ord_id: Option<OrderId>,
+        order_id: OrderId,
+        sender_id: EntityId,
+        target_id: EntityId,
+        symbol: FixedString,
+        timestamp: Instant,
+    ) -> Self {
         Self {
             price,
             quantity,
             side,
             order_type,
             cl_ord_id,
+            orig_cl_ord_id,
             order_id,
             sender_id,
             target_id,
@@ -65,14 +80,24 @@ impl OrderEvent {
          if self.side != Side::Buy && self.side != Side::Sell {
             return Err("Invalid side");
         }
-        if self.order_type != OrderType::LimitOrder && self.order_type != OrderType::MarketOrder {
+
+        if let Err(e) = self.check_general_valid() {
+            return Err(e);
+        }
+
+        if self.order_type == OrderType::LimitOrder || self.order_type == OrderType::MarketOrder {
+            return self.check_order_valid();
+        } else if self.order_type == OrderType::CancelOrder{
+            return self.check_cancel_valid();
+        } else {
             return Err("Invalid order type");
         }
-        if self.quantity == FixedPointArithmetic::ZERO {
-            return Err("Quantity cannot be zero");
-        }
-        if self.price == FixedPointArithmetic::ZERO {
-            return Err("Price cannot be zero");
+
+    }
+
+    fn check_general_valid(&self) -> Result<(), &'static str> {
+        if self.symbol.0.iter().all(|&b| b == 0) {
+            return Err("Symbol cannot be empty");
         }
         if self.sender_id.0.iter().all(|&b| b == 0) {
             return Err("Sender ID cannot be empty");
@@ -82,14 +107,34 @@ impl OrderEvent {
         }
         Ok(())
     }
+
+    fn check_cancel_valid(&self) -> Result<(), &'static str> {
+        if self.order_type != OrderType::CancelOrder {
+            return Err("Invalid order type for cancel order");
+        }
+        if self.orig_cl_ord_id.is_none() {
+            return Err("OrigClOrdID is required for cancel orders");
+        }
+        Ok(())
+    }
+
+    fn check_order_valid(&self) -> Result<(), &'static str> {
+        if self.quantity == FixedPointArithmetic::ZERO {
+            return Err("Quantity cannot be zero");
+        }
+        if self.price == FixedPointArithmetic::ZERO {
+            return Err("Price cannot be zero");
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for OrderEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {:?} }}",
-            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.order_id, self.sender_id, self.target_id, self.symbol, self.timestamp
+            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, orig_cl_ord_id: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {:?} }}",
+            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.orig_cl_ord_id, self.order_id, self.sender_id, self.target_id, self.symbol, self.timestamp
         )
     }
 }
@@ -363,6 +408,33 @@ impl OrderId {
             i += 1;
         }
         OrderId(bytes)
+    }
+
+    pub fn new() -> Self {
+        OrderId([0u8; 20]) // In a real implementation, you would want to generate unique IDs
+    }
+
+    pub fn increment(&mut self) {
+        for i in (0..self.0.len()).rev() {
+            if self.0[i] < 255 {
+                self.0[i] += 1;
+                break;
+            } else {
+                self.0[i] = 0; // Reset to zero and carry over to the next byte
+            }
+        }
+    }
+}
+
+impl std::ops::Add for OrderId {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        let mut result = [0u8; 20];
+        for i in 0..20 {
+            result[i] = self.0[i] ^ other.0[i]; // Simple XOR for demonstration, not a real ID generation strategy
+        }
+        OrderId(result)
     }
 }
 

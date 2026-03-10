@@ -29,6 +29,43 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         }
     }
 
+    fn build_cancel_report(&self, exec_report: &(OrderEvent, OrderResult)) -> FixRawMsg<N> {
+        let mut report = FixRawMsg::<N>::default();
+        let mut cursor = 0;
+        let order = &exec_report.0;
+        let order_result = &exec_report.1;
+
+        // Build FIX message header
+        self.build_field(tags::BEGIN_STRING, b"FIX.4.2", &mut report, &mut cursor);
+
+        // Build FIX message body
+        if order_result.status == types::OrderStatus::Cancelled {
+            self.build_field(tags::MSG_TYPE, msg_types::EXECUTION_REPORT, &mut report, &mut cursor);
+            self.build_field(tags::ORD_STATUS, ord_status_code_set::CANCELED, &mut report, &mut cursor); // OrdStatus=Cancelled
+            self.build_field(tags::EXEC_TYPE, exec_type_code_set::CANCELED, &mut report, &mut cursor); // ExecType=Cancelled
+        } else if order_result.status == types::OrderStatus::CancelRejected {
+            self.build_field(tags::MSG_TYPE, msg_types::ORDER_CANCEL_REJECTION, &mut report, &mut cursor);
+            self.build_field(tags::ORD_STATUS, ord_status_code_set::NEW, &mut report, &mut cursor); // OrdStatus=New
+        }
+
+        match order.side {
+            types::Side::Buy => self.build_field(tags::SIDE, side_code_set::BUY, &mut report, &mut cursor),
+            types::Side::Sell => self.build_field(tags::SIDE, side_code_set::SELL, &mut report, &mut cursor),
+        }
+
+        // Switch sender and target for the execution report since it's going back to the client
+        self.build_field(tags::SENDER_COMP_ID, &order.target_id.as_ref(), &mut report, &mut cursor); 
+        self.build_field(tags::TARGET_COMP_ID, &order.sender_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::SYMBOL, &order.symbol.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::SENDING_TIME, &utils::UtcTimestamp::now().to_fix_bytes(), &mut report, &mut cursor);
+
+        self.build_field(tags::BODY_LENGTH, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor); // Body length is everything after the BodyLength field (which is 2 bytes for tag and equals sign)
+        self.build_field(tags::CHECK_SUM, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor);
+
+        report.len = cursor as u16;
+        report
+    }
+
     fn build_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) -> FixRawMsg<N> {
         let mut report = FixRawMsg::<N>::default();
         let mut cursor = 0;
@@ -52,9 +89,10 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             types::OrderStatus::Filled => {
                 self.build_field(tags::ORD_STATUS, ord_status_code_set::FILL, &mut report, &mut cursor); // ExecType=Filled
             },
-            types::OrderStatus::Canceled => {
-                self.build_field(tags::ORD_STATUS, ord_status_code_set::CANCELED, &mut report, &mut cursor); // ExecType=Canceled
+            types::OrderStatus::Cancelled => {
+                self.build_field(tags::ORD_STATUS, ord_status_code_set::CANCELED, &mut report, &mut cursor); // ExecType=Cancelled
             },
+            _ => {}
         }
 
         match order_result.status {
@@ -67,9 +105,10 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             types::OrderStatus::Filled => {
                 self.build_field(tags::EXEC_TYPE, exec_type_code_set::TRADE, &mut report, &mut cursor); // ExecType=Filled
             },
-            types::OrderStatus::Canceled => {
-                self.build_field(tags::EXEC_TYPE, exec_type_code_set::CANCELED, &mut report, &mut cursor); // ExecType=Canceled
+            types::OrderStatus::Cancelled => {
+                self.build_field(tags::EXEC_TYPE, exec_type_code_set::CANCELED, &mut report, &mut cursor); // ExecType=Cancelled
             },
+            _ => {}
         }
 
         self.build_field(tags::ORDER_ID, &order.order_id.as_ref(), &mut report, &mut cursor);
@@ -105,7 +144,12 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     }
 
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
-        let mut raw_report = self.build_execution_report(exec_report);
+        let mut raw_report = if exec_report.1.status == types::OrderStatus::Cancelled || exec_report.1.status == types::OrderStatus::CancelRejected {
+            self.build_cancel_report(exec_report)
+        } else {
+            self.build_execution_report(exec_report)
+        };
+
         let key = exec_report.0.sender_id;
 
         loop {
@@ -169,6 +213,7 @@ mod tests {
             let order_event = types::OrderEvent {
                 order_type: types::OrderType::LimitOrder,
                 cl_ord_id: types::OrderId::from_ascii("CLORD12345"),
+                orig_cl_ord_id: None,
                 order_id: types::OrderId::from_ascii("ORDERID"),
                 side: types::Side::Buy,
                 price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
@@ -224,6 +269,7 @@ mod tests {
             let sell_order_event = types::OrderEvent {
                 order_type: types::OrderType::LimitOrder,
                 cl_ord_id: types::OrderId::from_ascii("CLORD54321"),
+                orig_cl_ord_id: None,
                 order_id: types::OrderId::from_ascii("ORDERID2"),
                 side: types::Side::Sell,
                 price: types::FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
@@ -266,6 +312,52 @@ mod tests {
             let avg_px_field = parsed_report.fields.iter().find(|f| f.tag == tags::AVG_PX).expect("AVG_PX field missing");
             assert_eq!(avg_px_field.value, field_str(&FixedPointArithmetic::from_f64(123.456).to_fix_bytes())); // 123.456 price, since only one trade executed
 
+            // Testing the Cancel scenario
+            let cancel_order_result = types::OrderResult {
+                trades: Trades::default(),
+                status: types::OrderStatus::Cancelled,
+                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                original_quantity: types::FixedPointArithmetic::from_f64(1_000_000.0),
+            };
+    
+            match fifo_in_tx.push((order_event, cancel_order_result)) {
+                Ok(_) => {},
+                Err(e) => panic!("Failed to push cancel order event into engine: {:?}", e),
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
+            let (_, raw_report) = fifo_out_rx.try_pop().expect("No execution report generated for cancel order");
+            let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+            let parsed_report = fix_parser.get_fields();
+            let msg_type_field = parsed_report.fields.iter().find(|f| f.tag == tags::MSG_TYPE).expect("MSG_TYPE field missing");
+            assert_eq!(msg_type_field.value, msg_types::EXECUTION_REPORT);
+            let ord_status_field = parsed_report.fields.iter().find(|f| f.tag == tags::ORD_STATUS).expect("ORD_STATUS field missing");
+            assert_eq!(ord_status_field.value, ord_status_code_set::CANCELED);
+            let exec_type_field = parsed_report.fields.iter().find(|f| f.tag == tags::EXEC_TYPE).expect("EXEC_TYPE field missing");
+            assert_eq!(exec_type_field.value, exec_type_code_set::CANCELED);
+
+            // testing the cancel rejection scenario
+            let cancel_reject_order_result = types::OrderResult {
+                trades: Trades::default(),
+                status: types::OrderStatus::CancelRejected,
+                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                original_quantity: types::FixedPointArithmetic::from_f64(1_000_000.0),
+            };
+
+            match fifo_in_tx.push((order_event, cancel_reject_order_result)) {
+                Ok(_) => {},
+                Err(e) => panic!("Failed to push cancel reject order event into engine: {:?}", e),
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
+            let (_, raw_report) = fifo_out_rx.try_pop().expect("No execution report generated for cancel reject order");
+            let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+            let parsed_report = fix_parser.get_fields();
+            let msg_type_field = parsed_report.fields.iter().find(|f| f.tag == tags::MSG_TYPE).expect("MSG_TYPE field missing");
+            assert_eq!(msg_type_field.value, msg_types::ORDER_CANCEL_REJECTION);
+            let ord_status_field = parsed_report.fields.iter().find(|f| f.tag == tags::ORD_STATUS).expect("ORD_STATUS field missing");
+            assert_eq!(ord_status_field.value, ord_status_code_set::NEW);
+            // Stop the engine
             stop_handle.shutdown.store(true, Ordering::Relaxed);
             handle.join().unwrap();
         });

@@ -55,6 +55,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     }
 }
 
+#[derive(Debug)]
 struct OrderRef {
     side: Side,
     price: FixedPointArithmetic,
@@ -73,6 +74,7 @@ impl OrderRef {
 /// - `bids`: A binary heap containing buy orders, sorted by price in descending order.
 /// - `asks`: A binary heap containing sell orders, sorted by price in ascending order (using `Reverse` to achieve min-heap behavior).
 /// - `id_counter`: A counter used to generate unique trade IDs for matched orders.
+#[derive(Debug)]
 pub struct OrderBook {
     pub bids: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     pub asks: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
@@ -133,7 +135,19 @@ impl OrderBook {
     }
 
     fn process_cancel_order(&mut self, order: OrderEvent) -> OrderResult {
-        if let Some(order_ref) = self.order_map.get(&order.order_id) {
+        if order.orig_cl_ord_id.is_none() {
+            eprintln!("Cancel order with ID: {} is missing original client order ID, cannot process cancellation", order.order_id);
+            return OrderResult {
+                trades: Trades::default(),
+                status: OrderStatus::CancelRejected,
+                original_quantity: order.quantity,
+                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            };
+        }
+
+        let orig_cl_ord_id = order.orig_cl_ord_id.unwrap();
+
+        if let Some(order_ref) = self.order_map.get(&orig_cl_ord_id) {
             let order_queue = match order_ref.side {
                 Side::Buy => self.bids.get_mut(&order_ref.price),
                 Side::Sell => self.asks.get_mut(&order_ref.price),
@@ -155,7 +169,7 @@ impl OrderBook {
                         None => eprintln!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, order_ref.position),
                     }
 
-                    self.order_map.remove(&order.order_id); // Remove the order from the map after cancellation)
+                    self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
 
                     return OrderResult {
                         trades: Trades::default(),
@@ -167,6 +181,7 @@ impl OrderBook {
             }
         }
 
+        eprintln!("Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", order.order_id, orig_cl_ord_id);
         // If we reach this point, it means the order was not found or could not be cancelled
         OrderResult {
             trades: Trades::default(),
@@ -200,7 +215,7 @@ impl OrderBook {
             Side::Buy => self.bids.get(&order.price).map_or(0, |queue| queue.len()),
             Side::Sell => self.asks.get(&order.price).map_or(0, |queue| queue.len()),
         };
-        self.order_map.insert(order.order_id, OrderRef::new(order.side, order.price, position));
+        self.order_map.insert(order.cl_ord_id, OrderRef::new(order.side, order.price, position));
     }
 
     /// Processes a sell limit order by matching it against the best available bids in the order book. If the order is not fully filled, it is added to the asks heap.
@@ -239,7 +254,7 @@ impl OrderBook {
                         best_bid_queue.push_front(best_bid);
                     } else {
                         // Remove the existing order from the order map if it has been completely filled
-                        self.order_map.remove(&best_bid.order_id);
+                        self.order_map.remove(&best_bid.cl_ord_id);
                     }
 
                     // Update the incoming order's quantity
@@ -309,7 +324,7 @@ impl OrderBook {
                         best_ask_queue.push_front(best_ask);
                     } else {
                         // Remove the existing order from the order map if it has been completely filled
-                        self.order_map.remove(&best_ask.order_id);
+                        self.order_map.remove(&best_ask.cl_ord_id);
                     }
 
                     // Update the incoming order's quantity
@@ -423,6 +438,7 @@ mod tests {
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
+            orig_cl_ord_id: None,
             cl_ord_id: CL_ORD_ID,
             sender_id: SENDER,
             target_id: TARGET,
@@ -439,7 +455,8 @@ mod tests {
             side: Side::Buy, // Side is not relevant for cancel orders, but we can set it to match the original order
             order_type: OrderType::CancelOrder,
             order_id: ORDER_ID, // Use the same order ID to identify which order to cancel
-            cl_ord_id: CL_ORD_ID,
+            cl_ord_id: CL_ORD_ID, // Use a different ClOrdID for the cancel order
+            orig_cl_ord_id: Some(CL_ORD_ID),
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the cancel order
@@ -460,6 +477,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
@@ -475,7 +493,8 @@ mod tests {
             side: Side::Sell, // Side is not relevant for cancel orders, but we can set it to match the original order
             order_type: OrderType::CancelOrder,
             order_id: ORDER_ID, // Use the same order ID to identify which order to cancel
-            cl_ord_id: CL_ORD_ID,
+            cl_ord_id: CL_ORD_ID, // Use a different ClOrdID for the cancel order
+            orig_cl_ord_id: Some(CL_ORD_ID),
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the cancel order
@@ -499,6 +518,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
@@ -523,6 +543,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
@@ -535,6 +556,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
@@ -565,6 +587,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
@@ -577,6 +600,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
@@ -589,6 +613,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL, // Set the symbol for the order
@@ -641,6 +666,7 @@ mod tests {
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
@@ -653,6 +679,7 @@ mod tests {
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
@@ -665,6 +692,7 @@ mod tests {
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
@@ -677,6 +705,7 @@ mod tests {
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
@@ -739,6 +768,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -751,6 +781,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -763,6 +794,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -775,6 +807,7 @@ mod tests {
             order_type: OrderType::MarketOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -830,6 +863,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -842,6 +876,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -869,6 +904,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -881,6 +917,7 @@ mod tests {
             order_type: OrderType::LimitOrder,
             order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -939,6 +976,7 @@ mod tests {
                 order_type: OrderType::LimitOrder,
                 order_id: ORDER_ID,
                 cl_ord_id: CL_ORD_ID,
+                orig_cl_ord_id: None,
                 sender_id: SENDER,
                 target_id: TARGET,
                 symbol: SYMBOL,
@@ -968,6 +1006,7 @@ mod tests {
                 order_type: OrderType::LimitOrder,
                 order_id: ORDER_ID,
                 cl_ord_id: CL_ORD_ID,
+                orig_cl_ord_id: None,
                 sender_id: SENDER,
                 target_id: TARGET,
                 symbol: SYMBOL,

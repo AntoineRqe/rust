@@ -9,6 +9,7 @@ Each folder has its own README with details.
 - [Single Producer Single Consumer](./spsc/README.md)
 - [LeetCode Solutions](./leetcode/README.md)
 - [File System Watcher](./fs_watcher/README.md)
+- [Market Simulator](./market-simulator/README.md)
 
 ## 📌 Notes
 - Each folder is self-contained
