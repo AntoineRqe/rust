@@ -1,18 +1,18 @@
 use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
-use fix::engine::{FixRawMsg, RequestQueue};
+use fix::engine::{FixRawMsg};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{unbounded};
 use types::StopHandle;
 
 pub struct FixServer<const N: usize> {
-    fifo_in: RequestQueue<N>,
+    fifo_in: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
     shutdown: Arc<AtomicBool>,
 }
 
 impl <'a, const N: usize> FixServer<N> {
-    pub fn new(fifo_in: RequestQueue<N>) -> Self {
+    pub fn new(fifo_in: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>) -> Self {
         Self { fifo_in, shutdown: Arc::new(AtomicBool::new(false)) }
     }
 
@@ -25,6 +25,7 @@ impl <'a, const N: usize> FixServer<N> {
             let queue = Arc::clone(&self.fifo_in);
             let shutdown = Arc::clone(&self.shutdown);
 
+            println!("New client connected from {}", stream.peer_addr().unwrap());
             // Spawn a thread to handle this client connection
             std::thread::spawn(move || {
                 Self::handle_client(stream, queue, shutdown);
@@ -41,7 +42,7 @@ impl <'a, const N: usize> FixServer<N> {
 
     fn handle_client(
         mut stream: TcpStream,
-        queue:   RequestQueue<N>,
+        queue:   Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
         shutdown: Arc<AtomicBool>,
     ) {
 
@@ -55,15 +56,13 @@ impl <'a, const N: usize> FixServer<N> {
                     break
                 }, // no message, client closed connection
                 Ok(n) => {
+                    println!("Received {} bytes from client", n);
                     let mut msg = FixRawMsg::default();
                     msg.len = n as u16;
                     msg.data[..n].copy_from_slice(&buf[..n]);
                     msg.resp_queue = Some(response_tx.clone());
 
-                    while let Err(backup_msg) = queue.push(msg) {
-                        msg = backup_msg;
-                        std::thread::yield_now(); // backpressure: yield to allow the FIX engine to catch up
-                    }
+                    queue.send(msg).expect("Failed to send message to FIX engine");
 
                     loop {
                         if let Ok(response) = response_rx.recv() {

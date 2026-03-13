@@ -40,6 +40,7 @@ memory = { path = "crates/memory" }
 execution-report = { path = "crates/execution-report" }
 types = { path = "crates/types" }
 core_affinity = "0.8.3"
+ctrlc = "3.2.0"
 
 # Optimization profiles
 [profile.dev]

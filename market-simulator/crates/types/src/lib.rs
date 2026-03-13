@@ -184,7 +184,7 @@ impl TradeId {
 /// - `quantity`: The quantity that was traded.
 /// - `id`: A unique identifier for the trade.
 /// - `timestamp`: The timestamp when the trade occurred.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trade {
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic,
@@ -193,7 +193,7 @@ pub struct Trade {
 }
 
 /// Represents the result of processing an order, including any trades that occurred and the final status of the order.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trades<const N: usize> {
     pub trades: [Trade; N], // Fixed-size array for trades, adjust size as needed
     count: usize, // Number of valid trades in the array
@@ -246,12 +246,23 @@ impl<const N: usize> Index<usize> for Trades<N> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderResult {
     pub trades: Trades<4>, // Fixed-size array for trades, adjust size as needed
     pub status: OrderStatus,
     pub original_quantity: FixedPointArithmetic, // The original quantity of the order before any trades occurred, added for potential future use in execution reports
     pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+}
+
+impl Default for OrderResult {
+    fn default() -> Self {
+        Self {
+            trades: Trades::new(),
+            status: OrderStatus::New,
+            original_quantity: FixedPointArithmetic::ZERO,
+            timestamp: Instant::now(),
+        }
+    }
 }
 
 impl std::fmt::Display for OrderResult {

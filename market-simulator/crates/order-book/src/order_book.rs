@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 use types::{
-    FixedPointArithmetic, OrderEvent, OrderId, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, TradeId, Trades
+    FixedPointArithmetic, OrderEvent, OrderId, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, TradeId, Trades, EntityId,
 };
 
 use spsc::spsc_lock_free::{Consumer, Producer};
@@ -28,16 +28,19 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 
     pub fn run(&mut self) {
         loop {
-            if let Some(event) = self.fifo_in.try_pop() {
-                // WARNING: Fix the clone here, we should avoid cloning the event if possible.
-                // Ideally, we would want to process the event in place and then send a reference to the result back to the FIX engine.
-                // However, this would require changing the design of the queues to allow for references or using some form of shared memory.
-                // For now, we will clone the event to keep it simple, but this is an area that can be optimized in the future.
-                let result = self.order_book.process_order(event.clone());
-                let mut execution_report_input = (event, result);
-                while let Err((event_er, result_er)) = self.fifo_out.try_push(execution_report_input) {
-                    execution_report_input = (event_er, result_er);
-                    std::hint::spin_loop(); // If the output queue is full, spin until there is space
+            if let Some(event) = self.fifo_in.pop() {
+
+                if event.sender_id == EntityId::from_ascii("") {
+                    println!("Received shutdown signal in order book engine, shutting down...");
+                    self.shutdown.store(true, Ordering::Relaxed);
+                    self.fifo_out.push((event, OrderResult::default())).ok(); // Push a dummy message to unblock any waiting consumers
+                } else {
+                    let result = self.order_book.process_order(event.clone());
+                    let mut execution_report_input = (event, result);
+                    while let Err((event_er, result_er)) = self.fifo_out.push(execution_report_input) {
+                        execution_report_input = (event_er, result_er);
+                        std::hint::spin_loop(); // If the output queue is full, spin until there is space
+                    }
                 }
             }
 
@@ -45,6 +48,8 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 break;
             }
         }
+
+        println!("Order book engine shutting down gracefully");
     }
 
     pub fn stop_handle(&mut self) -> StopHandle {
@@ -1029,6 +1034,9 @@ mod tests {
 
 
             stop_handle.stop();
+            // Send a dummy order to unblock the engine if it's waiting for orders
+            inbound_producer.push(OrderEvent::default()).unwrap();
+
             handle.join().unwrap();
         });
             // We can add tests for the engine here, but since it relies on the order book, we can focus on testing the order book functionality first.

@@ -19,14 +19,21 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 
     pub fn run(&self) {
         loop {
-            if let Some(exec_report) = self.fifo_in.try_pop() {
-                self.process_execution_report(&exec_report);
+            if let Some(exec_report) = self.fifo_in.pop() {
+                if exec_report.0.sender_id == EntityId::from_ascii("") {
+                    println!("Received shutdown signal in execution report engine, shutting down..."); // This is a signal to stop the engine, so we can ignore it
+                    self.fifo_out.push((EntityId::default(), FixRawMsg::default())).ok(); // Push a dummy message to unblock any waiting consumers
+                    self.shutdown.store(true, Ordering::Relaxed);
+                } else {
+                    self.process_execution_report(&exec_report);
+                }
             }
 
             if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
                 break;
             }
         }
+        println!("Execution report engine shutting down gracefully");
     }
 
     fn build_cancel_report(&self, exec_report: &(OrderEvent, OrderResult)) -> FixRawMsg<N> {
@@ -144,6 +151,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     }
 
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
+
         let mut raw_report = if exec_report.1.status == types::OrderStatus::Cancelled || exec_report.1.status == types::OrderStatus::CancelRejected {
             self.build_cancel_report(exec_report)
         } else {
@@ -153,7 +161,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         let key = exec_report.0.sender_id;
 
         loop {
-            if let Err((_, report)) = self.fifo_out.try_push((key, raw_report)) {
+            if let Err((_, report)) = self.fifo_out.push((key, raw_report)) {
                 raw_report = report;
                 std::hint::spin_loop();
             } else {
@@ -238,7 +246,7 @@ mod tests {
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
 
-            let (_, raw_report) = fifo_out_rx.try_pop().expect("No execution report generated");
+            let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated");
             let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
             let parsed_report = fix_parser.get_fields();
             
@@ -301,7 +309,7 @@ mod tests {
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
 
-            let (_, raw_report) = fifo_out_rx.try_pop().expect("No execution report generated for sell order");
+            let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated for sell order");
             let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
             let parsed_report = fix_parser.get_fields();    
 
@@ -350,15 +358,19 @@ mod tests {
             }
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
-            let (_, raw_report) = fifo_out_rx.try_pop().expect("No execution report generated for cancel reject order");
+            let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated for cancel reject order");
             let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
             let parsed_report = fix_parser.get_fields();
             let msg_type_field = parsed_report.fields.iter().find(|f| f.tag == tags::MSG_TYPE).expect("MSG_TYPE field missing");
             assert_eq!(msg_type_field.value, msg_types::ORDER_CANCEL_REJECTION);
             let ord_status_field = parsed_report.fields.iter().find(|f| f.tag == tags::ORD_STATUS).expect("ORD_STATUS field missing");
             assert_eq!(ord_status_field.value, ord_status_code_set::NEW);
+    
             // Stop the engine
-            stop_handle.shutdown.store(true, Ordering::Relaxed);
+            stop_handle.stop();
+            let _ = fifo_in_tx.push((OrderEvent::default(), OrderResult::default()));
+            let _ = fifo_out_rx.pop(); // Purge the dummy message pushed to unblock the engine
+    
             handle.join().unwrap();
         });
     }

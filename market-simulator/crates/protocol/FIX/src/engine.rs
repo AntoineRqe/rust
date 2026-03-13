@@ -33,7 +33,7 @@ impl<const N: usize> Default for FixRawMsg<N> {
 /// A simple FIX engine that reads raw FIX messages from an input queue, parses them, and pushes structured order events to an output queue. This is a very basic implementation that only handles New Order Single messages and extracts a few fields for demonstration purposes.
 /// In a real system, you would need to handle many more message types and fields, as well as error handling and performance optimizations.
 pub struct FixEngine<'a, const N: usize> {
-    request_in: Arc<ArrayQueue<FixRawMsg<N>>>,
+    request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
     request_out: Producer<'a, OrderEvent, N>,
     response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
     counter: usize,
@@ -44,7 +44,7 @@ pub struct FixEngine<'a, const N: usize> {
 impl<'a, const N: usize> FixEngine<'a, N> {
     
     pub fn new(
-        request_in: Arc<ArrayQueue<FixRawMsg<N>>>,
+        request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
         request_out: Producer<'a, OrderEvent, N>,
         response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
     ) -> Self {
@@ -135,12 +135,20 @@ impl<'a, const N: usize> FixEngine<'a, N> {
         Ok(order_event)
     }
 
-    // Non blocking check for new inbound FIX messages, if there is a message, parse it and push the corresponding order event to the order book queue. In a real implementation, you would want to have more robust error handling and also handle different message types and fields.
+    // blocking check for new inbound FIX messages, if there is a message, parse it and push the corresponding order event to the order book queue. In a real implementation, you would want to have more robust error handling and also handle different message types and fields.
     fn run_inbound_request(&mut self) {
-        if let Some(mut msg) = self.request_in.pop() {
-
+        if let Some(mut msg) = self.request_in.recv().ok() {
             let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
+            if msg.len == 0 {
+                // This is a signal to stop the engine, so we can set the shutdown flag and return
+                self.request_out.push(OrderEvent {
+                    sender_id: EntityId::from_ascii(""), // Use an empty sender ID to indicate a shutdown signal in the response queue, this is a bit of a hack but it allows us to unblock the engine if it's waiting on the response queue
+                    ..Default::default()
+                }).ok(); // Ignore errors when pushing the shutdown signal, since we're shutting down anyway
+                return;
+            }
+    
             let order_event = match self.build_order(msg) {
                 Ok(event) => event,
                 Err(e) => {
@@ -166,7 +174,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             }
             
             // Push the structured order event to the order book queue.
-            match self.request_out.try_push(order_event) {
+            match self.request_out.push(order_event) {
                 Ok(_) => {},
                 Err(e) => {
                     eprintln!("Failed to push order event to order book queue: {}, skipping", e);
@@ -178,7 +186,14 @@ impl<'a, const N: usize> FixEngine<'a, N> {
 
     /// Non blocking check for outbound responses from the order book engine, and if there is a response, send it back to the client using the stored response queue. This is a very basic implementation that assumes the response contains the same key as the original order event, in a real implementation you would want to have a more robust way to correlate responses with requests, and also handle cases where the client has disconnected or the response queue is full.
     fn run_outbound_response(&mut self) {
-        if let Some((key, _response)) = self.response_in.try_pop() {
+        if let Some((key, _response)) = self.response_in.pop() {
+            if key == EntityId::from_ascii("") {
+                println!("Received shutdown signal in FIX engine, shutting down...");
+                // This is a signal to stop the engine, so we can ignore it
+                self.shutdown.store(true, Ordering::Relaxed);
+                return;
+            }
+
             if let Some(resp_queue) = self.pending.get(&key) {
                 match resp_queue.send(_response) {
                     Ok(_) => {},
@@ -191,12 +206,19 @@ impl<'a, const N: usize> FixEngine<'a, N> {
     pub fn run(&mut self) {
         loop {
             self.run_inbound_request();
+
+            if self.shutdown.load(Ordering::Relaxed) && self.response_in.is_empty() && self.request_in.is_empty() {
+                break;
+            }
+
             self.run_outbound_response();
 
             if self.shutdown.load(Ordering::Relaxed) && self.response_in.is_empty() && self.request_in.is_empty() {
                 break;
             }
         }
+
+        println!("FIX engine shutting down gracefully, processed {} messages", self.counter);
     }
 
     pub fn stop_handle(&self) -> StopHandle{
@@ -219,7 +241,7 @@ mod tests {
     #[test]
     fn test_fix_engine() {
         // Inbound : net -> FIX -> order book
-        let net_to_fix = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
+        let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         // Outbound : order book -> FIX -> net
         let mut ob_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
@@ -227,10 +249,10 @@ mod tests {
         std::thread::scope(|scope| {
 
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
-            let (_, ob_to_fix_rx) = ob_to_fix.split();
+            let (ob_to_fix_tx, ob_to_fix_rx) = ob_to_fix.split();
 
             let mut handle = FixEngine::new(
-                Arc::clone(&net_to_fix),
+                Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 ob_to_fix_rx,
             );
@@ -253,7 +275,7 @@ mod tests {
                 resp_queue: None, // Not using the response queue in this test, but could be set here if needed for future tests
             };
 
-            net_to_fix.push(raw_msg).expect("Failed to push message");
+            net_to_fix_tx.send(raw_msg).expect("Failed to push message");
 
             // spin wait instead of sleep
             let order_event = loop {
@@ -272,6 +294,9 @@ mod tests {
 
             // Stop the FIX engine thread
             stop_handle.stop();
+            net_to_fix_tx.send(FixRawMsg::default()).expect("Failed to push shutdown message");
+            std::thread::sleep(std::time::Duration::from_millis(200)); // Give the engine some time to process the shutdown signal, in a real implementation you would want a more robust way to ensure the thread has stopped
+            ob_to_fix_tx.push((EntityId::from_ascii(""), FixRawMsg::default())).expect("Failed to push shutdown message");
 
             // Wait a bit to ensure the FIX engine has stopped before ending the test, in a real implementation you would want a more robust way to ensure the thread has stopped
             engine.join().expect("Failed to join FIX engine thread");
@@ -280,16 +305,16 @@ mod tests {
 
     #[test]
     fn test_fix_engine_cancel_request_with_orig_cl_ord_id() {
-        let net_to_fix = Arc::new(ArrayQueue::<FixRawMsg<1024>>::new(1024));
+        let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         let mut ob_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
 
         std::thread::scope(|scope| {
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
-            let (_, ob_to_fix_rx) = ob_to_fix.split();
+            let (ob_to_fix_tx, ob_to_fix_rx) = ob_to_fix.split();
 
             let mut handle = FixEngine::new(
-                Arc::clone(&net_to_fix),
+                Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 ob_to_fix_rx,
             );
@@ -312,7 +337,7 @@ mod tests {
                 resp_queue: None,
             };
 
-            net_to_fix.push(raw_msg).expect("Failed to push message");
+            net_to_fix_tx.send(raw_msg).expect("Failed to push message");
 
             let order_event = loop {
                 if let Some(event) = fix_to_ob_rx.try_pop() {
@@ -329,6 +354,10 @@ mod tests {
             );
 
             stop_handle.stop();
+            net_to_fix_tx.send(FixRawMsg::default()).expect("Failed to push shutdown message");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            ob_to_fix_tx.push((EntityId::from_ascii(""), FixRawMsg::default())).expect("Failed to push shutdown message");
+
             engine.join().expect("Failed to join FIX engine thread");
         });
     }
