@@ -31,7 +31,6 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             if let Some(event) = self.fifo_in.pop() {
 
                 if event.sender_id == EntityId::from_ascii("") {
-                    println!("Received shutdown signal in order book engine, shutting down...");
                     self.shutdown.store(true, Ordering::Relaxed);
                     self.fifo_out.push((event, OrderResult::default())).ok(); // Push a dummy message to unblock any waiting consumers
                 } else {

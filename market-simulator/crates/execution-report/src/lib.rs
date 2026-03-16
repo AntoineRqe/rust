@@ -21,7 +21,6 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         loop {
             if let Some(exec_report) = self.fifo_in.pop() {
                 if exec_report.0.sender_id == EntityId::from_ascii("") {
-                    println!("Received shutdown signal in execution report engine, shutting down..."); // This is a signal to stop the engine, so we can ignore it
                     self.fifo_out.push((EntityId::default(), FixRawMsg::default())).ok(); // Push a dummy message to unblock any waiting consumers
                     self.shutdown.store(true, Ordering::Relaxed);
                 } else {

@@ -2,12 +2,12 @@ use std::{collections::HashMap};
 use std::sync::atomic::AtomicBool;
 
 use crate::tags::{tags, msg_types, side_code_set};
-use types::{EntityId, FixedPointArithmetic, OrderEvent, Side, StopHandle};
+use types::{EntityId, FixedPointArithmetic, OrderEvent, Side};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use crossbeam::queue::{ArrayQueue};
-
+use std::cell::UnsafeCell;
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
@@ -36,26 +36,96 @@ pub struct FixEngine<'a, const N: usize> {
     request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
     request_out: Producer<'a, OrderEvent, N>,
     response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
-    counter: usize,
     shutdown: Arc<AtomicBool>,
-    pending: HashMap<EntityId, crossbeam_channel::Sender<FixRawMsg<N>>>, // Map of pending order events waiting for responses, keyed by a unique identifier (e.g. order ID or a generated correlation ID)
+    pending: Arc<FixPendingConnection<N>>, // Shared state for pending response queues, used
 }
 
-impl<'a, const N: usize> FixEngine<'a, N> {
-    
-    pub fn new(
-        request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
-        request_out: Producer<'a, OrderEvent, N>,
-        response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
-    ) -> Self {
-        Self {
-            request_in: request_in,
-            request_out: request_out,
-            response_in: response_in,
-            counter: 0,
-            shutdown: Arc::new(AtomicBool::new(false)),
-            pending: HashMap::new(),
+/// The data struct which will be shared between the inbound and outbound engines, containing the pending response queues for each order event, and a shutdown flag to signal when the engine should stop. This allows the inbound and outbound engines to communicate with each other without needing to share the entire engine struct, which can help reduce contention and improve performance.
+struct FixShared<const N: usize> {
+    shutdown: Arc<AtomicBool>,
+    pending: Arc<FixPendingConnection<N>>,
+}
+
+impl <const N: usize> FixShared<N> {
+
+    fn update_pending(&self, key: EntityId, resp_queue: crossbeam_channel::Sender<FixRawMsg<N>>) {
+        // loop while locked is true, then set locked to true and update the pending queue, then set locked to false. This is a very basic spinlock implementation, in a real implementation you would want to use a more robust locking mechanism or a lock-free data structure to avoid contention and improve performance.
+        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
+        unsafe {
+            (*self.pending.pending.get()).insert(key, resp_queue);
         }
+        self.pending.locked.store(false, Ordering::Release);
+    }
+
+    fn get_pending(&self, key: &EntityId) -> Option<crossbeam_channel::Sender<FixRawMsg<N>>> {
+        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
+        let result = unsafe {
+            (*self.pending.pending.get()).get(key).cloned()
+        };
+        self.pending.locked.store(false, Ordering::Release);
+        result
+    }
+}
+
+pub struct FixInboundEngine<'a, const N: usize> {
+    request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
+    request_out: Producer<'a, OrderEvent, N>,
+    counter: usize,
+    shared: Arc<FixShared<N>>,
+}
+
+impl<'a, const N: usize> FixInboundEngine<'a, N> {
+        // blocking check for new inbound FIX messages, if there is a message, parse it and push the corresponding order event to the order book queue. In a real implementation, you would want to have more robust error handling and also handle different message types and fields.
+    pub fn run(&mut self) {
+        while !self.shared.shutdown.load(Ordering::Relaxed) || !self.request_in.is_empty() {
+            if let Some(mut msg) = self.request_in.recv().ok() {
+                let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
+
+                if msg.len == 0 {
+                    // This is a signal to stop the engine, so we can set the shutdown flag and return
+                    self.request_out.push(OrderEvent {
+                        sender_id: EntityId::from_ascii(""), // Use an empty sender ID to indicate a shutdown signal in the response queue, this is a bit of a hack but it allows us to unblock the engine if it's waiting on the response queue
+                        ..Default::default()
+                    }).ok(); // Ignore errors when pushing the shutdown signal, since we're shutting down anyway
+                    return;
+                }
+        
+                let order_event = match self.build_order(msg) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        eprintln!("Failed to parse FIX message: {}, skipping", e);
+                        return; // Skip malformed messages
+                    }
+                };
+
+                // Check validity of the parsed order event before pushing to the order book queue, this is important to avoid processing invalid events downstream
+                match order_event.check_valid() {
+                    Ok(_) => {},
+                    Err(e) => {
+                        eprintln!("Invalid order event parsed: {}, skipping", e);
+                        return; // Skip invalid events
+                    }
+                }
+
+                self.counter += 1;
+
+                // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
+                if let Some(resp_queue) = resp_queue {
+                    self.shared.update_pending(order_event.sender_id, resp_queue);
+                }
+                
+                // Push the structured order event to the order book queue.
+                match self.request_out.push(order_event) {
+                    Ok(_) => {self.counter += 1;},
+                    Err(e) => {
+                        eprintln!("Failed to push order event to order book queue: {}, skipping", e);
+                        return; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
+                    }
+                }
+            }
+        }
+
+        println!("Inbound FIX engine shutting down, processed {} messages", self.counter);
     }
 
     fn build_order(
@@ -134,100 +204,88 @@ impl<'a, const N: usize> FixEngine<'a, N> {
 
         Ok(order_event)
     }
+}
 
-    // blocking check for new inbound FIX messages, if there is a message, parse it and push the corresponding order event to the order book queue. In a real implementation, you would want to have more robust error handling and also handle different message types and fields.
-    fn run_inbound_request(&mut self) {
-        if let Some(mut msg) = self.request_in.recv().ok() {
-            let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
-            if msg.len == 0 {
-                // This is a signal to stop the engine, so we can set the shutdown flag and return
-                self.request_out.push(OrderEvent {
-                    sender_id: EntityId::from_ascii(""), // Use an empty sender ID to indicate a shutdown signal in the response queue, this is a bit of a hack but it allows us to unblock the engine if it's waiting on the response queue
-                    ..Default::default()
-                }).ok(); // Ignore errors when pushing the shutdown signal, since we're shutting down anyway
-                return;
-            }
-    
-            let order_event = match self.build_order(msg) {
-                Ok(event) => event,
-                Err(e) => {
-                    eprintln!("Failed to parse FIX message: {}, skipping", e);
-                    return; // Skip malformed messages
-                }
-            };
+pub struct FixOutboundEngine<'a, const N: usize> {
+    response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
+    counter: usize,
+    shared: Arc<FixShared<N>>,
+}
 
-            // Check validity of the parsed order event before pushing to the order book queue, this is important to avoid processing invalid events downstream
-            match order_event.check_valid() {
-                Ok(_) => {},
-                Err(e) => {
-                    eprintln!("Invalid order event parsed: {}, skipping", e);
-                    return; // Skip invalid events
-                }
-            }
-
-            self.counter += 1;
-
-            // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
-            if let Some(resp_queue) = resp_queue {
-                self.pending.insert(order_event.sender_id, resp_queue);
-            }
-            
-            // Push the structured order event to the order book queue.
-            match self.request_out.push(order_event) {
-                Ok(_) => {},
-                Err(e) => {
-                    eprintln!("Failed to push order event to order book queue: {}, skipping", e);
-                    return; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
-                }
-            }
-        }
-    }
-
-    /// Non blocking check for outbound responses from the order book engine, and if there is a response, send it back to the client using the stored response queue. This is a very basic implementation that assumes the response contains the same key as the original order event, in a real implementation you would want to have a more robust way to correlate responses with requests, and also handle cases where the client has disconnected or the response queue is full.
-    fn run_outbound_response(&mut self) {
-        if let Some((key, _response)) = self.response_in.pop() {
-            if key == EntityId::from_ascii("") {
-                println!("Received shutdown signal in FIX engine, shutting down...");
-                // This is a signal to stop the engine, so we can ignore it
-                self.shutdown.store(true, Ordering::Relaxed);
-                return;
-            }
-
-            if let Some(resp_queue) = self.pending.get(&key) {
-                match resp_queue.send(_response) {
-                    Ok(_) => {},
-                    Err(_) => { eprintln!("Failed to push response back to client, dropping response"); },
-                }
-            }
-        }
-    }
-
+impl<'a, const N: usize> FixOutboundEngine<'a, N> {
     pub fn run(&mut self) {
-        loop {
-            self.run_inbound_request();
-
-            if self.shutdown.load(Ordering::Relaxed) && self.response_in.is_empty() && self.request_in.is_empty() {
-                break;
-            }
-
-            self.run_outbound_response();
-
-            if self.shutdown.load(Ordering::Relaxed) && self.response_in.is_empty() && self.request_in.is_empty() {
-                break;
+        while !self.shared.shutdown.load(Ordering::Relaxed) || !self.response_in.is_empty() {
+            if let Some((key, _response)) = self.response_in.pop() {
+                if key == EntityId::from_ascii("") {
+                    // This is a signal to stop the engine, so we can ignore it
+                    self.shared.shutdown.store(true, Ordering::Relaxed);
+                } else {
+                    if let Some(resp_queue) = self.shared.get_pending(&key) {
+                        match resp_queue.send(_response) {
+                            Ok(_) => {self.counter += 1;},
+                            Err(_) => { eprintln!("Failed to push response back to client, dropping response"); },
+                        }
+                    }
+                }
             }
         }
 
-        println!("FIX engine shutting down gracefully, processed {} messages", self.counter);
+        println!("Outbound FIX engine shutting down, processed {} messages", self.counter);
+    }
+}
+
+struct FixPendingConnection<const N: usize> {
+    locked: AtomicBool,
+    pending: UnsafeCell<HashMap<EntityId, crossbeam_channel::Sender<FixRawMsg<N>>>>,
+}
+
+unsafe impl<const N: usize> Send for FixPendingConnection<N> {}
+unsafe impl<const N: usize> Sync for FixPendingConnection<N> {}
+
+impl<'a, const N: usize> FixEngine<'a, N> {
+    
+    pub fn new(
+        request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
+        request_out: Producer<'a, OrderEvent, N>,
+        response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
+    ) -> Self {
+        Self {
+            request_in: request_in,
+            request_out: request_out,
+            response_in: response_in,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(FixPendingConnection {
+                locked: AtomicBool::new(false),
+                pending: UnsafeCell::new(HashMap::new()),
+            }),
+        }
     }
 
-    pub fn stop_handle(&self) -> StopHandle{
-        StopHandle {
+    pub fn split(self) -> (FixInboundEngine<'a, N>, FixOutboundEngine<'a, N>) {
+            
+        let shared = Arc::new(FixShared {
             shutdown: Arc::clone(&self.shutdown),
-            thread: None,
-        }
-    }
+            pending: Arc::clone(&self.pending),
+        });
 
+
+        let inbound = FixInboundEngine {
+            request_in: self.request_in,
+            request_out: self.request_out,
+            shared: Arc::clone(&shared),
+            counter: 0,
+        };
+
+        let outbound = FixOutboundEngine {
+            response_in: self.response_in,
+            shared: Arc::clone(&shared),
+            counter: 0,
+        };
+
+        ( inbound, outbound)
+
+    }
 }
 
 
@@ -251,18 +309,24 @@ mod tests {
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
             let (ob_to_fix_tx, ob_to_fix_rx) = ob_to_fix.split();
 
-            let mut handle = FixEngine::new(
+            let handle = FixEngine::new(
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 ob_to_fix_rx,
             );
-    
-            let stop_handle = handle.stop_handle();
 
-            let engine = scope.spawn(move || {
-                handle.run();
+            let (mut inbound_engine, mut outbound_engine) = handle.split();
+
+             // Spawn a thread to run the FIX engine
+    
+            let inbound_handle = scope.spawn(move || {
+                inbound_engine.run();
             });
             
+            let outbound_handle = scope.spawn(move || {
+                outbound_engine.run();
+            });
+
             let fix_message = b"8=FIX.4.4\x019=0000\x0135=D\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0111=12345\x0154=1\x0138=1000000\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
 
             let raw_msg = FixRawMsg {
@@ -293,13 +357,13 @@ mod tests {
             assert_eq!(order_event.side, Side::Buy);
 
             // Stop the FIX engine thread
-            stop_handle.stop();
             net_to_fix_tx.send(FixRawMsg::default()).expect("Failed to push shutdown message");
             std::thread::sleep(std::time::Duration::from_millis(200)); // Give the engine some time to process the shutdown signal, in a real implementation you would want a more robust way to ensure the thread has stopped
             ob_to_fix_tx.push((EntityId::from_ascii(""), FixRawMsg::default())).expect("Failed to push shutdown message");
 
             // Wait a bit to ensure the FIX engine has stopped before ending the test, in a real implementation you would want a more robust way to ensure the thread has stopped
-            engine.join().expect("Failed to join FIX engine thread");
+            inbound_handle.join().expect("Failed to join inbound FIX engine thread");
+            outbound_handle.join().expect("Failed to join outbound FIX engine thread");
         });
     }
 
@@ -313,16 +377,22 @@ mod tests {
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
             let (ob_to_fix_tx, ob_to_fix_rx) = ob_to_fix.split();
 
-            let mut handle = FixEngine::new(
+            let handle = FixEngine::new(
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 ob_to_fix_rx,
             );
 
-            let stop_handle = handle.stop_handle();
+            let (mut inbound_engine, mut outbound_engine) = handle.split();
 
-            let engine = scope.spawn(move || {
-                handle.run();
+             // Spawn a thread to run the FIX engine
+
+            let inbound_handle = scope.spawn(move || {
+                inbound_engine.run();
+            });
+
+            let outbound_handle = scope.spawn(move || {
+                outbound_engine.run();
             });
 
             let fix_message = b"8=FIX.4.4\x019=0000\x0135=F\x0149=SENDER\x0156=TARGET\x0134=2\x0152=20240219-12:31:00.000\x0111=CXL-1\x0141=ORD-12345\x0154=1\x0138=100\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
@@ -353,12 +423,12 @@ mod tests {
                 b"ORD-12345"
             );
 
-            stop_handle.stop();
             net_to_fix_tx.send(FixRawMsg::default()).expect("Failed to push shutdown message");
             std::thread::sleep(std::time::Duration::from_millis(200));
             ob_to_fix_tx.push((EntityId::from_ascii(""), FixRawMsg::default())).expect("Failed to push shutdown message");
 
-            engine.join().expect("Failed to join FIX engine thread");
+            inbound_handle.join().expect("Failed to join inbound FIX engine thread");
+            outbound_handle.join().expect("Failed to join outbound FIX engine thread");
         });
     }
 }

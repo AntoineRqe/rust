@@ -74,16 +74,20 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     }
 
     // fix engine thread
-    let mut fix_engine = FixEngine ::new(Arc::new(net_to_fix_rx), fix_tx, fix_resp_rx);
-    let fix_stop_handle = fix_engine.stop_handle();
+    let fix_engine = FixEngine ::new(Arc::new(net_to_fix_rx), fix_tx, fix_resp_rx);
+    let (mut inbound_engine, mut outbound_engine) = fix_engine.split();
 
     let _fix_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: 6 });
-        fix_engine.run();
+        inbound_engine.run();
+    });
+
+    let _fix_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: 7 });
+        outbound_engine.run();
     });
 
     {
-        market_simulator.stop_handles.lock().unwrap().stop_fix = Some(fix_stop_handle);
         market_simulator.thread_handles.lock().unwrap().fix_thread = Some(_fix_thread);
     }
 
