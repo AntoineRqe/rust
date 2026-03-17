@@ -27,15 +27,8 @@ This will start the server and allow clients to connect and interact with the si
 
 ## Running the Client
 
-To run a client that connects to the server and sends FIX messages, you can use the following command:
+Refer to the [Tools README](./tools/README.md) for instructions on how to run the client and connect to the server.
 
-```
-python tools/client.py
-```
-
-You need to connect to the FIX server first using the `connect` button, then you can send orders using the `Sell` and `Buy` buttons. The client will display the execution reports received from the server in response to the orders sent.
-
-![Client Screenshot](./papers/assets/images/client.png)
 
 ## TODO List
 
