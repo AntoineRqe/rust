@@ -44,7 +44,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                     self.shutdown.store(true, Ordering::Relaxed);
                     self.fifo_out.push((event, OrderResult::default())).ok(); // Push a dummy message to unblock any waiting consumers
                 } else {
-                    let result = self.order_book.process_order(event.clone());
+                    let (event, result) = self.order_book.process_order(event);
                     let mut execution_report_input = (event, result);
                     while let Err((event_er, result_er)) = self.fifo_out.push(execution_report_input) {
                         execution_report_input = (event_er, result_er);
@@ -115,7 +115,7 @@ impl OrderBook {
     /// Returns:
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
     //#[instrument(level = "debug", skip(self, order), fields(order_id = order.order_id, side = ?order.side, price = order.price, quantity = order.quantity))]
-    pub fn process_order(&mut self, order: OrderEvent) -> OrderResult {
+    pub fn process_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         match order.order_type {
             OrderType::LimitOrder => self.process_limit_order(order),
             OrderType::MarketOrder => self.process_market_order(order),
@@ -123,29 +123,41 @@ impl OrderBook {
         }
     }
 
-    fn process_limit_order(&mut self, order: OrderEvent) -> OrderResult {
+    fn process_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         match order.side {
-            Side::Buy => self.process_buy_limit_order(order),
-            Side::Sell => self.process_sell_limit_order(order),
+            Side::Buy => {
+                let (order, result) = self.process_buy_limit_order(order);
+                (order, result)
+            },
+            Side::Sell => {
+                let (order, result) = self.process_sell_limit_order(order);
+                (order, result)
+            },
         }
     }
 
-    fn process_market_order(&mut self, order: OrderEvent) -> OrderResult {
+    fn process_market_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         match order.side {
-            Side::Buy => self.process_buy_market_order(order),
-            Side::Sell => self.process_sell_market_order(order),
+            Side::Buy => {
+                let (order, result) = self.process_buy_market_order(order);
+                (order, result)
+            },
+            Side::Sell => {
+                let (order, result) = self.process_sell_market_order(order);
+                (order, result)
+            },
         }
     }
 
-    fn process_cancel_order(&mut self, order: OrderEvent) -> OrderResult {
+    fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         if order.orig_cl_ord_id.is_none() {
             eprintln!("Cancel order with ID: {} is missing original client order ID, cannot process cancellation", order.order_id);
-            return OrderResult {
+            return (order, OrderResult {
                 trades: Trades::default(),
                 status: OrderStatus::CancelRejected,
                 original_quantity: order.quantity,
                 timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
-            };
+            });
         }
 
         let orig_cl_ord_id = order.orig_cl_ord_id.unwrap();
@@ -174,30 +186,30 @@ impl OrderBook {
 
                     self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
 
-                    return OrderResult {
+                    return (order, OrderResult {
                         trades: Trades::default(),
                         status: OrderStatus::Cancelled,
                         original_quantity: order.quantity,
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
-                    };
+                    });
                 }
             }
         }
 
         eprintln!("Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", order.order_id, orig_cl_ord_id);
         // If we reach this point, it means the order was not found or could not be cancelled
-        OrderResult {
+        (order, OrderResult {
             trades: Trades::default(),
             status: OrderStatus::CancelRejected,
             original_quantity: order.quantity,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
-        }
+        })
     }
 
     /// Generates an `OrderResult` based on the processed order, including trade ID and status.
     /// The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
-    fn generate_order_result(&mut self, order: &OrderEvent, status: Option<OrderStatus>, original_quantity: FixedPointArithmetic, trades: Trades<4>) -> OrderResult {                        
-        OrderResult {
+    fn generate_order_result(&mut self, order: OrderEvent, status: Option<OrderStatus>, original_quantity: FixedPointArithmetic, trades: Trades<4>) -> (OrderEvent, OrderResult) {                        
+        let order_result = OrderResult {
             trades,
             status: status.unwrap_or_else(|| {
                 if order.quantity == FixedPointArithmetic::ZERO {
@@ -210,7 +222,8 @@ impl OrderBook {
             }),
             original_quantity,
             timestamp: Instant::now(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
-        }
+        };
+        (order, order_result)
     }
 
     fn add_order_to_map(&mut self, order: &OrderEvent) {
@@ -226,7 +239,7 @@ impl OrderBook {
     /// - `order`: The incoming sell limit order to be processed.
     /// Returns:
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
-    fn process_sell_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
+    fn process_sell_limit_order(&mut self, mut order: OrderEvent) -> (OrderEvent, OrderResult) {
         let original_quantity = order.quantity;
         let mut trades = Trades::default();
         while let Some((&best_bid_price, _ )) = self.bids.first_key_value() {
@@ -266,7 +279,7 @@ impl OrderBook {
                             self.bids.insert(best_bid_price, best_bid_queue);
                         }
 
-                        return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
+                        return self.generate_order_result(order, Some(OrderStatus::Filled), original_quantity, trades);
                     }
                 }
             } else {
@@ -274,7 +287,7 @@ impl OrderBook {
             }
         }
 
-        let order_result = self.generate_order_result(&order, None, original_quantity, trades);
+        let order_result = self.generate_order_result(order, None, original_quantity, trades);
 
         if order.quantity > FixedPointArithmetic::ZERO {
             // Add for future cancellation/modification (Before adding to order book for coherent queue positioning in the order map)
@@ -296,7 +309,7 @@ impl OrderBook {
     /// - `order`: The incoming buy limit order to be processed.
     /// Returns:
     /// - An `OrderResult` containing the details of the processed order, including any trade ID and status.
-    fn process_buy_limit_order(&mut self, mut order: OrderEvent) -> OrderResult {
+    fn process_buy_limit_order(&mut self, mut order: OrderEvent) -> (OrderEvent, OrderResult) {
         let original_quantity = order.quantity;
         let mut trades = Trades::default();
         while let Some((&best_ask_price, _)) = self.asks.first_key_value() {
@@ -336,7 +349,7 @@ impl OrderBook {
                             self.asks.insert(best_ask_price, best_ask_queue.clone());
                         }
 
-                        return self.generate_order_result(&order, Some(OrderStatus::Filled), original_quantity, trades);
+                        return self.generate_order_result(order, Some(OrderStatus::Filled), original_quantity, trades);
                     }
                 }
             } else {
@@ -344,7 +357,7 @@ impl OrderBook {
             }
         }
 
-        let order_result = self.generate_order_result(&order, None, original_quantity, trades);
+        let (order, order_result) = self.generate_order_result(order, None, original_quantity, trades);
 
         if order.quantity > FixedPointArithmetic::ZERO {
             // Add for future cancellation/modification
@@ -357,15 +370,15 @@ impl OrderBook {
             .push_back(order);
         }
 
-        order_result
+        (order, order_result)
     }
 
-    fn process_buy_market_order(&mut self, mut order: OrderEvent) -> OrderResult {
+    fn process_buy_market_order(&mut self, mut order: OrderEvent) -> (OrderEvent, OrderResult) {
         order.price = FixedPointArithmetic::from_f64(f64::INFINITY); // Market orders are treated as having an infinitely high price to ensure they match with the best available asks
         self.process_buy_limit_order(order)
     }
 
-    fn process_sell_market_order(&mut self, mut order: OrderEvent) -> OrderResult {
+    fn process_sell_market_order(&mut self, mut order: OrderEvent) -> (OrderEvent, OrderResult) {
         order.price = FixedPointArithmetic::from_f64(f64::NEG_INFINITY); // Market orders are treated as having an infinitely low price to ensure they match with the best available bids
         self.process_sell_limit_order(order)
     }
@@ -413,6 +426,7 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
+    use core::f64;
     use std::{thread, time::Instant};
 
     use types::{EntityId, FixedString, OrderId, Side};
@@ -449,8 +463,10 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let result = order_book.process_order(order);
+        let (order, result) = order_book.process_order(order);
         assert_eq!(result.status, OrderStatus::New);
+        assert!(order.price == FixedPointArithmetic::from_f64(100.0));
+        assert!(order.quantity == FixedPointArithmetic::from_f64(10.0));
 
         let cancel_order = OrderEvent {
             price: FixedPointArithmetic::ZERO, // Price is not relevant for cancel orders
@@ -466,8 +482,10 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let cancel_result = order_book.process_order(cancel_order);
+        let (cancel_order, cancel_result) = order_book.process_order(cancel_order);
         assert_eq!(cancel_result.status, OrderStatus::Cancelled);
+        assert!(cancel_order.price == FixedPointArithmetic::ZERO);
+        assert!(cancel_order.quantity == FixedPointArithmetic::ZERO);
         assert!(order_book.asks.is_empty()); // There should be no asks in the order book
         assert!(order_book.bids.is_empty()); // There should be no bids in the order book
         assert!(order_book.order_map.is_empty()); // There should be no asks in the order book
@@ -487,8 +505,10 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let result = order_book.process_order(order);
+        let (order, result) = order_book.process_order(order);
         assert_eq!(result.status, OrderStatus::New);
+        assert!(order.price == FixedPointArithmetic::from_f64(100.0));
+        assert!(order.quantity == FixedPointArithmetic::from_f64(10.0));
 
         let cancel_order = OrderEvent {
             price: FixedPointArithmetic::ZERO, // Price is not relevant for cancel orders
@@ -504,8 +524,10 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let cancel_result = order_book.process_order(cancel_order);
+        let (cancel_order, cancel_result) = order_book.process_order(cancel_order);
         assert_eq!(cancel_result.status, OrderStatus::Cancelled);
+        assert!(cancel_order.price == FixedPointArithmetic::ZERO);
+        assert!(cancel_order.quantity == FixedPointArithmetic::ZERO);
         assert_eq!(order_book.get_best_ask(), None); // The best ask should be removed after cancellation
         assert!(order_book.order_map.is_empty()); // There should be no asks in the order book
 
@@ -528,8 +550,10 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let result = order_book.process_order(order);
+        let (order, result) = order_book.process_order(order);
 
+        assert_eq!(order.price, FixedPointArithmetic::from_f64(100.0));
+        assert_eq!(order.quantity, FixedPointArithmetic::from_f64(10.0));
         assert_eq!(result.trades.len(), 0); // No trades executed
         assert_eq!(result.status, OrderStatus::New);
         assert_eq!(order_book.get_best_bid().unwrap().price, FixedPointArithmetic::from_f64(100.0)); // Best bid should be the price of the order
@@ -566,12 +590,16 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let result1 = order_book.process_order(order1);
-        let result2 = order_book.process_order(order2);
+        let (order1, result1) = order_book.process_order(order1);
+        let (order2, result2) = order_book.process_order(order2);
 
+        assert_eq!(order1.price, FixedPointArithmetic::from_f64(100.0));
+        assert_eq!(order1.quantity, FixedPointArithmetic::from_f64(10.0));
         assert_eq!(result1.trades.len(), 0); // No trades executed for the first order
         assert_eq!(result1.status, OrderStatus::New);
 
+        assert_eq!(order2.price, FixedPointArithmetic::from_f64(100.0));
+        assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(0.0));
         assert_eq!(result2.trades.len(), 1); // One trade executed for the second order
         assert_eq!(result2.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
         assert_eq!(result2.trades[0].price, FixedPointArithmetic::from_f64(100.0)); // Trade price should be 100.0
@@ -623,15 +651,19 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let result1 = order_book.process_order(order1);
-        let result2 = order_book.process_order(order2);
-        let result3 = order_book.process_order(order3);
+        let (order1, result1) = order_book.process_order(order1);
+        let (order2, result2) = order_book.process_order(order2);
+        let (order3, result3) = order_book.process_order(order3);
 
         // The first order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
+        assert!(order1.price == FixedPointArithmetic::from_f64(100.0));
+        assert!(order1.quantity == FixedPointArithmetic::from_f64(10.0));
         assert_eq!(result1.trades.len(), 0); // No trades executed,
         assert_eq!(result1.status, OrderStatus::New);
 
         // The second order should be completely filled (5 units filled, 0 units remaining).
+        assert_eq!(order2.price, FixedPointArithmetic::from_f64(99.0));
+        assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(0.0));
         assert_eq!(result2.trades.len(), 1); // 5 units * 99.0 price
         assert_eq!(result2.trades[0].id, TradeId::new()); // Trade ID should be 0 for the first trade
         assert_eq!(result2.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
@@ -639,6 +671,8 @@ mod tests {
         assert_eq!(result2.status, OrderStatus::Filled);
 
         // The third order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the asks.
+        assert_eq!(order3.price, FixedPointArithmetic::from_f64(98.0));
+        assert_eq!(order3.quantity, FixedPointArithmetic::from_f64(5.0));
         assert_eq!(result3.trades.len(), 1); // 5 units * 98.0 price
         assert_eq!(result3.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
         assert_eq!(result3.trades[0].price, FixedPointArithmetic::from_f64(100.0)); // 5 units * 100.0 price
@@ -716,24 +750,32 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let result1 = order_book.process_order(order1);
-        let result2 = order_book.process_order(order2);
-        let result3 = order_book.process_order(order3);
-        let result4 = order_book.process_order(order4);
+        let (order1, result1) = order_book.process_order(order1);
+        let (order2, result2) = order_book.process_order(order2);
+        let (order3, result3) = order_book.process_order(order3);
+        let (order4, result4) = order_book.process_order(order4);
 
         // The first order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
+        assert_eq!(order1.price, FixedPointArithmetic::from_f64(99.0));
+        assert_eq!(order1.quantity, FixedPointArithmetic::from_f64(3.0));
         assert_eq!(result1.trades.len(), 0); // No trades executed,
         assert_eq!(result1.status, OrderStatus::New);
 
         // The second order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
+        assert_eq!(order2.price, FixedPointArithmetic::from_f64(98.0));
+        assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0));
         assert_eq!(result2.trades.len(), 0); // No trades executed,
         assert_eq!(result2.status, OrderStatus::New);
 
         // The third order should not be matched immediately, as there are no existing orders in the order book, so it should be added to the bids.
+        assert_eq!(order3.price, FixedPointArithmetic::from_f64(97.0));
+        assert_eq!(order3.quantity, FixedPointArithmetic::from_f64(3.0));
         assert_eq!(result3.trades.len(), 0); // No trades executed,
         assert_eq!(result3.status, OrderStatus::New);
 
         // The fourth order should be completely filled (3 units filled at 97.0, 5 units filled at 98.0, and 2 units filled at 99.0).
+        assert_eq!(order4.price, FixedPointArithmetic::from_f64(100.0));
+        assert_eq!(order4.quantity, FixedPointArithmetic::from_f64(0.0));
         assert_eq!(result4.trades.len(), 3); // 3 trades executed
         assert_eq!(result4.trades[0].quantity, FixedPointArithmetic::from_f64(3.0)); // 3 units filled
         assert_eq!(result4.trades[0].price, FixedPointArithmetic::from_f64(97.0)); // 3 units * 97.0 price
@@ -817,22 +859,30 @@ mod tests {
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
-        let result1 = order_book.process_order(order1);
-        let result2 = order_book.process_order(order2);
-        let result3 = order_book.process_order(order3);
-        let result4 = order_book.process_order(order4);
+        let (order1, result1) = order_book.process_order(order1);
+        let (order2, result2) = order_book.process_order(order2);
+        let (order3, result3) = order_book.process_order(order3);
+        let (order4, result4) = order_book.process_order(order4);
 
         // The first three orders should be added to the asks heap as they are limit sell orders.
+        assert_eq!(order1.price, FixedPointArithmetic::from_f64(99.0));
+        assert_eq!(order1.quantity, FixedPointArithmetic::from_f64(5.0));
         assert_eq!(result1.trades.len(), 0); // No trades executed
         assert_eq!(result1.status, OrderStatus::New);
 
+        assert_eq!(order2.price, FixedPointArithmetic::from_f64(98.0));
+        assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0));
         assert_eq!(result2.trades.len(), 0); // No trades executed
         assert_eq!(result2.status, OrderStatus::New);
 
+        assert_eq!(order3.price, FixedPointArithmetic::from_f64(98.0));
+        assert_eq!(order3.quantity, FixedPointArithmetic::from_f64(10.0));
         assert_eq!(result3.trades.len(), 0); // No trades executed
         assert_eq!(result3.status, OrderStatus::New);
 
         // The fourth order should be completely filled (5 units filled at 98.0 and 7 units filled at 99.0).
+        assert_eq!(order4.price, FixedPointArithmetic::from_f64(f64::MAX)); // Price is ignored for market orders
+        assert_eq!(order4.quantity, FixedPointArithmetic::from_f64(0.0));
         assert_eq!(result4.trades.len(), 2); // 2 trades executed
         assert_eq!(result4.trades[0].id, TradeId::default()); // Trade ID should be 1 for the first two trades
         assert_eq!(result4.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
