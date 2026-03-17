@@ -10,10 +10,10 @@ use std::sync::OnceLock;
 use core_affinity::CoreId;
 use std::time::Duration;
 use std::sync::Mutex;
-use execution_report::ExecutionReportEngine;
+use execution_report::{ExecutionReportEngine};
 use spsc::spsc_lock_free::RingBuffer;
 use types::{EntityId, OrderEvent, OrderResult, Trades};
-use fix::engine::{FixEngine, FixRawMsg};
+use fix::engine::{FixEngine, FixRawMsg, kill_fix_inbound_engine};
 use std::sync::Arc;
 
 
@@ -83,7 +83,6 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
 
         let engine = ExecutionReportEngine::new(er_rx, er_tx);
-        let engine_stop_handle = engine.stop_handle();
 
         let handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
@@ -165,8 +164,6 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
-
-        engine_stop_handle.stop();
         
         // Send a dummy message to unblock the engine if it's waiting
         er_inbound_tx_clone.push((OrderEvent {
@@ -214,7 +211,6 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
 
         let mut engine = OrderBookEngine::new(er_rx, er_tx);
-        let engine_stop_handle = engine.stop_handle();
 
         let handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
@@ -296,7 +292,6 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
 
-        engine_stop_handle.stop();
 
         // Send a dummy message to unblock the engine if it's waiting
         er_inbound_tx_clone.push(OrderEvent {
@@ -451,15 +446,13 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 
         // execution report engine thread
         let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
-        let er_stop_handle = execution_report_engine.stop_handle();
         let er_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 4 });
             execution_report_engine.run();
         });
 
         // Book engine thread
-        let mut order_book_engine = OrderBookEngine::new(ob_rx, ob_tx);
-        let ob_stop_handle = order_book_engine.stop_handle();
+        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, ob_tx);
         let ob_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 6 });
             order_book_engine.run();
@@ -529,10 +522,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         }
 
         // Stop all engines
-        ob_stop_handle.stop();
-        er_stop_handle.stop();
-
-        net_to_fix_tx.send(FixRawMsg::default()).unwrap(); // Send dummy message to unblock FIX engine if it's waiting
+        kill_fix_inbound_engine(&net_to_fix_tx);
 
         ob_handle.join().unwrap();
         er_handle.join().unwrap();

@@ -7,15 +7,8 @@ use fix::engine::{FixEngine, FixRawMsg};
 use memory;
 use execution_report::{ExecutionReportEngine};
 use std::net::TcpListener;
-use types::StopHandle;
 
 const RB_SIZE: usize = 1024;
-
-struct StopHandles {
-    stop_fix: Option<StopHandle>,
-    stop_ob: Option<StopHandle>,
-    stop_er: Option<StopHandle>,
-}
 
 struct ThreadHandles {
     fix_thread: Option<std::thread::JoinHandle<()>>,
@@ -24,7 +17,6 @@ struct ThreadHandles {
 }
 
 struct MarketSimulator {
-    stop_handles: Arc<Mutex<StopHandles>>,
     thread_handles: Arc<Mutex<ThreadHandles>>,
     entry_point: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
 }
@@ -47,7 +39,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 
     // execution report engine thread
     let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
-    let er_stop_handle = execution_report_engine.stop_handle();
 
     let _er_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: 2 });
@@ -55,13 +46,11 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     });
 
     {
-        market_simulator.stop_handles.lock().unwrap().stop_er = Some(er_stop_handle);
         market_simulator.thread_handles.lock().unwrap().er_thread = Some(_er_thread);
     }
 
     // Book engine thread
     let mut order_book_engine = OrderBookEngine::new(ob_rx, ob_tx);
-    let ob_stop_handle = order_book_engine.stop_handle();
 
     let _ob_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: 4 });
@@ -69,7 +58,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     });
 
     {
-        market_simulator.stop_handles.lock().unwrap().stop_ob = Some(ob_stop_handle);
         market_simulator.thread_handles.lock().unwrap().ob_thread = Some(_ob_thread);
     }
 
@@ -110,17 +98,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 
 fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     let market_simulator = market_simulator.lock().unwrap();
-    let stop_handles = &mut market_simulator.stop_handles.lock().unwrap();
 
-    if let Some(stop_handle) = stop_handles.stop_fix.take() {
-        stop_handle.stop();
-    }
-    if let Some(stop_handle) = stop_handles.stop_ob.take() {
-        stop_handle.stop();
-    }
-    if let Some(stop_handle) = stop_handles.stop_er.take() {
-        stop_handle.stop();
-    }
 
     // Send a shutdown message to the FIX engine to unblock it if it's waiting on the queue, in a real implementation you would want a more robust way to ensure the thread has stopped
     if let Some(entry_point) = &market_simulator.entry_point {
@@ -145,11 +123,6 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 fn main() {
 
     let market_simulator = Arc::new(Mutex::new(MarketSimulator {
-        stop_handles: Arc::new(Mutex::new(StopHandles {
-            stop_fix: None,
-            stop_ob: None,
-            stop_er: None,
-        })),
         thread_handles: Arc::new(Mutex::new(ThreadHandles {
             fix_thread: None,
             ob_thread: None,

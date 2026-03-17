@@ -11,6 +11,23 @@ use std::cell::UnsafeCell;
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
+pub fn kill_fix_inbound_engine<const N: usize>(net_to_fix_tx: &crossbeam::channel::Sender<FixRawMsg<N>>) {
+    // Send a special shutdown message to the FIX engine's inbound queue
+    // The FIX engine should be designed to recognize this message and exit its run loop
+    // For example, we could send a message with a specific tag or an empty message
+    // Here we send an empty message as a simple shutdown signal
+    let shutdown_msg = FixRawMsg::default();
+    net_to_fix_tx.send(shutdown_msg).unwrap();
+}
+
+pub fn kill_fix_outbound_engine<const N: usize>(er_to_fix_tx: &Producer<(EntityId, FixRawMsg<N>), N>) {
+    // Send a special shutdown message to the FIX engine's outbound queue
+    // The FIX engine should be designed to recognize this message and exit its run loop
+    // Here we send a message with an empty EntityId as a simple shutdown signal
+    let shutdown_msg = (EntityId::from_ascii(""), FixRawMsg::default());
+    er_to_fix_tx.push(shutdown_msg).unwrap();
+}
+
 /// A simple FIX engine that reads raw FIX messages from an input queue, parses them, and pushes structured order events to an output queue. This is a very basic implementation that only handles New Order Single messages and extracts a few fields for demonstration purposes.
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -302,17 +319,17 @@ mod tests {
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         // Outbound : order book -> FIX -> net
-        let mut ob_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
+        let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
 
         std::thread::scope(|scope| {
 
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
-            let (ob_to_fix_tx, ob_to_fix_rx) = ob_to_fix.split();
+            let (er_to_fix_tx, er_to_fix_rx) = er_to_fix.split();
 
             let handle = FixEngine::new(
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
-                ob_to_fix_rx,
+                er_to_fix_rx,
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
@@ -357,9 +374,8 @@ mod tests {
             assert_eq!(order_event.side, Side::Buy);
 
             // Stop the FIX engine thread
-            net_to_fix_tx.send(FixRawMsg::default()).expect("Failed to push shutdown message");
-            std::thread::sleep(std::time::Duration::from_millis(200)); // Give the engine some time to process the shutdown signal, in a real implementation you would want a more robust way to ensure the thread has stopped
-            ob_to_fix_tx.push((EntityId::from_ascii(""), FixRawMsg::default())).expect("Failed to push shutdown message");
+            kill_fix_inbound_engine(&net_to_fix_tx);
+            kill_fix_outbound_engine(&er_to_fix_tx);
 
             // Wait a bit to ensure the FIX engine has stopped before ending the test, in a real implementation you would want a more robust way to ensure the thread has stopped
             inbound_handle.join().expect("Failed to join inbound FIX engine thread");
@@ -371,16 +387,16 @@ mod tests {
     fn test_fix_engine_cancel_request_with_orig_cl_ord_id() {
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
-        let mut ob_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
+        let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
 
         std::thread::scope(|scope| {
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
-            let (ob_to_fix_tx, ob_to_fix_rx) = ob_to_fix.split();
+            let (er_to_fix_tx, er_to_fix_rx) = er_to_fix.split();
 
             let handle = FixEngine::new(
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
-                ob_to_fix_rx,
+                er_to_fix_rx,
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
@@ -423,9 +439,8 @@ mod tests {
                 b"ORD-12345"
             );
 
-            net_to_fix_tx.send(FixRawMsg::default()).expect("Failed to push shutdown message");
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            ob_to_fix_tx.push((EntityId::from_ascii(""), FixRawMsg::default())).expect("Failed to push shutdown message");
+            kill_fix_inbound_engine(&net_to_fix_tx);
+            kill_fix_outbound_engine(&er_to_fix_tx);
 
             inbound_handle.join().expect("Failed to join inbound FIX engine thread");
             outbound_handle.join().expect("Failed to join outbound FIX engine thread");

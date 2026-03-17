@@ -1,10 +1,15 @@
-use types::{EntityId, OrderEvent, OrderResult, StopHandle};
+use types::{EntityId, OrderEvent, OrderResult};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use fix::{engine::FixRawMsg, tags::{exec_type_code_set, msg_types, ord_status_code_set, side_code_set, tags::{self}}};
 use utils::{field_str, number_to_bytes};
 use std::sync::Arc;
 use types::FixedPointArithmetic;
+
+pub fn kill_execution_report_engine<const N: usize>(producer: &Producer<'_, (OrderEvent, OrderResult), N>) {
+    // Send a dummy message with an empty sender_id to signal the engine to shut down
+    let _ = producer.push((OrderEvent::default(), OrderResult::default()));
+}
 
 pub struct ExecutionReportEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
@@ -18,7 +23,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     }
 
     pub fn run(&self) {
-        loop {
+        while !self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
                 if exec_report.0.sender_id == EntityId::from_ascii("") {
                     self.fifo_out.push((EntityId::default(), FixRawMsg::default())).ok(); // Push a dummy message to unblock any waiting consumers
@@ -26,10 +31,6 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
                 } else {
                     self.process_execution_report(&exec_report);
                 }
-            }
-
-            if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
-                break;
             }
         }
         println!("Execution report engine shutting down gracefully");
@@ -182,13 +183,6 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         report.data[*cursor] = fix::parser::SOH; // SOH
         *cursor += 1;
     }
-
-    pub fn stop_handle(&self) -> StopHandle{
-        StopHandle {
-            shutdown: Arc::clone(&self.shutdown),
-            thread: None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -208,8 +202,6 @@ mod tests {
         let engine = ExecutionReportEngine::new(fifo_in_rx, fifo_out_tx);
         
         std::thread::scope(|s| {
-
-            let stop_handle = engine.stop_handle();
 
             let handle = s.spawn(move || {
                 engine.run();
@@ -366,8 +358,7 @@ mod tests {
             assert_eq!(ord_status_field.value, ord_status_code_set::NEW);
     
             // Stop the engine
-            stop_handle.stop();
-            let _ = fifo_in_tx.push((OrderEvent::default(), OrderResult::default()));
+            kill_execution_report_engine(&fifo_in_tx);
             let _ = fifo_out_rx.pop(); // Purge the dummy message pushed to unblock the engine
     
             handle.join().unwrap();

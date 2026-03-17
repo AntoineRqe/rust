@@ -1,13 +1,23 @@
 use std::collections::{HashMap, VecDeque};
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 use types::{
-    FixedPointArithmetic, OrderEvent, OrderId, OrderResult, OrderStatus, OrderType, Side, StopHandle, Trade, TradeId, Trades, EntityId,
+    FixedPointArithmetic, OrderEvent, OrderId, OrderResult, OrderStatus, OrderType, Side, Trade, TradeId, Trades, EntityId,
 };
 
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
+
+
+pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent, N>) {
+    let order_event = OrderEvent {
+        sender_id: EntityId::from_ascii(""), // An empty sender_id is used as a signal to the order book engine to shut down
+        ..Default::default() // Fill the rest of the fields with default values
+    };
+
+    fix_to_ob_tx.push(order_event).unwrap();  
+} 
 
 pub struct OrderBookEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, OrderEvent, N>,
@@ -27,7 +37,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     }
 
     pub fn run(&mut self) {
-        loop {
+        while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(event) = self.fifo_in.pop() {
 
                 if event.sender_id == EntityId::from_ascii("") {
@@ -42,20 +52,9 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                     }
                 }
             }
-
-            if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
-                break;
-            }
         }
 
         println!("Order book engine shutting down gracefully");
-    }
-
-    pub fn stop_handle(&mut self) -> StopHandle {
-        StopHandle {
-            shutdown: Arc::clone(&self.shutdown),
-            thread: None, // We can set this to Some(handle) if we want to join the thread later
-        }
     }
 }
 
@@ -965,10 +964,8 @@ mod tests {
                 inbound_consumer,
                 outbound_producer,
             );
-
-            let stop_handle = engine.stop_handle();
             
-            let handle = s.spawn(move || {
+            let ob_handle = s.spawn(move || {
                 engine.run();
             });
 
@@ -990,12 +987,7 @@ mod tests {
             inbound_producer.push(order).unwrap();
             // Give some time for the engine to process the order
             std::thread::sleep(std::time::Duration::from_millis(100));
-
-            let (order_event, order_result) = loop {
-                if let Some((order_event, order_result)) = outbound_consumer.try_pop() {
-                    break (order_event, order_result);
-                }
-            };
+            let (order_event, order_result) = outbound_consumer.pop().unwrap();
 
             assert!(order_event.price == FixedPointArithmetic::from_f64(100.0));
             assert!(order_result.trades.len() == 0);
@@ -1020,24 +1012,15 @@ mod tests {
             inbound_producer.push(order2).unwrap();
             // Give some time for the engine to process the order
             std::thread::sleep(std::time::Duration::from_millis(100));
-
-            let (order_event2, order_result2) = loop {
-                if let Some((order_event, order_result)) = outbound_consumer.try_pop() {
-                    break (order_event, order_result);
-                }
-            };
-
+            let (order_event2, order_result2) = outbound_consumer.pop().unwrap();
+            
             assert!(order_event2.price == FixedPointArithmetic::from_f64(100.0));
             assert!(order_result2.trades.len() == 1); // One trade should be executed for the matching orders
             assert!(order_result2.status == OrderStatus::Filled); // Both orders should be filled
 
-
-            stop_handle.stop();
             // Send a dummy order to unblock the engine if it's waiting for orders
-            inbound_producer.push(OrderEvent::default()).unwrap();
-
-            handle.join().unwrap();
+            kill_order_book_engine(&inbound_producer);
+            ob_handle.join().expect("Engine thread panicked");
         });
-            // We can add tests for the engine here, but since it relies on the order book, we can focus on testing the order book functionality first.
     }
 }

@@ -4,7 +4,6 @@ use fix::engine::{FixRawMsg};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{unbounded};
-use types::StopHandle;
 
 pub struct FixServer<const N: usize> {
     fifo_in: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
@@ -30,13 +29,6 @@ impl <'a, const N: usize> FixServer<N> {
             std::thread::spawn(move || {
                 Self::handle_client(stream, queue, shutdown);
             });
-        }
-    }
-
-    pub fn handle_shutdown(&self) -> StopHandle {
-        StopHandle { 
-            shutdown: Arc::clone(&self.shutdown),
-            thread: None,
         }
     }
 
