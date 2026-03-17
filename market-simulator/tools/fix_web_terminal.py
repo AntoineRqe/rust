@@ -404,6 +404,7 @@ HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>FIX 4.2 Terminal</title>
 <style>
   :root {
@@ -411,132 +412,212 @@ HTML = r"""<!DOCTYPE html>
     --green:#00e676; --red:#ff3d57; --blue:#2979ff; --gold:#ffd740;
     --teal:#00bcd4; --text:#e8ecf4; --muted:#5a6070;
     --bid-bg:#0a1a10; --ask-bg:#1a0a0e; --bid-bar:#003a18; --ask-bar:#3a0a10;
+    --tab-h:42px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
   body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
-       font-size:13px;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+       font-size:13px;display:flex;flex-direction:column}
+
+  /* ── topbar ── */
   #topbar{background:var(--panel);height:42px;display:flex;align-items:center;
-          padding:0 18px;justify-content:space-between;flex-shrink:0;
-          border-bottom:1px solid var(--border)}
-  #topbar h1{color:var(--green);font-size:13px;letter-spacing:.05em}
-  #status-dot{font-size:13px;color:var(--red)}
+          padding:0 14px;justify-content:space-between;flex-shrink:0;
+          border-bottom:1px solid var(--border);gap:8px}
+  #topbar h1{color:var(--green);font-size:12px;letter-spacing:.04em;white-space:nowrap;
+             overflow:hidden;text-overflow:ellipsis}
+  #status-dot{font-size:12px;color:var(--red);white-space:nowrap;flex-shrink:0}
   #status-dot.on{color:var(--green)}
-  #body{display:flex;flex:1;overflow:hidden}
-  .col{display:flex;flex-direction:column;overflow:hidden}
-  #col-left{width:300px;min-width:260px;background:var(--panel);
-             border-right:1px solid var(--border);flex-shrink:0;overflow-y:auto}
-  #col-book{width:300px;min-width:260px;background:var(--panel2);
-             border-right:1px solid var(--border);flex-shrink:0;overflow:hidden;
-             display:flex;flex-direction:column}
+
+  /* ── mobile tab bar (hidden on desktop) ── */
+  #tabbar{display:none;background:var(--panel);border-bottom:1px solid var(--border);
+          flex-shrink:0}
+  #tabbar button{flex:1;padding:10px 0;background:transparent;color:var(--muted);
+                 border:none;border-bottom:2px solid transparent;cursor:pointer;
+                 font-family:'Courier New',monospace;font-size:11px;font-weight:bold}
+  #tabbar button.active{color:var(--green);border-bottom-color:var(--green)}
+
+  /* ── main layout ── */
+  #body{display:flex;flex:1;overflow:hidden;min-height:0}
+
+  /* ── panels ── */
+  .panel{display:flex;flex-direction:column;overflow:hidden;min-height:0}
+  #col-left{width:290px;min-width:260px;background:var(--panel);
+            border-right:1px solid var(--border);flex-shrink:0;overflow-y:auto}
+  #col-book{width:280px;min-width:240px;background:var(--panel2);
+            border-right:1px solid var(--border);flex-shrink:0;
+            display:flex;flex-direction:column;overflow:hidden}
   #col-log{flex:1;background:var(--bg);display:flex;flex-direction:column;min-width:0}
+  #col-chart{width:260px;min-width:220px;background:var(--panel2);
+             border-left:1px solid var(--border);flex-shrink:0;
+             display:flex;flex-direction:column}
+
+  /* ── form elements ── */
   .stitle{font-size:9px;letter-spacing:.12em;color:var(--muted);
-          padding:14px 16px 4px;text-transform:uppercase}
-  .ssep{height:1px;background:var(--border);margin:0 16px 8px}
-  .frow{display:flex;align-items:center;padding:3px 16px}
-  .frow label{color:var(--muted);width:110px;flex-shrink:0;font-size:11px}
+          padding:12px 14px 4px;text-transform:uppercase}
+  .ssep{height:1px;background:var(--border);margin:0 14px 6px}
+  .frow{display:flex;align-items:center;padding:3px 14px}
+  .frow label{color:var(--muted);width:100px;flex-shrink:0;font-size:11px}
   .frow input{background:#1a1e2a;border:1px solid var(--border);color:var(--text);
               font-family:'Courier New',monospace;font-size:11px;
-              padding:5px 6px;flex:1;outline:none}
+              padding:5px 6px;flex:1;outline:none;min-width:0}
   .frow input:focus{border-color:var(--blue)}
   .frow input:disabled{opacity:.4;cursor:not-allowed}
   button{font-family:'Courier New',monospace;cursor:pointer;border:none;outline:none}
   button:disabled{opacity:.4;cursor:not-allowed}
-  .btn{display:block;width:calc(100% - 32px);margin:4px 16px;
-       padding:8px 0;font-size:12px;font-weight:bold;letter-spacing:.04em}
+  .btn{display:block;width:calc(100% - 28px);margin:4px 14px;
+       padding:9px 0;font-size:12px;font-weight:bold;letter-spacing:.04em;text-align:center}
   .btn-connect{background:var(--blue);color:var(--text)}
-  .btn-send{background:var(--green);color:#0d0f14;font-size:14px;
-            padding:10px 0;margin-top:12px}
+  .btn-send{background:var(--green);color:#0d0f14;font-size:14px;padding:11px 0;margin-top:10px}
   .btn-send.sell{background:var(--red)}
-  .side-row{display:flex;align-items:center;padding:6px 16px}
-  .side-row label{color:var(--muted);width:110px;flex-shrink:0;font-size:11px}
-  .sbtn{padding:5px 0;width:80px;font-size:11px;font-weight:bold}
+  .side-row{display:flex;align-items:center;padding:6px 14px}
+  .side-row label{color:var(--muted);width:100px;flex-shrink:0;font-size:11px}
+  .sbtn{padding:6px 0;width:76px;font-size:11px;font-weight:bold}
   #btn-buy{background:var(--green);color:#0d0f14;margin-right:6px}
   #btn-sell{background:#1a1e2a;color:var(--muted)}
-  .md-btn{display:block;width:calc(100% - 32px);margin:2px 16px;
+  .md-btn{display:block;width:calc(100% - 28px);margin:2px 14px;
           padding:6px 10px;text-align:left;background:#0e1520;
           color:var(--teal);font-size:11px;font-weight:bold}
-  .footer-row{display:flex;justify-content:space-between;padding:10px 16px 12px}
+  .footer-row{display:flex;justify-content:space-between;padding:8px 14px 10px}
   .ghost{background:transparent;color:var(--muted);font-size:10px;
          font-family:'Courier New',monospace;padding:3px 6px}
   .ghost:hover{color:var(--text)}
-  /* book */
-  #book-hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 10px 4px}
+
+  /* ── order book ── */
+  #book-hdr{display:flex;justify-content:space-between;align-items:center;padding:8px 10px 4px}
   #book-sym{color:var(--teal);font-size:11px;font-weight:bold}
   #book-last{color:var(--gold);font-size:10px}
-  .bk-level{display:flex;align-items:center;height:22px;margin:1px 8px;
+  .bk-level{display:flex;align-items:center;height:22px;margin:1px 6px;
              position:relative;overflow:hidden}
   .bk-level .bar{position:absolute;top:0;bottom:0;left:0}
   .bid-lv{background:var(--bid-bg)}.bid-lv .bar{background:var(--bid-bar)}
   .ask-lv{background:var(--ask-bg)}.ask-lv .bar{background:var(--ask-bar)}
   .lv-qty{flex:1;text-align:right;font-size:11px;padding-right:6px;position:relative;z-index:1}
-  .lv-px{width:90px;text-align:right;font-size:11px;font-weight:bold;
+  .lv-px{width:86px;text-align:right;font-size:11px;font-weight:bold;
           padding-right:4px;position:relative;z-index:1}
   .bid-lv .lv-px,.bid-lv .lv-qty{color:var(--green)}
   .ask-lv .lv-px,.ask-lv .lv-qty{color:var(--red)}
-  #spread-row{height:26px;display:flex;align-items:center;justify-content:center;
+  #spread-row{height:24px;display:flex;align-items:center;justify-content:center;
               font-size:10px;color:var(--muted);
               border-top:1px solid var(--border);border-bottom:1px solid var(--border);
               margin:2px 0;flex-shrink:0}
   #trades-hdr{font-size:9px;color:var(--muted);letter-spacing:.1em;
-              padding:6px 10px 2px;flex-shrink:0}
-  #trades-list{flex:1;overflow-y:auto;padding:0 8px 8px}
+              padding:5px 10px 2px;flex-shrink:0}
+  #trades-list{flex:1;overflow-y:auto;padding:0 6px 6px;min-height:0}
   .tr-row{display:flex;gap:6px;font-size:11px;line-height:1.8}
   .tr-row .td{width:14px;font-weight:bold}
-  .tr-row .tp{width:90px;text-align:right;font-weight:bold}
-  .tr-row .tq{width:70px;text-align:right;color:var(--muted)}
+  .tr-row .tp{width:86px;text-align:right;font-weight:bold}
+  .tr-row .tq{width:66px;text-align:right;color:var(--muted)}
   .tr-row .tt{color:var(--muted);font-size:10px}
   .tr-buy .td,.tr-buy .tp{color:var(--green)}
   .tr-sell .td,.tr-sell .tp{color:var(--red)}
-  /* log */
+
+  /* ── log ── */
   #log-hdr{display:flex;justify-content:space-between;align-items:center;
-           padding:10px 12px 4px;flex-shrink:0}
+           padding:8px 10px 4px;flex-shrink:0}
   #log-hdr span{font-size:9px;color:var(--muted);letter-spacing:.1em}
-  #log-box{flex:1;overflow-y:auto;padding:0 8px 8px;font-size:10px;background:#0a0c10}
+  #log-box{flex:1;overflow-y:auto;padding:0 8px 8px;font-size:10px;
+           background:#0a0c10;min-height:0}
   .le{margin-bottom:10px}
   .lts{color:var(--muted)}
   .llbl{display:block;margin-bottom:2px}
   .lbody{color:#9e9e9e;word-break:break-all;line-height:1.5}
   .tsend{color:var(--green)}.tfeed{color:var(--gold)}.tmd{color:var(--teal)}
   .terr{color:var(--red)}.tinfo{color:var(--blue)}
-  ::-webkit-scrollbar{width:4px}
-  ::-webkit-scrollbar-track{background:transparent}
-  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-  /* chart */
-  #col-chart{width:280px;min-width:220px;background:var(--panel2);
-             border-left:1px solid var(--border);flex-shrink:0;
-             display:flex;flex-direction:column}
+
+  /* ── chart ── */
   #chart-hdr{display:flex;justify-content:space-between;align-items:center;
-             padding:10px 12px 4px;flex-shrink:0}
+             padding:8px 10px 4px;flex-shrink:0}
   #chart-hdr span{font-size:9px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
-  #chart-wrap{flex:1;position:relative;overflow:hidden;padding:4px 8px 8px}
+  #chart-wrap{flex:1;position:relative;overflow:hidden;padding:4px 6px 6px;min-height:0}
   #price-canvas{display:block;width:100%;height:100%}
-  /* dialog */
-  #dlg-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
-           align-items:center;justify-content:center;z-index:100}
-  #dlg-box{background:var(--panel);padding:24px 28px;min-width:360px;
+
+  /* ── dialog ── */
+  #dlg-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);
+           align-items:center;justify-content:center;z-index:200;padding:16px}
+  #dlg-box{background:var(--panel);padding:20px 24px;width:100%;max-width:400px;
            border:1px solid var(--border)}
   #dlg-title{color:var(--teal);font-size:12px;font-weight:bold;
-             margin-bottom:16px;letter-spacing:.05em}
-  .dlg-row{display:flex;align-items:center;margin-bottom:8px}
-  .dlg-row label{color:var(--muted);width:130px;font-size:11px}
+             margin-bottom:14px;letter-spacing:.05em}
+  .dlg-row{display:flex;align-items:center;margin-bottom:8px;gap:8px}
+  .dlg-row label{color:var(--muted);width:120px;flex-shrink:0;font-size:11px}
   .dlg-row input,.dlg-row select{
     background:#1a1e2a;border:1px solid var(--border);color:var(--text);
     font-family:'Courier New',monospace;font-size:11px;
-    padding:5px 6px;flex:1;outline:none}
-  .dlg-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
-  .dlg-foot button{padding:7px 18px;font-family:'Courier New',monospace;
+    padding:5px 6px;flex:1;outline:none;min-width:0}
+  .dlg-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+  .dlg-foot button{padding:7px 16px;font-family:'Courier New',monospace;
                    cursor:pointer;border:none;font-size:11px}
+
+  /* ── scrollbars ── */
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+  /* ════════════════════════════════════════════
+     TABLET  768px – 1199px  →  2×2 grid
+  ════════════════════════════════════════════ */
+  @media (max-width:1199px) {
+    #body{flex-wrap:wrap}
+    #col-left {width:50%;min-width:0;border-right:none;border-bottom:1px solid var(--border);
+               max-height:55vh;overflow-y:auto;flex-shrink:0}
+    #col-book {width:50%;min-width:0;border-right:none;border-left:1px solid var(--border);
+               border-bottom:1px solid var(--border);max-height:55vh;flex-shrink:0}
+    #col-log  {width:60%;min-width:0;flex:none;height:calc(45vh - 42px)}
+    #col-chart{width:40%;min-width:0;border-left:1px solid var(--border);
+               height:calc(45vh - 42px)}
+    #col-book,#col-log,#col-chart{border-top:none}
+  }
+
+  /* ════════════════════════════════════════════
+     MOBILE  < 768px  →  single column + tabs
+  ════════════════════════════════════════════ */
+  @media (max-width:767px) {
+    #topbar h1{font-size:10px}
+    #tabbar{display:flex}
+    #body{flex-wrap:nowrap;flex-direction:column}
+
+    /* all panels fill the screen, shown/hidden via JS */
+    #col-left,#col-book,#col-log,#col-chart{
+      width:100%;min-width:0;height:100%;flex-shrink:0;
+      border:none;max-height:none;
+      display:none  /* hidden by default; JS shows active tab */
+    }
+    #col-left.active,#col-book.active,#col-log.active,#col-chart.active{
+      display:flex
+    }
+
+    /* bigger touch targets */
+    .btn{padding:12px 0;font-size:13px}
+    .btn-send{padding:14px 0;font-size:15px}
+    .frow input{font-size:13px;padding:7px 6px}
+    .md-btn{padding:10px 12px;font-size:12px}
+    .sbtn{padding:9px 0;font-size:13px}
+    #dlg-box{padding:16px}
+    .dlg-row{flex-direction:column;align-items:flex-start}
+    .dlg-row label{width:auto;margin-bottom:3px}
+    .dlg-row input,.dlg-row select{width:100%}
+  }
 </style>
 </head>
 <body>
+
 <div id="topbar">
-  <h1>&#x2B21; &nbsp;FIX 4.2 &nbsp;ORDER &amp; MARKET DATA TERMINAL</h1>
+  <h1>&#x2B21; FIX 4.2 &nbsp;ORDER &amp; MARKET DATA TERMINAL</h1>
   <span id="status-dot">&#9679; DISCONNECTED</span>
 </div>
+
+<!-- mobile tab bar -->
+<div id="tabbar">
+  <button onclick="showTab('col-left')"  id="tab-left"  class="active">ORDERS</button>
+  <button onclick="showTab('col-book')"  id="tab-book" >BOOK</button>
+  <button onclick="showTab('col-log')"   id="tab-log"  >LOG</button>
+  <button onclick="showTab('col-chart')" id="tab-chart">CHART</button>
+</div>
+
 <div id="body">
 
 <!-- LEFT -->
-<div id="col-left" class="col">
+<div id="col-left" class="panel active">
   <div class="stitle">CONNECTION</div><div class="ssep"></div>
   <div class="frow"><label>Host</label>        <input id="c-host"   value="127.0.0.1"></div>
   <div class="frow"><label>Port</label>        <input id="c-port"   value="9876"></div>
@@ -544,7 +625,7 @@ HTML = r"""<!DOCTYPE html>
   <div class="frow"><label>TargetCompID</label><input id="c-target" value="SERVER1"></div>
   <button id="btn-connect" class="btn btn-connect" onclick="toggleConnect()">&#x23FB; &nbsp;CONNECT</button>
 
-  <div class="stitle" style="margin-top:6px">ORDER ENTRY</div><div class="ssep"></div>
+  <div class="stitle" style="margin-top:8px">ORDER ENTRY</div><div class="ssep"></div>
   <div class="frow"><label>Symbol</label>     <input id="o-sym"   value="AAPL"></div>
   <div class="frow"><label>Quantity</label>   <input id="o-qty"   value="100"></div>
   <div class="frow"><label>Limit Price</label><input id="o-price" value="150.00"></div>
@@ -555,7 +636,7 @@ HTML = r"""<!DOCTYPE html>
   </div>
   <button id="btn-send" class="btn btn-send" onclick="sendOrder()" disabled>&#9654; &nbsp;BUY ORDER</button>
 
-  <div class="stitle" style="margin-top:10px">MARKET DATA</div><div class="ssep"></div>
+  <div class="stitle" style="margin-top:8px">MARKET DATA</div><div class="ssep"></div>
   <button class="md-btn" id="md-V" onclick="openDlg('V')" disabled>V &nbsp; Market Data Request</button>
   <button class="md-btn" id="md-W" onclick="openDlg('W')" disabled>W &nbsp; MD Snapshot Full Refresh</button>
   <button class="md-btn" id="md-X" onclick="openDlg('X')" disabled>X &nbsp; MD Incremental Refresh</button>
@@ -568,12 +649,12 @@ HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- BOOK -->
-<div id="col-book">
+<div id="col-book" class="panel">
   <div id="book-hdr">
     <span id="book-sym">ORDER BOOK &nbsp;&#8212;</span>
     <span id="book-last">last: &#8212;</span>
   </div>
-  <div style="height:1px;background:var(--border);margin:0 8px 4px"></div>
+  <div style="height:1px;background:var(--border);margin:0 6px 4px"></div>
   <div id="asks"></div>
   <div id="spread-row">spread: &#8212;</div>
   <div id="bids"></div>
@@ -582,16 +663,16 @@ HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- LOG -->
-<div id="col-log" class="col">
+<div id="col-log" class="panel">
   <div id="log-hdr">
     <span>MESSAGE LOG</span>
-    <button class="ghost" onclick="document.getElementById('log-box').innerHTML=''">CLEAR</button>
+    <button class="ghost" onclick="ge('log-box').innerHTML=''">CLEAR</button>
   </div>
   <div id="log-box"></div>
 </div>
 
 <!-- CHART -->
-<div id="col-chart">
+<div id="col-chart" class="panel">
   <div id="chart-hdr">
     <span>PRICE CHART</span>
     <button class="ghost" onclick="clearChart()">CLEAR</button>
@@ -600,7 +681,8 @@ HTML = r"""<!DOCTYPE html>
     <canvas id="price-canvas"></canvas>
   </div>
 </div>
-</div>
+
+</div><!-- #body -->
 
 <!-- DIALOG -->
 <div id="dlg-ov">
@@ -618,7 +700,6 @@ HTML = r"""<!DOCTYPE html>
 'use strict';
 let side = 'BUY', dlgType = null;
 const LEVELS = 8;
-let logCount = 0;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const ge = id => document.getElementById(id);
@@ -635,19 +716,28 @@ async function api(body) {
   } catch(e) { console.error('fetch failed', e); }
 }
 
-// ── polling — replaces SSE, no CORS, works on all browsers ───────────────────
-let lastLogIdx = 0;
+// ── mobile tabs ───────────────────────────────────────────────────────────────
+function showTab(id) {
+  ['col-left','col-book','col-log','col-chart'].forEach(c => {
+    ge(c).classList.toggle('active', c === id);
+  });
+  ['tab-left','tab-book','tab-log','tab-chart'].forEach(t => {
+    const col = t.replace('tab-','col-');
+    ge(t).classList.toggle('active', col === id);
+  });
+  // redraw chart if switching to chart tab
+  if (id === 'col-chart') setTimeout(drawChart, 50);
+}
 
+// ── polling ───────────────────────────────────────────────────────────────────
+let lastLogIdx = 0;
 async function poll() {
   try {
     const r = await fetch('/api/state?since=' + lastLogIdx);
     if (r.ok) {
       const d = await r.json();
       handleStatus(d.status);
-      if (d.book) {
-        console.log('book bids:', JSON.stringify(d.book.bids), 'asks:', JSON.stringify(d.book.asks));
-        renderBook(d.book);
-      }
+      if (d.book) renderBook(d.book);
       if (d.logs && d.logs.length) {
         d.logs.forEach(appendLog);
         lastLogIdx = d.log_idx;
@@ -660,8 +750,7 @@ poll();
 
 // ── connection ────────────────────────────────────────────────────────────────
 function toggleConnect() {
-  const btn = ge('btn-connect');
-  const connected = btn.dataset.connected === '1';
+  const connected = ge('btn-connect').dataset.connected === '1';
   if (!connected) {
     api({ action:'connect',
           host:   ge('c-host').value.trim(),
@@ -674,8 +763,7 @@ function toggleConnect() {
 }
 
 function handleStatus(connected) {
-  const dot = ge('status-dot');
-  const btn = ge('btn-connect');
+  const dot = ge('status-dot'), btn = ge('btn-connect');
   btn.dataset.connected = connected ? '1' : '0';
   if (connected) {
     dot.textContent = '● CONNECTED'; dot.className = 'on';
@@ -776,7 +864,6 @@ function appendLog(entry) {
     <span class="llbl t${esc(entry.tag)}">${esc(entry.label)}</span>
     <div class="lbody">${esc(entry.body)}</div>`;
   box.appendChild(el);
-  // keep at most 200 entries in DOM
   while (box.children.length > 200) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 }
@@ -800,9 +887,9 @@ function renderBook(d) {
       <span class="tq">${Math.round(qty).toLocaleString()}</span>
       <span class="tt">${esc(ts)}</span>
     </div>`).join('');
-  // update chart with latest trades
   if (d.trades && d.trades.length) updateChart(d.trades);
 }
+
 function renderLevels(id, levels, cls, maxQ) {
   while(levels.length < LEVELS) levels.push(null);
   ge(id).innerHTML = levels.map(row => {
@@ -817,31 +904,20 @@ function renderLevels(id, levels, cls, maxQ) {
 
 // ── price chart ───────────────────────────────────────────────────────────────
 const MAX_CHART_PTS = 200;
-let chartPts = [];   // [{price, qty, side, ts}]
-let lastTradeCount = 0;
+let chartPts = [], lastTradeCount = 0;
 
-function clearChart() {
-  chartPts = [];
-  lastTradeCount = 0;
-  drawChart();
-}
+function clearChart() { chartPts = []; lastTradeCount = 0; drawChart(); }
 
 function updateChart(trades) {
-  // trades from server are newest-first; we want oldest-first for the chart
-  // only append genuinely new points (compare by count)
   if (trades.length === lastTradeCount) return;
-  // New trades appeared — diff from the end
   const newCount = trades.length - lastTradeCount;
   if (newCount > 0 && lastTradeCount > 0) {
-    // server list is newest-first, so new arrivals are at index 0..newCount-1
-    const incoming = trades.slice(0, newCount).reverse();
-    incoming.forEach(([px, qty, side, ts]) => {
-      chartPts.push({price: parseFloat(px), qty, side, ts});
+    trades.slice(0, newCount).reverse().forEach(([px,,s,ts]) => {
+      chartPts.push({price:parseFloat(px), s, ts});
     });
   } else if (lastTradeCount === 0) {
-    // first load — add all, oldest first
-    [...trades].reverse().forEach(([px, qty, side, ts]) => {
-      chartPts.push({price: parseFloat(px), qty, side, ts});
+    [...trades].reverse().forEach(([px,,s,ts]) => {
+      chartPts.push({price:parseFloat(px), s, ts});
     });
   }
   lastTradeCount = trades.length;
@@ -850,126 +926,76 @@ function updateChart(trades) {
 }
 
 function drawChart() {
-  const wrap   = ge('chart-wrap');
-  const canvas = ge('price-canvas');
-  const dpr    = window.devicePixelRatio || 1;
-  const W      = wrap.clientWidth  || 260;
-  const H      = wrap.clientHeight || 300;
-  canvas.width  = W * dpr;
-  canvas.height = H * dpr;
-  canvas.style.width  = W + 'px';
-  canvas.style.height = H + 'px';
+  const wrap = ge('chart-wrap'), canvas = ge('price-canvas');
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth || 240, H = wrap.clientHeight || 300;
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  canvas.style.width = W+'px'; canvas.style.height = H+'px';
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
-
-  // background
   ctx.fillStyle = '#0a0c10';
   ctx.fillRect(0, 0, W, H);
-
   if (chartPts.length < 2) {
-    ctx.fillStyle = '#5a6070';
-    ctx.font = '10px Courier New';
-    ctx.textAlign = 'center';
-    ctx.fillText('waiting for trades…', W/2, H/2);
-    return;
+    ctx.fillStyle = '#5a6070'; ctx.font = '10px Courier New'; ctx.textAlign = 'center';
+    ctx.fillText('waiting for trades…', W/2, H/2); return;
   }
-
-  const PAD_L = 52, PAD_R = 8, PAD_T = 14, PAD_B = 28;
-  const cW = W - PAD_L - PAD_R;
-  const cH = H - PAD_T - PAD_B;
-
-  const prices = chartPts.map(p => p.price);
-  let minP = Math.min(...prices), maxP = Math.max(...prices);
-  // ensure some vertical range so flat lines don't sit on the axis
-  if (maxP === minP) { minP -= 0.5; maxP += 0.5; }
-  const range = maxP - minP;
-  // add 10% padding top/bottom
-  const lo = minP - range * 0.1, hi = maxP + range * 0.1;
-
-  const xOf = i => PAD_L + (i / (chartPts.length - 1)) * cW;
-  const yOf = p => PAD_T + (1 - (p - lo) / (hi - lo)) * cH;
-
-  // ── grid lines ──
-  ctx.strokeStyle = '#1e2330';
-  ctx.lineWidth   = 1;
-  const nGrid = 4;
-  for (let i = 0; i <= nGrid; i++) {
-    const p = lo + (hi - lo) * (i / nGrid);
-    const y = yOf(p);
-    ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
-    // price label
-    ctx.fillStyle = '#5a6070';
-    ctx.font = '9px Courier New';
-    ctx.textAlign = 'right';
-    ctx.fillText(p.toFixed(2), PAD_L - 4, y + 3);
+  const PAD_L=52, PAD_R=8, PAD_T=14, PAD_B=28;
+  const cW=W-PAD_L-PAD_R, cH=H-PAD_T-PAD_B;
+  const prices = chartPts.map(p=>p.price);
+  let minP=Math.min(...prices), maxP=Math.max(...prices);
+  if (maxP===minP){minP-=0.5;maxP+=0.5;}
+  const range=maxP-minP, lo=minP-range*.1, hi=maxP+range*.1;
+  const xOf = i => PAD_L+(i/(chartPts.length-1))*cW;
+  const yOf = p => PAD_T+(1-(p-lo)/(hi-lo))*cH;
+  // grid
+  ctx.strokeStyle='#1e2330'; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const p=lo+(hi-lo)*(i/4), y=yOf(p);
+    ctx.beginPath(); ctx.moveTo(PAD_L,y); ctx.lineTo(W-PAD_R,y); ctx.stroke();
+    ctx.fillStyle='#5a6070'; ctx.font='9px Courier New'; ctx.textAlign='right';
+    ctx.fillText(p.toFixed(2),PAD_L-4,y+3);
   }
-
-  // ── area fill under the line ──
-  const grad = ctx.createLinearGradient(0, PAD_T, 0, PAD_T + cH);
-  grad.addColorStop(0,   'rgba(0,230,118,0.18)');
-  grad.addColorStop(1,   'rgba(0,230,118,0.00)');
-  ctx.beginPath();
-  ctx.moveTo(xOf(0), yOf(chartPts[0].price));
-  chartPts.forEach((pt, i) => { if (i > 0) ctx.lineTo(xOf(i), yOf(pt.price)); });
-  ctx.lineTo(xOf(chartPts.length - 1), PAD_T + cH);
-  ctx.lineTo(xOf(0), PAD_T + cH);
-  ctx.closePath();
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // ── price line ──
-  ctx.beginPath();
-  ctx.strokeStyle = '#00e676';
-  ctx.lineWidth   = 1.5;
-  ctx.lineJoin    = 'round';
-  chartPts.forEach((pt, i) => {
-    if (i === 0) ctx.moveTo(xOf(i), yOf(pt.price));
-    else         ctx.lineTo(xOf(i), yOf(pt.price));
-  });
+  // area
+  const grad=ctx.createLinearGradient(0,PAD_T,0,PAD_T+cH);
+  grad.addColorStop(0,'rgba(0,230,118,.18)'); grad.addColorStop(1,'rgba(0,230,118,0)');
+  ctx.beginPath(); ctx.moveTo(xOf(0),yOf(chartPts[0].price));
+  chartPts.forEach((pt,i)=>{if(i>0)ctx.lineTo(xOf(i),yOf(pt.price));});
+  ctx.lineTo(xOf(chartPts.length-1),PAD_T+cH); ctx.lineTo(xOf(0),PAD_T+cH);
+  ctx.closePath(); ctx.fillStyle=grad; ctx.fill();
+  // line
+  ctx.beginPath(); ctx.strokeStyle='#00e676'; ctx.lineWidth=1.5; ctx.lineJoin='round';
+  chartPts.forEach((pt,i)=>{i===0?ctx.moveTo(xOf(i),yOf(pt.price)):ctx.lineTo(xOf(i),yOf(pt.price));});
   ctx.stroke();
-
-  // ── trade dots ──
-  chartPts.forEach((pt, i) => {
-    const x = xOf(i), y = yOf(pt.price);
-    ctx.beginPath();
-    ctx.arc(x, y, 3, 0, Math.PI * 2);
-    ctx.fillStyle = pt.side === 'B' ? '#00e676' : '#ff3d57';
-    ctx.fill();
+  // dots
+  chartPts.forEach((pt,i)=>{
+    ctx.beginPath(); ctx.arc(xOf(i),yOf(pt.price),3,0,Math.PI*2);
+    ctx.fillStyle=pt.s==='B'?'#00e676':'#ff3d57'; ctx.fill();
   });
-
-  // ── last price line + label ──
-  const lastPt = chartPts[chartPts.length - 1];
-  const lastY  = yOf(lastPt.price);
-  ctx.setLineDash([3, 3]);
-  ctx.strokeStyle = '#ffd740';
-  ctx.lineWidth   = 1;
-  ctx.beginPath(); ctx.moveTo(PAD_L, lastY); ctx.lineTo(W - PAD_R, lastY); ctx.stroke();
+  // last price
+  const last=chartPts[chartPts.length-1], ly=yOf(last.price);
+  ctx.setLineDash([3,3]); ctx.strokeStyle='#ffd740'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(PAD_L,ly); ctx.lineTo(W-PAD_R,ly); ctx.stroke();
   ctx.setLineDash([]);
-  // label box
-  const lbl = lastPt.price.toFixed(4);
-  ctx.font = 'bold 9px Courier New';
-  const tw  = ctx.measureText(lbl).width + 8;
-  ctx.fillStyle = '#ffd740';
-  ctx.fillRect(PAD_L - tw - 2, lastY - 7, tw, 14);
-  ctx.fillStyle = '#0d0f14';
-  ctx.textAlign = 'right';
-  ctx.fillText(lbl, PAD_L - 5, lastY + 4);
-
-  // ── x-axis timestamps (first, mid, last) ──
-  ctx.fillStyle = '#5a6070';
-  ctx.font = '8px Courier New';
-  ctx.textAlign = 'center';
-  [[0, PAD_L], [Math.floor((chartPts.length-1)/2), W/2], [chartPts.length-1, W-PAD_R]].forEach(([idx, x]) => {
-    if (chartPts[idx]) ctx.fillText(chartPts[idx].ts, x, H - 8);
-  });
+  const lbl=last.price.toFixed(4);
+  ctx.font='bold 9px Courier New';
+  const tw=ctx.measureText(lbl).width+8;
+  ctx.fillStyle='#ffd740';
+  ctx.fillRect(PAD_L-tw-2,ly-7,tw,14);
+  ctx.fillStyle='#0d0f14'; ctx.textAlign='right';
+  ctx.fillText(lbl,PAD_L-5,ly+4);
+  // x timestamps
+  ctx.fillStyle='#5a6070'; ctx.font='8px Courier New'; ctx.textAlign='center';
+  [[0,PAD_L],[Math.floor((chartPts.length-1)/2),W/2],[chartPts.length-1,W-PAD_R]]
+    .forEach(([idx,x])=>{ if(chartPts[idx]) ctx.fillText(chartPts[idx].ts,x,H-8); });
 }
 
-// initial draw (empty state)
 window.addEventListener('load', drawChart);
 window.addEventListener('resize', drawChart);
 </script>
 </body></html>
 """
+
+
 
 
 
@@ -1202,7 +1228,7 @@ def generate_self_signed_cert(cert_file: str, key_file: str):
 
 def main():
     ap = argparse.ArgumentParser(description="FIX 4.2 Web Terminal")
-    ap.add_argument("--http-port", type=int, default=8080,   help="HTTP/HTTPS port (default: 8080)")
+    ap.add_argument("--http-port", type=int, default=7654,   help="HTTP/HTTPS port (default: 7654)")
     ap.add_argument("--fix-host",  default="127.0.0.1",      help="FIX server host")
     ap.add_argument("--fix-port",  type=int, default=9876,   help="FIX server port")
     ap.add_argument("--password",  default="",               help="Password for browser login (recommended when exposed to internet)")
@@ -1226,7 +1252,13 @@ def main():
     fix_conn.config["host"] = args.fix_host
     fix_conn.config["port"] = args.fix_port
 
-    server = ThreadingHTTPServer(("0.0.0.0", args.http_port), Handler)
+    # "::" listens on all interfaces for both IPv4 and IPv6
+    # On Linux this covers both; on Windows you may need separate sockets
+    try:
+        server = ThreadingHTTPServer(("::", args.http_port), Handler)
+    except OSError:
+        # Fall back to IPv4-only if IPv6 not available
+        server = ThreadingHTTPServer(("0.0.0.0", args.http_port), Handler)
     server.fix_conn      = fix_conn
     server.book          = book
     server.store         = store
@@ -1267,9 +1299,12 @@ def main():
         print(f"  TLS            →  disabled — add --https before exposing to internet!")
     print()
     print(f"  To access from internet:")
-    print(f"    1. Find your public IP:  curl ifconfig.me")
-    print(f"    2. Forward port {args.http_port} on your router to this machine")
-    print(f"    3. Open {scheme}://<your-public-ip>:{args.http_port}")
+    print(f"    1. Get your public IPs:")
+    print(f"         IPv4:  curl -4 ifconfig.me")
+    print(f"         IPv6:  curl -6 ifconfig.me")
+    print(f"    2. Forward port {args.http_port} on your router to this machine (both IPv4 and IPv6 if possible)")
+    print(f"    3. IPv4 access:  {scheme}://<ipv4>:{args.http_port}")
+    print(f"       IPv6 access:  {scheme}://[<ipv6>]:{args.http_port}  (note the square brackets)")
     if args.https:
         print(f"    4. Accept the self-signed cert warning in your browser")
     print()
