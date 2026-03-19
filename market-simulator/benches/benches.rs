@@ -112,7 +112,6 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                     trades: Trades::<4>::default(),
                     status: types::OrderStatus::New,
                     timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
-                    original_quantity: types::FixedPointArithmetic(1_000_000),
             };
         
             for i in 0..iters {
@@ -145,14 +144,14 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
         for _ in 0..iters {
             let send_ts = loop {
-                if let Some(ts) = ts_rx.try_pop() {
+                if let Some(ts) = ts_rx.pop() {
                     break ts;
                 }
                 std::hint::spin_loop();
             };
 
             loop {
-                if let Some(_) = er_outbound_rx.try_pop() {
+                if let Some(_) = er_outbound_rx.pop() {
                     break;
                 }
                 std::hint::spin_loop();
@@ -165,6 +164,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
         
+
         // Send a dummy message to unblock the engine if it's waiting
         er_inbound_tx_clone.push((OrderEvent {
             sender_id: EntityId::from_ascii(""),
@@ -174,7 +174,6 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
             trades: Trades::<4>::default(),
             status: types::OrderStatus::New,
             timestamp: Instant::now(),
-            original_quantity: types::FixedPointArithmetic(0),
         })).unwrap();
 
         handle.join().unwrap();

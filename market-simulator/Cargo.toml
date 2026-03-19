@@ -10,6 +10,7 @@ members = [
     "crates/server",
     "crates/execution-report",
     "crates/types",
+    "crates/web",
 ]
 
 # Shared dependencies across all crates
@@ -23,6 +24,9 @@ spsc = { path = "../spsc" }
 crossbeam = "0.8.2"
 crossbeam-channel = "0.5.15"
 lazy_static = "1.4.0"
+tokio    = { version = "1", features = ["full"] }   # ← add this
+serde    = { version = "1", features = ["derive"] }  # ← add this
+serde_json = "1" 
 
 # Main binary crate
 [package]
@@ -35,12 +39,17 @@ server = { path = "crates/server" }
 fix = { path = "crates/protocol/FIX" }
 order-book = { path = "crates/order-book" }
 crossbeam.workspace = true
+crossbeam-channel.workspace = true
 spsc.workspace = true
 memory = { path = "crates/memory" }
 execution-report = { path = "crates/execution-report" }
 types = { path = "crates/types" }
 core_affinity = "0.8.3"
 ctrlc = "3.2.0"
+web   = { path = "crates/web" }
+tokio = { version = "1", features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 # Optimization profiles
 [profile.dev]

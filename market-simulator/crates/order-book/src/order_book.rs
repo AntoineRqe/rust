@@ -54,7 +54,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             }
         }
 
-        println!("Order book engine shutting down gracefully");
+        tracing::info!("Order book engine shutting down gracefully");
     }
 }
 
@@ -151,7 +151,7 @@ impl OrderBook {
 
     fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         if order.orig_cl_ord_id.is_none() {
-            eprintln!("Cancel order with ID: {} is missing original client order ID, cannot process cancellation", order.order_id);
+            tracing::error!("Cancel order with ID: {} is missing original client order ID, cannot process cancellation", order.order_id);
             return (order, OrderResult {
                 trades: Trades::default(),
                 status: OrderStatus::CancelRejected,
@@ -180,7 +180,7 @@ impl OrderBook {
                                 };
                             }
                         }
-                        None => eprintln!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, order_ref.position),
+                        None => tracing::error!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, order_ref.position),
                     }
 
                     self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
@@ -194,7 +194,7 @@ impl OrderBook {
             }
         }
 
-        eprintln!("Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", order.order_id, orig_cl_ord_id);
+        tracing::error!("Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", order.order_id, orig_cl_ord_id);
         // If we reach this point, it means the order was not found or could not be cancelled
         (order, OrderResult {
             trades: Trades::default(),
@@ -249,7 +249,7 @@ impl OrderBook {
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
-                        eprintln!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
+                        tracing::error!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
                     }
 
                     self.id_counter.increment(); // Increment the trade ID counter
@@ -320,7 +320,7 @@ impl OrderBook {
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
-                        eprintln!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
+                        tracing::error!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
                     }
 
                     self.id_counter.increment(); // Increment the trade ID counter

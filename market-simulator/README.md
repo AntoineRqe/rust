@@ -2,6 +2,24 @@
 
 This project is a financial market simulator implemented in Rust. It consists of several crates that work together to simulate a financial market, including an order book, a matching engine, and a market data feed.
 
+### Architecture
+
+```
+Browser ──WebSocket──► axum web server (crates/web)
+                              │
+                    tokio broadcast channel
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+    FixInboundEngine                 FixOutboundEngine
+    (crates/protocol/FIX)            (crates/protocol/FIX)
+              │                               │
+         OrderEvent                    ExecReport
+              │                               │
+    OrderBookEngine ──────────────── ExecutionReportEngine
+    (crates/order-book)            (crates/execution-report)
+```
+
 Technical choices and discussion about the architecture and design of the simulator can be found here [Architecture and Design](./papers/market-simulator.md).
 
 ## Crates
@@ -14,6 +32,7 @@ Technical choices and discussion about the architecture and design of the simula
 - `types`: This crate defines the common types used across the project, such as orders, trades, and market data.
 - `utils`: This crate provides utility functions and types that are used across the project, such as timestamp handling and fixed-point arithmetic.
 - `memory`: This crate provides an in-memory implementation of the order book and matching engine, allowing for fast processing of orders without the need for persistent storage. [Memory](crates/memory/README.md)
+- `web`: This crate implements a web-based client that allows users to interact with the market simulator through a web interface. It provides functionality for sending FIX messages to the server and receiving execution reports in real-time. [Web Client](crates/web/README.md)
 
 ## Running the Simulator
 
@@ -29,8 +48,7 @@ This will start the server and allow clients to connect and interact with the si
 
 Refer to the [Tools README](./tools/README.md) for instructions on how to run the client and connect to the server.
 
-
-## TODO List
+## Future Work
 
 - Implement the replayer based on log files to allow for backtesting and analysis of market data.
 - Adding more support for logging and monitoring, including metrics collection and alerting.

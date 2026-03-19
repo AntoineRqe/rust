@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use crossbeam::queue::{ArrayQueue};
 use std::cell::UnsafeCell;
+use serde::Serialize;
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
@@ -35,6 +36,18 @@ pub struct FixRawMsg<const N: usize> {
     pub len: u16,
     pub data: [u8; N],
     pub resp_queue: Option<crossbeam_channel::Sender<FixRawMsg<N>>>, // Optional queue for sending responses back to the network layer, added for potential future use
+}
+
+impl<const N: usize> Serialize for FixRawMsg<N> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Convert the raw FIX message to a human-readable string by replacing SOH with " | "
+        let human_readable = String::from_utf8_lossy(&self.data[..self.len as usize])
+            .replace('\x01', " | ");
+        serializer.serialize_str(&human_readable)
+    }
 }
 
 impl<const N: usize> Default for FixRawMsg<N> {
@@ -96,6 +109,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
     pub fn run(&mut self) {
         while !self.shared.shutdown.load(Ordering::Relaxed) || !self.request_in.is_empty() {
             if let Some(mut msg) = self.request_in.recv().ok() {
+                tracing::debug!("Received message from network layer, parsing FIX message...");
                 let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
                 if msg.len == 0 {
@@ -110,7 +124,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 let order_event = match self.build_order(msg) {
                     Ok(event) => event,
                     Err(e) => {
-                        eprintln!("Failed to parse FIX message: {}, skipping", e);
+                        tracing::error!("Failed to parse FIX message: {}, skipping", e);
                         return; // Skip malformed messages
                     }
                 };
@@ -119,7 +133,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 match order_event.check_valid() {
                     Ok(_) => {},
                     Err(e) => {
-                        eprintln!("Invalid order event parsed: {}, skipping", e);
+                        tracing::error!("Invalid order event parsed: {}, skipping", e);
                         return; // Skip invalid events
                     }
                 }
@@ -133,16 +147,19 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 
                 // Push the structured order event to the order book queue.
                 match self.request_out.push(order_event) {
-                    Ok(_) => {self.counter += 1;},
+                    Ok(_) => {
+                        tracing::debug!("Parsed order event pushed to order book queue successfully");
+                        self.counter += 1;
+                    },
                     Err(e) => {
-                        eprintln!("Failed to push order event to order book queue: {}, skipping", e);
+                        tracing::error!("Failed to push order event to order book queue: {}, skipping", e);
                         return; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
                     }
                 }
             }
         }
 
-        println!("Inbound FIX engine shutting down, processed {} messages", self.counter);
+        tracing::info!("Inbound FIX engine shutting down, processed {} messages", self.counter);
     }
 
     fn build_order(
@@ -241,14 +258,14 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                     if let Some(resp_queue) = self.shared.get_pending(&key) {
                         match resp_queue.send(_response) {
                             Ok(_) => {self.counter += 1;},
-                            Err(_) => { eprintln!("Failed to push response back to client, dropping response"); },
+                            Err(_) => { tracing::error!("Failed to push response back to client, dropping response"); },
                         }
                     }
                 }
             }
         }
-
-        println!("Outbound FIX engine shutting down, processed {} messages", self.counter);
+        
+        tracing::info!("Outbound FIX engine shutting down, processed {} messages", self.counter);
     }
 }
 

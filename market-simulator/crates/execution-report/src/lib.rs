@@ -23,7 +23,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     }
 
     pub fn run(&self) {
-        while !self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
+        while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
                 if exec_report.0.sender_id == EntityId::from_ascii("") {
                     self.fifo_out.push((EntityId::default(), FixRawMsg::default())).ok(); // Push a dummy message to unblock any waiting consumers
@@ -33,7 +33,8 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
                 }
             }
         }
-        println!("Execution report engine shutting down gracefully");
+        
+        tracing::info!("Execution report engine shutting down gracefully");
     }
 
     fn build_cancel_report(&self, exec_report: &(OrderEvent, OrderResult)) -> FixRawMsg<N> {

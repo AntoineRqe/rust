@@ -11,3 +11,4 @@ order-book = { path = "../order-book" }
 fix = { path = "../protocol/FIX" }
 utils = { path = "../utils" }
 types = { path = "../types" }
+tracing.workspace = true
