@@ -236,6 +236,24 @@ impl<const N: usize> Trades<N> {
     pub fn len(&self) -> usize {
         self.count
     }
+
+    pub fn quantity_sum(&self) -> FixedPointArithmetic {
+        self.iter().fold(FixedPointArithmetic::ZERO, |acc, trade| acc + trade.quantity)
+    }
+
+    pub fn avg_price(&self) -> FixedPointArithmetic {
+        if self.count == 0 {
+            return FixedPointArithmetic::ZERO;
+        }
+
+        let total_quantity = self.quantity_sum();
+        if total_quantity == FixedPointArithmetic::ZERO {
+            return FixedPointArithmetic::ZERO;
+        }
+
+        let total_value = self.iter().fold(FixedPointArithmetic::ZERO, |acc, trade| acc + (trade.price * trade.quantity));
+        total_value / total_quantity
+    }
 }
 
 impl<const N: usize> Index<usize> for Trades<N> {
@@ -250,7 +268,6 @@ impl<const N: usize> Index<usize> for Trades<N> {
 pub struct OrderResult {
     pub trades: Trades<4>, // Fixed-size array for trades, adjust size as needed
     pub status: OrderStatus,
-    pub original_quantity: FixedPointArithmetic, // The original quantity of the order before any trades occurred, added for potential future use in execution reports
     pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
@@ -259,7 +276,6 @@ impl Default for OrderResult {
         Self {
             trades: Trades::new(),
             status: OrderStatus::New,
-            original_quantity: FixedPointArithmetic::ZERO,
             timestamp: Instant::now(),
         }
     }

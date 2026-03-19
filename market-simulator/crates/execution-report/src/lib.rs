@@ -86,37 +86,17 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         // Build FIX message body
         self.build_field(tags::MSG_TYPE, msg_types::EXECUTION_REPORT, &mut report, &mut cursor);
 
-        match order_result.status {
-            types::OrderStatus::New => {
-                self.build_field(tags::ORD_STATUS, ord_status_code_set::NEW, &mut report, &mut cursor); // ExecType=New
-            },
-            types::OrderStatus::PartiallyFilled => {
+        let traded_qty = order_result.trades.quantity_sum();
+        let remaining_qty = order.quantity - traded_qty;
+
+        if remaining_qty > FixedPointArithmetic::ZERO {
                 self.build_field(tags::ORD_STATUS, ord_status_code_set::PARTIAL_FILL, &mut report, &mut cursor); // ExecType=PartiallyFilled
-            },
-            types::OrderStatus::Filled => {
+        } else {
                 self.build_field(tags::ORD_STATUS, ord_status_code_set::FILL, &mut report, &mut cursor); // ExecType=Filled
-            },
-            types::OrderStatus::Cancelled => {
-                self.build_field(tags::ORD_STATUS, ord_status_code_set::CANCELED, &mut report, &mut cursor); // ExecType=Cancelled
-            },
-            _ => {}
         }
 
-        match order_result.status {
-            types::OrderStatus::New => {
-                self.build_field(tags::EXEC_TYPE, exec_type_code_set::NEW, &mut report, &mut cursor); // ExecType=New
-            },
-            types::OrderStatus::PartiallyFilled => {
-                self.build_field(tags::EXEC_TYPE, exec_type_code_set::TRADE, &mut report, &mut cursor); // ExecType=PartiallyFilled
-            },
-            types::OrderStatus::Filled => {
-                self.build_field(tags::EXEC_TYPE, exec_type_code_set::TRADE, &mut report, &mut cursor); // ExecType=Filled
-            },
-            types::OrderStatus::Cancelled => {
-                self.build_field(tags::EXEC_TYPE, exec_type_code_set::CANCELED, &mut report, &mut cursor); // ExecType=Cancelled
-            },
-            _ => {}
-        }
+        // At this point, we know there is a trade
+        self.build_field(tags::EXEC_TYPE, exec_type_code_set::TRADE, &mut report, &mut cursor); // ExecType=PartiallyFilled
 
         self.build_field(tags::ORDER_ID, &order.order_id.as_ref(), &mut report, &mut cursor);
         self.build_field(tags::CL_ORD_ID, &order.cl_ord_id.as_ref(), &mut report, &mut cursor);
@@ -127,20 +107,20 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         }
 
         self.build_field(tags::PRICE, &order.price.to_fix_bytes(), &mut report, &mut cursor);
-        self.build_field(tags::LEAVES_QTY, &order.quantity.to_fix_bytes(), &mut report, &mut cursor);
-        self.build_field(tags::CUM_QTY, &order_result.trades.iter().map(|t| t.quantity).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::LEAVES_QTY, &remaining_qty.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::CUM_QTY, &traded_qty.to_fix_bytes(), &mut report, &mut cursor);
 
         // Switch sender and target for the execution report since it's going back to the client
         self.build_field(tags::SENDER_COMP_ID, &order.target_id.as_ref(), &mut report, &mut cursor); 
         self.build_field(tags::TARGET_COMP_ID, &order.sender_id.as_ref(), &mut report, &mut cursor);
         self.build_field(tags::SYMBOL, &order.symbol.as_ref(), &mut report, &mut cursor);
-        self.build_field(tags::ORDER_QTY, &order_result.original_quantity.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_QTY, &order.quantity.to_fix_bytes(), &mut report, &mut cursor);
         self.build_field(tags::SENDING_TIME, &utils::UtcTimestamp::now().to_fix_bytes(), &mut report, &mut cursor);
     
         if order_result.trades.len() > 0 {
-            self.build_field(tags::LAST_PX, &order_result.trades.iter().map(|t| t.price).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
-            self.build_field(tags::LAST_QTY, &order_result.trades.iter().map(|t| t.quantity).sum::<FixedPointArithmetic>().to_fix_bytes(), &mut report, &mut cursor);
-            self.build_field(tags::AVG_PX, &(order_result.trades.iter().map(|t| t.price).sum::<FixedPointArithmetic>() / FixedPointArithmetic::from_number(order_result.trades.len() as i64)).to_fix_bytes(), &mut report, &mut cursor);
+            self.build_field(tags::LAST_PX, &order_result.trades[0].price.to_fix_bytes(), &mut report, &mut cursor);
+            self.build_field(tags::LAST_QTY, &traded_qty.to_fix_bytes(), &mut report, &mut cursor);
+            self.build_field(tags::AVG_PX, &order_result.trades.avg_price().to_fix_bytes(), &mut report, &mut cursor);
         }
 
         self.build_field(tags::BODY_LENGTH, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor); // Body length is everything after the BodyLength field (which is 2 bytes for tag and equals sign)
@@ -152,22 +132,75 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
 
-        let mut raw_report = if exec_report.1.status == types::OrderStatus::Cancelled || exec_report.1.status == types::OrderStatus::CancelRejected {
-            self.build_cancel_report(exec_report)
+        let mut reports: Vec<FixRawMsg<N>> = vec![];
+
+        if exec_report.1.status == types::OrderStatus::Cancelled || exec_report.1.status == types::OrderStatus::CancelRejected {
+            reports.push(self.build_cancel_report(exec_report));
         } else {
-            self.build_execution_report(exec_report)
-        };
+            reports.push(self.build_new_execution_report(exec_report));
+
+            if exec_report.1.trades.len() > 0 {
+                reports.push(self.build_execution_report(exec_report));
+            }
+        }
 
         let key = exec_report.0.sender_id;
 
-        loop {
-            if let Err((_, report)) = self.fifo_out.push((key, raw_report)) {
-                raw_report = report;
-                std::hint::spin_loop();
-            } else {
-                break;
+        for mut report in reports.into_iter() {
+            loop {
+                if let Err((_, _report)) = self.fifo_out.push((key, report)) {
+                    report = _report;
+                    std::hint::spin_loop();
+                } else {
+                    break;
+                }
             }
-        }   
+        }
+    }
+
+    fn build_new_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) -> FixRawMsg<N> {
+        let mut report = FixRawMsg::<N>::default();
+        let mut cursor = 0;
+        let order = &exec_report.0;
+
+        // Build FIX message header
+        self.build_field(tags::BEGIN_STRING, b"FIX.4.2", &mut report, &mut cursor);
+
+        // Build FIX message body
+        self.build_field(tags::MSG_TYPE, msg_types::EXECUTION_REPORT, &mut report, &mut cursor);
+
+        // Set NEW status for all new execution reports, since this is the first report being sent for a new order.
+        self.build_field(tags::ORD_STATUS, ord_status_code_set::NEW, &mut report, &mut cursor); // OrdStatus=New
+        self.build_field(tags::EXEC_TYPE, exec_type_code_set::NEW, &mut report, &mut cursor); // ExecType=New
+
+        self.build_field(tags::ORDER_ID, &order.order_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::CL_ORD_ID, &order.cl_ord_id.as_ref(), &mut report, &mut cursor);
+
+        match order.side {
+            types::Side::Buy => self.build_field(tags::SIDE, side_code_set::BUY, &mut report, &mut cursor),
+            types::Side::Sell => self.build_field(tags::SIDE, side_code_set::SELL, &mut report, &mut cursor),
+        }
+
+        self.build_field(tags::PRICE, &order.price.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_QTY, &order.quantity.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::LEAVES_QTY, &order.quantity.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::CUM_QTY, &FixedPointArithmetic::ZERO.to_fix_bytes(), &mut report, &mut cursor);
+
+        // Switch sender and target for the execution report since it's going back to the client
+        self.build_field(tags::SENDER_COMP_ID, &order.target_id.as_ref(), &mut report, &mut cursor); 
+        self.build_field(tags::TARGET_COMP_ID, &order.sender_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::SYMBOL, &order.symbol.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::SENDING_TIME, &utils::UtcTimestamp::now().to_fix_bytes(), &mut report, &mut cursor);
+    
+        self.build_field(tags::LAST_PX, &FixedPointArithmetic::ZERO.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::LAST_QTY, &FixedPointArithmetic::ZERO.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::AVG_PX, &FixedPointArithmetic::ZERO.to_fix_bytes(), &mut report, &mut cursor);
+
+        self.build_field(tags::BODY_LENGTH, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor); // Body length is everything after the BodyLength field (which is 2 bytes for tag and equals sign)
+        self.build_field(tags::CHECK_SUM, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor);
+
+        report.len = cursor as u16;
+        report
     }
 
     fn build_field(&self, tag: u32, value: &[u8], report: &mut FixRawMsg<N>, cursor: &mut usize) {
@@ -227,7 +260,6 @@ mod tests {
                 trades: types::Trades::default(),
                 status: types::OrderStatus::New,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
-                original_quantity: types::FixedPointArithmetic(1_000_000),
             };
 
             match fifo_in_tx.push((order_event.clone(), order_result)) {
@@ -281,9 +313,8 @@ mod tests {
 
             let mut sell_order_result = types::OrderResult {
                 trades: Trades::default(),
-                status: types::OrderStatus::PartiallyFilled,
+                status: types::OrderStatus::New,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
-                original_quantity: types::FixedPointArithmetic::from_f64(1_000_000.0),
             };
 
             sell_order_result.trades.add_trade(types::Trade {
@@ -300,9 +331,26 @@ mod tests {
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
 
+            // First pop will be the execution report for the new sell order, which we can ignore for this test since we're focused on validating the execution report generated for the buy order when the trade occurs.
+            let (_, new_report) = fifo_out_rx.pop().expect("No execution report generated for sell order");
+            let mut fix_parser = fix::parser::FixParser::new(&new_report.data[..new_report.len as usize]);
+            let parsed_report = fix_parser.get_fields();
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::MSG_TYPE).expect("MSG_TYPE field missing").value, msg_types::EXECUTION_REPORT);
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::ORD_STATUS).expect("ORD_STATUS field missing").value, ord_status_code_set::NEW);
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::EXEC_TYPE).expect("EXEC_TYPE field missing").value, exec_type_code_set::NEW);
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::CL_ORD_ID).expect("CL_ORD_ID field missing").value, field_str(&sell_order_event.cl_ord_id.as_ref()));
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::ORDER_ID).expect("ORDER_ID field missing").value, field_str(&sell_order_event.order_id.as_ref()));
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::SIDE).expect("SIDE field missing").value, side_code_set::SELL);
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::SYMBOL).expect("SYMBOL field missing").value, field_str(&sell_order_event.symbol.as_ref()));
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::ORDER_QTY).expect("ORDER_QTY field missing").value, field_str(&sell_order_event.quantity.to_fix_bytes()));
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::LAST_QTY).expect("LAST_QTY field missing").value, field_str(&FixedPointArithmetic::ZERO.to_fix_bytes())); // No trades executed for the sell order, so LAST_QTY should be 0
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::LAST_PX).expect("LAST_PX field missing").value, field_str(&FixedPointArithmetic::ZERO.to_fix_bytes())); // No trades executed for the sell order, so LAST_PX should be 0
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::AVG_PX).expect("AVG_PX field missing").value, field_str(&FixedPointArithmetic::ZERO.to_fix_bytes())); // No trades executed for the sell order, so AVG_PX should be 0
+
+            // Pop the next report, which should be the execution report for the buy order with the trade details populated
             let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated for sell order");
             let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
-            let parsed_report = fix_parser.get_fields();    
+            let parsed_report = fix_parser.get_fields();  
 
             let last_qty_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_QTY).expect("LAST_QTY field missing");
             assert_eq!(last_qty_field.value, field_str(&FixedPointArithmetic::from_f64(50.0).to_fix_bytes())); // 50 units filled
@@ -316,7 +364,6 @@ mod tests {
                 trades: Trades::default(),
                 status: types::OrderStatus::Cancelled,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
-                original_quantity: types::FixedPointArithmetic::from_f64(1_000_000.0),
             };
     
             match fifo_in_tx.push((order_event, cancel_order_result)) {
@@ -340,7 +387,6 @@ mod tests {
                 trades: Trades::default(),
                 status: types::OrderStatus::CancelRejected,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
-                original_quantity: types::FixedPointArithmetic::from_f64(1_000_000.0),
             };
 
             match fifo_in_tx.push((order_event, cancel_reject_order_result)) {
