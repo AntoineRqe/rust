@@ -60,6 +60,13 @@
   .frow input{background:#1a1e2a;border:1px solid var(--border);color:var(--text);
               font-family:'Courier New',monospace;font-size:11px;
               padding:5px 6px;flex:1;outline:none;min-width:0}
+  .spin-wrap{display:flex;align-items:stretch;flex:1;min-width:0}
+  .spin-wrap input{flex:1;min-width:0}
+  .spin-btns{display:flex;flex-direction:column;margin-left:4px}
+  .spin-btn{background:#1a1e2a;border:1px solid var(--border);color:var(--text);
+            width:22px;height:15px;line-height:12px;font-size:9px;padding:0}
+  .spin-btn + .spin-btn{border-top:none}
+  .spin-btn:hover{border-color:var(--blue)}
   .frow input:focus{border-color:var(--blue)}
   .frow input:disabled{opacity:.4;cursor:not-allowed}
   button{font-family:'Courier New',monospace;cursor:pointer;border:none;outline:none}
@@ -224,8 +231,24 @@
 <div id="col-left" class="panel active">
   <div class="stitle">ORDER ENTRY</div><div class="ssep"></div>
   <div class="frow"><label>Symbol</label>     <input id="o-sym"   value="AAPL"></div>
-  <div class="frow"><label>Quantity</label>   <input id="o-qty"   value="100"></div>
-  <div class="frow"><label>Limit Price</label><input id="o-price" value="150.00"></div>
+  <div class="frow"><label>Quantity</label>
+    <div class="spin-wrap">
+      <input id="o-qty" type="number" step="1" min="1" value="100">
+      <div class="spin-btns">
+        <button class="spin-btn" onclick="bumpField('o-qty', 1)">&#9650;</button>
+        <button class="spin-btn" onclick="bumpField('o-qty', -1)">&#9660;</button>
+      </div>
+    </div>
+  </div>
+  <div class="frow"><label>Limit Price</label>
+    <div class="spin-wrap">
+      <input id="o-price" type="number" step="0.1" min="0" value="150.00">
+      <div class="spin-btns">
+        <button class="spin-btn" onclick="bumpField('o-price', 0.1)">&#9650;</button>
+        <button class="spin-btn" onclick="bumpField('o-price', -0.1)">&#9660;</button>
+      </div>
+    </div>
+  </div>
   <div class="side-row">
     <label>Side</label>
     <button id="btn-buy"  class="sbtn" onclick="setSide('BUY')">BUY</button>
@@ -415,6 +438,23 @@ function setSide(s) {
     ge('btn-send').textContent   = '▶  SELL ORDER';
     ge('btn-send').className     = 'btn btn-send sell';
   }
+}
+
+function bumpField(id, step) {
+  const input = ge(id);
+  let value = parseFloat(input.value);
+  if (isNaN(value)) value = 0;
+
+  value += step;
+
+  if (id === 'o-qty') {
+    value = Math.max(1, Math.round(value));
+    input.value = String(value);
+    return;
+  }
+
+  value = Math.max(0, Math.round(value * 10) / 10);
+  input.value = value.toFixed(1);
 }
 
 // ── send order ────────────────────────────────────────────────────────────────
