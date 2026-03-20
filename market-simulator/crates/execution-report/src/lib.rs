@@ -136,6 +136,47 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         report
     }
 
+    fn build_execution_report_for_trade(
+        &self,
+        order: &OrderEvent,
+        trade: &types::Trade,
+        side: types::Side,
+    ) -> FixRawMsg<N> {
+        let mut report = FixRawMsg::<N>::default();
+        let mut cursor = 0;
+
+        self.build_field(tags::BEGIN_STRING, b"FIX.4.2", &mut report, &mut cursor);
+        self.build_field(tags::MSG_TYPE, msg_types::EXECUTION_REPORT, &mut report, &mut cursor);
+        self.build_field(tags::ORD_STATUS, ord_status_code_set::FILL, &mut report, &mut cursor);
+        self.build_field(tags::EXEC_TYPE, exec_type_code_set::TRADE, &mut report, &mut cursor);
+        self.build_field(tags::ORDER_ID, &order.order_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::CL_ORD_ID, &trade.cl_ord_id.as_ref(), &mut report, &mut cursor);
+
+        match side {
+            types::Side::Buy => self.build_field(tags::SIDE, side_code_set::BUY, &mut report, &mut cursor),
+            types::Side::Sell => self.build_field(tags::SIDE, side_code_set::SELL, &mut report, &mut cursor),
+        }
+
+        self.build_field(tags::PRICE, &trade.price.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::LEAVES_QTY, &FixedPointArithmetic::ZERO.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::CUM_QTY, &trade.quantity.to_fix_bytes(), &mut report, &mut cursor);
+
+        self.build_field(tags::SENDER_COMP_ID, &order.target_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::TARGET_COMP_ID, &order.sender_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::SYMBOL, &order.symbol.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_QTY, &trade.quantity.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::SENDING_TIME, &utils::UtcTimestamp::now().to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::LAST_PX, &trade.price.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::LAST_QTY, &trade.quantity.to_fix_bytes(), &mut report, &mut cursor);
+        self.build_field(tags::AVG_PX, &trade.price.to_fix_bytes(), &mut report, &mut cursor);
+
+        self.build_field(tags::BODY_LENGTH, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::CHECK_SUM, &number_to_bytes((cursor - 2) as u64).as_ref(), &mut report, &mut cursor);
+
+        report.len = cursor as u16;
+        report
+    }
+
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
 
         let mut reports: Vec<FixRawMsg<N>> = vec![];
@@ -147,6 +188,17 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 
             if exec_report.1.trades.len() > 0 {
                 reports.push(self.build_execution_report(exec_report));
+
+                let maker_side = match exec_report.0.side {
+                    types::Side::Buy => types::Side::Sell,
+                    types::Side::Sell => types::Side::Buy,
+                };
+
+                for trade in exec_report.1.trades.iter() {
+                    if trade.cl_ord_id != exec_report.0.cl_ord_id {
+                        reports.push(self.build_execution_report_for_trade(&exec_report.0, trade, maker_side));
+                    }
+                }
             }
         }
 
@@ -327,6 +379,7 @@ mod tests {
                 price: types::FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
                 quantity: types::FixedPointArithmetic(5_000_000_000), // 50 units in FIX quantity format (6 decimal places)
                 id: types::TradeId::default()   ,
+                cl_ord_id: types::OrderId::from_ascii("CLORD12345"),
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             }).expect("Failed to add trade to OrderResult");
             

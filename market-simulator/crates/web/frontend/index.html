@@ -658,11 +658,9 @@ function updateBookFromFix(body, tag) {
       book.trades.unshift([lastPx, lastQty, side === '1' ? 'B' : 'S',
                            new Date().toTimeString().slice(0,8)]);
       book.trades = book.trades.slice(0, 20);
-      // decrement matched resting liquidity on contra side
-      const contraSide = side === '1' ? '2' : '1';
-      rmQty(contraSide, lastPx, lastQty);
     }
     applyOrderLeaves(clordId, side, price, leavesQty);
+    renderOrders();
 
   } else if (status === '2') {
     // Filled: record trade, remove from book
@@ -673,9 +671,6 @@ function updateBookFromFix(body, tag) {
       book.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
                            new Date().toTimeString().slice(0,8)]);
       book.trades = book.trades.slice(0, 20);
-      // decrement matched resting liquidity on contra side
-      const contraSide = side === '1' ? '2' : '1';
-      rmQty(contraSide, fillPx, fillQty);
     }
     applyOrderLeaves(clordId, side, price, 0);
     cleanupOrderState(clordId);

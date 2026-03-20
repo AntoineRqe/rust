@@ -180,7 +180,7 @@ impl OrderBook {
 
                 if let Some(index) = index {
                     match queue.remove(index) {
-                        Some(_) => {
+                        Some(cancelled_order) => {
                             // Remove the price entry from the order if no more orders are left at that price level
                             if queue.is_empty() {
                                 match order_ref.side {
@@ -188,17 +188,23 @@ impl OrderBook {
                                     Side::Sell => self.asks.remove(&order_ref.price),
                                 };
                             }
+
+                            // keep track of the original order attributes for the cancellation acknowledgment.
+                            let mut cancel_ack = order;
+                            cancel_ack.side = cancelled_order.side;
+                            cancel_ack.price = cancelled_order.price;
+                            cancel_ack.quantity = cancelled_order.quantity;
+
+                            self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
+
+                            return (cancel_ack, OrderResult {
+                                trades: Trades::default(),
+                                status: OrderStatus::Cancelled,
+                                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                            });
                         }
                         None => tracing::error!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, index),
                     }
-
-                    self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
-
-                    return (order, OrderResult {
-                        trades: Trades::default(),
-                        status: OrderStatus::Cancelled,
-                        timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
-                    });
                 }
             }
         }
@@ -254,6 +260,7 @@ impl OrderBook {
                     // Add the trade to the list of trades for this order
                     if let Err(_) = trades.add_trade(Trade {
                         price: best_bid.price,
+                        cl_ord_id: best_bid.cl_ord_id, // Include the client order ID of the matched order in the trade record
                         quantity: trade_quantity,
                         id: self.id_counter, // Example trade ID
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
@@ -325,6 +332,7 @@ impl OrderBook {
                     // Add the trade to the list of trades for this order
                     if let Err(_) = trades.add_trade(Trade {
                         price: best_ask.price,
+                        cl_ord_id: best_ask.cl_ord_id,
                         quantity: trade_quantity,
                         id: self.id_counter, // Example trade ID
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch

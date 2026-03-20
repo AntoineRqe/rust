@@ -183,12 +183,14 @@ impl TradeId {
 /// - `price`: The price at which the trade occurred.
 /// - `quantity`: The quantity that was traded.
 /// - `id`: A unique identifier for the trade.
+/// - `cl_ord_id`: Client order ID of the matched resting order involved in this fill.
 /// - `timestamp`: The timestamp when the trade occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trade {
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic,
     pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub cl_ord_id: OrderId,
     pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
@@ -206,6 +208,7 @@ impl<const N: usize> Default for Trades<N> {
                 price: FixedPointArithmetic::ZERO,
                 quantity: FixedPointArithmetic::ZERO,
                 id: TradeId::new(),
+                cl_ord_id: OrderId::default(),
                 timestamp: Instant::now(),
             }; N],
             count: 0,
@@ -292,8 +295,8 @@ impl std::fmt::Display for OrderResult {
             let trade = self.trades[i];
             write!(
                 f,
-                "  Trade {{ price: {}, quantity: {}, id: {:?} }}\n",
-                trade.price.raw(), trade.quantity, trade.id
+                "  Trade {{ price: {}, quantity: {}, id: {:?}, cl_ord_id: {} }}\n",
+                trade.price.raw(), trade.quantity, trade.id, trade.cl_ord_id
             )?;
         }
         Ok(())
