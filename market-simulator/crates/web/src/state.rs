@@ -56,12 +56,18 @@ impl EventBus {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BrowserCommand {
     Order {
+        clord_id: String,
         symbol: String,
         qty:    f64,
         price:  f64,
         side:   String,   // "1" = buy, "2" = sell
         sender: Option<String>,
         target: Option<String>,
+    },
+    Cancel {
+        clord_id: String,
+        symbol:   Option<String>,
+        qty:      Option<f64>,
     },
     MdRequest {
         symbol: String,

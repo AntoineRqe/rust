@@ -83,7 +83,7 @@ async fn handle_browser_message(text: &str, state: &AppState) {
     };
 
     match cmd {
-        BrowserCommand::Order { symbol, qty, price, side, sender, target } => {
+        BrowserCommand::Order { clord_id, symbol, qty, price, side, sender, target } => {
             tracing::info!("Browser order: {} {} {} @ {}",
                 if side == "1" { "BUY" } else { "SELL" },
                 qty as u32, symbol, price);
@@ -94,7 +94,7 @@ async fn handle_browser_message(text: &str, state: &AppState) {
             let fix_bytes = build_new_order_single(
                 &sender_id, &target_id, &symbol,
                 side.parse().unwrap_or(1),
-                qty, price,
+                qty, price, &clord_id,
             );
 
             tracing::debug!("Built FIX message for browser order, injecting into FIX engine...");
@@ -111,6 +111,24 @@ async fn handle_browser_message(text: &str, state: &AppState) {
             (state.fix_sender)(fix_bytes);
 
             tracing::debug!("Browser order injected into FIX engine");
+        }
+
+        BrowserCommand::Cancel { clord_id, symbol, qty } => {
+            let symbol = symbol.unwrap_or_else(|| "AAPL".into());
+            let qty = qty.unwrap_or(0.0);
+            let fix_bytes = build_order_cancel_request(
+                "BROWSER", "SERVER1",
+                &clord_id, &symbol, qty,
+            );
+
+            tracing::info!("Browser cancel: {}", clord_id);
+            state.bus.publish(WsEvent::FixMessage {
+                label: format!("CANCEL ✕ ({})", clord_id),
+                body: pretty_fix(&fix_bytes),
+                tag:  "send".into(),
+            });
+
+            (state.fix_sender)(fix_bytes);
         }
 
         BrowserCommand::ResetSeq => {
@@ -170,12 +188,12 @@ fn build_new_order_single(
     sender: &str, target: &str,
     symbol: &str, side: u8,
     qty: f64, price: f64,
+    clord_id: &str,
 ) -> Vec<u8> {
     let now = fix_now();
-    let oid = format!("ORD-WEB-{}", next_seq());
     let body = format!(
         "35=D{SOH}49={sender}{SOH}56={target}{SOH}34={seq}{SOH}52={now}{SOH}\
-         11={oid}{SOH}21=1{SOH}55={symbol}{SOH}54={side}{SOH}60={now}{SOH}\
+         11={clord_id}{SOH}21=1{SOH}55={symbol}{SOH}54={side}{SOH}60={now}{SOH}\
          38={qty}{SOH}40=2{SOH}44={price:.4}{SOH}",
         seq = next_seq(),
         qty = qty as u32,
@@ -191,6 +209,22 @@ fn build_md_request(sender: &str, target: &str, symbol: &str, depth: u32) -> Vec
          262={rid}{SOH}263=1{SOH}264={depth}{SOH}\
          267=2{SOH}269=0{SOH}269=1{SOH}146=1{SOH}55={symbol}{SOH}",
         seq = next_seq(),
+    );
+    wrap(body)
+}
+
+fn build_order_cancel_request(
+    sender: &str, target: &str,
+    orig_clord_id: &str, symbol: &str,
+    qty: f64,
+) -> Vec<u8> {
+    let now = fix_now();
+    let clord_id = format!("ORD-WEB-{}", next_seq());
+    let body = format!(
+        "35=F{SOH}49={sender}{SOH}56={target}{SOH}34={seq}{SOH}52={now}{SOH}\
+         11={clord_id}{SOH}41={orig_clord_id}{SOH}55={symbol}{SOH}38={qty}{SOH}",
+        seq = next_seq(),
+        qty = qty as u32,
     );
     wrap(body)
 }

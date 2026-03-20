@@ -56,6 +56,11 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             self.build_field(tags::ORD_STATUS, ord_status_code_set::NEW, &mut report, &mut cursor); // OrdStatus=New
         }
 
+        self.build_field(tags::CL_ORD_ID, &order.cl_ord_id.as_ref(), &mut report, &mut cursor);
+        if let Some(orig) = order.orig_cl_ord_id {
+            self.build_field(tags::ORIG_CL_ORD_ID, &orig.as_ref(), &mut report, &mut cursor);
+        }
+
         match order.side {
             types::Side::Buy => self.build_field(tags::SIDE, side_code_set::BUY, &mut report, &mut cursor),
             types::Side::Sell => self.build_field(tags::SIDE, side_code_set::SELL, &mut report, &mut cursor),

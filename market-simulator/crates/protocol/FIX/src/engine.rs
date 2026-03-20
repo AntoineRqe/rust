@@ -118,14 +118,14 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                         sender_id: EntityId::from_ascii(""), // Use an empty sender ID to indicate a shutdown signal in the response queue, this is a bit of a hack but it allows us to unblock the engine if it's waiting on the response queue
                         ..Default::default()
                     }).ok(); // Ignore errors when pushing the shutdown signal, since we're shutting down anyway
-                    return;
+                    continue;
                 }
         
                 let order_event = match self.build_order(msg) {
                     Ok(event) => event,
                     Err(e) => {
                         tracing::error!("Failed to parse FIX message: {}, skipping", e);
-                        return; // Skip malformed messages
+                        continue; // Skip malformed messages
                     }
                 };
 
@@ -134,7 +134,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                     Ok(_) => {},
                     Err(e) => {
                         tracing::error!("Invalid order event parsed: {}, skipping", e);
-                        return; // Skip invalid events
+                        continue; // Skip invalid events
                     }
                 }
 
@@ -153,7 +153,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                     },
                     Err(e) => {
                         tracing::error!("Failed to push order event to order book queue: {}, skipping", e);
-                        return; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
+                        continue; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
                     }
                 }
             }
@@ -254,6 +254,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                 if key == EntityId::from_ascii("") {
                     // This is a signal to stop the engine, so we can ignore it
                     self.shared.shutdown.store(true, Ordering::Relaxed);
+                    continue;
                 } else {
                     if let Some(resp_queue) = self.shared.get_pending(&key) {
                         match resp_queue.send(_response) {

@@ -168,9 +168,18 @@ impl OrderBook {
             };
 
             if let Some(queue) = order_queue {
-                if order_ref.position < queue.len() {
+                // Fast path: use cached position if still valid and points to the same order.
+                let index = if order_ref.position < queue.len()
+                    && queue[order_ref.position].cl_ord_id == orig_cl_ord_id
+                {
+                    Some(order_ref.position)
+                } else {
+                    // Fallback: positions can become stale after fills/cancels at the same price level.
+                    queue.iter().position(|o| o.cl_ord_id == orig_cl_ord_id)
+                };
 
-                    match queue.remove(order_ref.position) {
+                if let Some(index) = index {
+                    match queue.remove(index) {
                         Some(_) => {
                             // Remove the price entry from the order if no more orders are left at that price level
                             if queue.is_empty() {
@@ -180,7 +189,7 @@ impl OrderBook {
                                 };
                             }
                         }
-                        None => tracing::error!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, order_ref.position),
+                        None => tracing::error!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, index),
                     }
 
                     self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
@@ -220,6 +229,7 @@ impl OrderBook {
             Side::Sell => self.asks.get(&order.price).map_or(0, |queue| queue.len()),
         };
         self.order_map.insert(order.cl_ord_id, OrderRef::new(order.side, order.price, position));
+        tracing::debug!("Added order with ID: {}, side: {:?}, price: {}, position: {} to order map", order.cl_ord_id, order.side, order.price, position);
     }
 
     /// Processes a sell limit order by matching it against the best available bids in the order book. If the order is not fully filled, it is added to the asks heap.

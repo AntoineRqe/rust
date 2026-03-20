@@ -191,7 +191,7 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 fn main() {
 
     tracing_subscriber::fmt()
-        .with_env_filter("info,web=debug,server=debug,fix=debug")
+        .with_env_filter("info,web=debug,server=debug,fix=debug,order_book=debug,execution_report=debug")
         .init();
 
     let market_simulator = Arc::new(Mutex::new(MarketSimulator {

@@ -82,6 +82,20 @@
          font-family:'Courier New',monospace;padding:3px 6px}
   .ghost:hover{color:var(--text)}
 
+  /* ── open orders ── */
+  .order-row{display:flex;align-items:center;justify-content:space-between;
+             background:#1a1e2a;padding:6px 8px;margin:3px 0;border-radius:2px;
+             font-size:10px;border-left:2px solid var(--blue)}
+  .order-row.sell{border-left-color:var(--red)}
+  .order-info{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .order-info .sym{color:var(--teal);font-weight:bold}
+  .order-info .qty{color:var(--muted)}
+  .order-info .px{color:var(--gold)}
+  .order-cancel{background:transparent;color:var(--red);border:none;cursor:pointer;
+                font-size:12px;font-weight:bold;padding:2px 6px;margin-left:4px;
+                flex-shrink:0}
+  .order-cancel:hover{color:#ff5577}
+
   /* ── order book ── */
   #book-hdr{display:flex;justify-content:space-between;align-items:center;padding:8px 10px 4px}
   #book-sym{color:var(--teal);font-size:11px;font-weight:bold}
@@ -221,6 +235,11 @@
     &#9654; &nbsp;BUY ORDER
   </button>
 
+  <div class="stitle" style="margin-top:8px">OPEN ORDERS</div><div class="ssep"></div>
+  <div id="orders-list" style="flex:1;overflow-y:auto;padding:0 6px 6px;min-height:40px">
+    <span style="color:var(--muted);font-size:10px">No open orders</span>
+  </div>
+
   <div class="stitle" style="margin-top:8px">MARKET DATA</div><div class="ssep"></div>
   <button class="md-btn" id="md-V" onclick="openDlg('V')" disabled>V &nbsp; Market Data Request</button>
   <button class="md-btn" id="md-W" onclick="openDlg('W')" disabled>W &nbsp; MD Snapshot Full Refresh</button>
@@ -289,6 +308,8 @@ let side      = 'BUY';
 let dlgType   = null;
 let ws        = null;
 const LEVELS  = 8;
+let clordSeq  = 0;
+const ORDER_PENDING_TIMEOUT_MS = 30000;
 
 // client-side order book (updated from exec reports)
 const book = {
@@ -300,6 +321,10 @@ const book = {
   pending: {},   // clordId → {price, qty, side}
   orderState: {}, // clordId → {side, price, leaves}
 };
+
+// open orders (by clordId)
+const openOrders = {}; // clordId → {symbol, qty, price, side}
+const orderTimeouts = {}; // clordId → timeout handle
 
 // chart history
 let chartPts = [], lastTradeCount = 0;
@@ -399,11 +424,80 @@ function sendOrder() {
   const price  = parseFloat(ge('o-price').value);
   const s      = side === 'BUY' ? '1' : '2';
 
-  // cache locally so we can resolve price from ClOrdID when exec report arrives
-  const clordId = `ORD-WEB-${Date.now()}`;
+  // FIX OrderId in this project is fixed-size (20 chars); keep ClOrdID <= 20.
+  clordSeq = (clordSeq + 1) % 1000;
+  const ts = Date.now().toString().slice(-9);
+  const clordId = `ORD-WEB-${ts}${clordSeq.toString().padStart(3, '0')}`;
   book.pending[clordId] = { price, qty, side: s };
+  openOrders[clordId] = { symbol, qty, price, side: s };
+  schedulePendingTimeout(clordId);
 
-  send({ action: 'order', symbol, qty, price, side: s });
+  send({ action: 'order', clord_id: clordId, symbol, qty, price, side: s });
+  renderOrders();
+}
+
+function clearPendingTimeout(clordId) {
+  const t = orderTimeouts[clordId];
+  if (t) {
+    clearTimeout(t);
+    delete orderTimeouts[clordId];
+  }
+}
+
+function cleanupOrderState(clordId) {
+  if (!clordId) return;
+  clearPendingTimeout(clordId);
+  delete book.pending[clordId];
+  delete book.orderState[clordId];
+  delete openOrders[clordId];
+}
+
+function schedulePendingTimeout(clordId) {
+  clearPendingTimeout(clordId);
+  orderTimeouts[clordId] = setTimeout(() => {
+    if (!book.pending[clordId]) return;
+    cleanupOrderState(clordId);
+    renderOrders();
+    appendLog({
+      ts: now(),
+      label: 'INFO',
+      body: `Order timeout cleanup (${clordId})`,
+      tag: 'info',
+    });
+  }, ORDER_PENDING_TIMEOUT_MS);
+}
+
+// ── render open orders ─────────────────────────────────────────────────────────
+function renderOrders() {
+  const list = ge('orders-list');
+  const orderIds = Object.keys(openOrders);
+  
+  if (orderIds.length === 0) {
+    list.innerHTML = '<span style="color:var(--muted);font-size:10px">No open orders</span>';
+    return;
+  }
+  
+  list.innerHTML = orderIds.map(clordId => {
+    const o = openOrders[clordId];
+    const isSell = o.side === '2';
+    const leaves = book.orderState[clordId]?.leaves || o.qty;
+    const sideStr = isSell ? 'SELL' : 'BUY';
+    return `<div class="order-row ${isSell ? 'sell' : ''}">
+      <div class="order-info">
+        <span class="sym">${esc(o.symbol)}</span>
+        <span class="qty">${Math.round(leaves).toLocaleString()}</span>
+        <span class="px">@ ${fmt(o.price)}</span>
+      </div>
+      <button class="order-cancel" onclick="cancelOrder('${esc(clordId)}', '${esc(o.symbol)}', ${o.qty})">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function cancelOrder(clordId, symbol, qty) {
+  clearPendingTimeout(clordId);
+  send({ action: 'cancel', clord_id: clordId, symbol, qty });
+  delete openOrders[clordId];
+  renderOrders();
 }
 
 // ── MD dialogs ────────────────────────────────────────────────────────────────
@@ -535,12 +629,15 @@ function updateBookFromFix(body, tag) {
 
   const status    = f['39'] || '';
   const side      = f['54'] || '';
-  const clordId   = f['11'] || '';
+  // Use OrigClOrdID (41) if available (for cancel reports), else ClOrdID (11)
+  const clordId   = f['41'] || f['11'] || '';
   const lastPx    = sf(f['31']);
   const lastQty   = sf(f['32']);
   const qty       = sf(f['38']);
   const leavesQty = sf(f['151']);
   const sym       = f['55'];
+
+  if (clordId) clearPendingTimeout(clordId);
 
   // resolve price: tag 44 > tag 6 > pending cache
   let price = sf(f['44'] || f['6']);
@@ -581,12 +678,14 @@ function updateBookFromFix(body, tag) {
       rmQty(contraSide, fillPx, fillQty);
     }
     applyOrderLeaves(clordId, side, price, 0);
-    delete book.pending[clordId];
+    cleanupOrderState(clordId);
+    renderOrders();
 
-  } else if (status === '3' || status === '4' || status === 'C') {
+  } else if (status === '3' || status === '4' || status === 'C' || status === '8') {
     // Cancelled/Expired
     applyOrderLeaves(clordId, side, price, 0);
-    delete book.pending[clordId];
+    cleanupOrderState(clordId);
+    renderOrders();
   }
 
   renderBook();
