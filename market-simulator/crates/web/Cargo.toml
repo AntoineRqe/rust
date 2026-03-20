@@ -12,6 +12,7 @@ serde_json      = "1"
 futures         = "0.3"
 tracing.workspace = true
 chrono          = "0.4"
+base64          = "0.22"
 
 types           = { path = "../types" }
 order-book      = { path = "../order-book" }

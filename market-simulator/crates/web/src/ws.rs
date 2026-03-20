@@ -1,15 +1,27 @@
 use axum::{
     extract::{ws::{WebSocket, Message}, WebSocketUpgrade, State},
     response::IntoResponse,
+    http::{HeaderMap, StatusCode, header},
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use crate::server::AppState;
+use crate::server::is_authorized;
 use crate::state::{WsEvent, BrowserCommand};
 
 pub async fn ws_handler(
     ws:           WebSocketUpgrade,
     State(state): State<AppState>,
+    headers:      HeaderMap,
 ) -> impl IntoResponse {
+    if !is_authorized(&headers, state.web_password.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"FIX Web Terminal\"")],
+            "Authentication required",
+        )
+            .into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
