@@ -252,6 +252,7 @@ impl OrderBook {
                 let mut best_bid_queue = self.bids.pop_first().unwrap().1;
 
                 while let Some(mut best_bid) = best_bid_queue.pop_front() {
+                    let maker_qty_before = best_bid.quantity;
                     let trade_quantity = remaining_quantity.min(best_bid.quantity);
                     // Process the trade here (e.g., update quantities, record the trade, etc.)
                     best_bid.quantity -= trade_quantity;
@@ -263,6 +264,8 @@ impl OrderBook {
                         cl_ord_id: best_bid.cl_ord_id, // Include the client order ID of the matched order in the trade record
                         quantity: trade_quantity,
                         id: self.id_counter, // Example trade ID
+                        order_qty: maker_qty_before,
+                        leaves_qty: best_bid.quantity,
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
@@ -324,6 +327,7 @@ impl OrderBook {
                 let mut best_ask_queue = self.asks.pop_first().unwrap().1; // Remove the best ask queue from the asks heap to process it
                 
                 while let Some(mut best_ask) = best_ask_queue.pop_front() {
+                    let maker_qty_before = best_ask.quantity;
                     let trade_quantity = remaining_quantity.min(best_ask.quantity);
                     // Process the trade here (e.g., update quantities, record the trade, etc.)
                     best_ask.quantity -= trade_quantity;
@@ -335,6 +339,8 @@ impl OrderBook {
                         cl_ord_id: best_ask.cl_ord_id,
                         quantity: trade_quantity,
                         id: self.id_counter, // Example trade ID
+                        order_qty: maker_qty_before,
+                        leaves_qty: best_ask.quantity,
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached

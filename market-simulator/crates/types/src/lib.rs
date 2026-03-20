@@ -191,6 +191,8 @@ pub struct Trade {
     pub quantity: FixedPointArithmetic,
     pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub cl_ord_id: OrderId,
+    pub order_qty: FixedPointArithmetic,
+    pub leaves_qty: FixedPointArithmetic,
     pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
@@ -209,6 +211,8 @@ impl<const N: usize> Default for Trades<N> {
                 quantity: FixedPointArithmetic::ZERO,
                 id: TradeId::new(),
                 cl_ord_id: OrderId::default(),
+                order_qty: FixedPointArithmetic::ZERO,
+                leaves_qty: FixedPointArithmetic::ZERO,
                 timestamp: Instant::now(),
             }; N],
             count: 0,
