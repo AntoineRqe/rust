@@ -31,7 +31,7 @@ struct MarketSimulator {
     entry_point: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
 }
 
-fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, web_password: Option<String>) {
+fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 
     let mut market_simulator = market_simulator.lock().unwrap();
 
@@ -146,9 +146,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, web_password: Opt
     std::thread::spawn({
         core_affinity::set_for_current(core_affinity::CoreId { id: 0 });
         let bus = bus.clone();
-        let web_password = web_password;
         move || {
-            run_web_server(bus, fix_sender, 7654, web_password);
+            run_web_server(bus, fix_sender, 7654, std::path::PathBuf::from("players.json"));
         }
     });
 
@@ -191,13 +190,6 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 
 fn main() {
 
-    let mut web_password: Option<String> = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--password" {
-            web_password = args.next();
-        }
-    }
 
     tracing_subscriber::fmt()
         .with_env_filter("info,web=debug,server=debug,fix=debug,order_book=debug,execution_report=debug")
@@ -216,7 +208,7 @@ fn main() {
 
      std::thread::spawn(move || {
          core_affinity::set_for_current(core_affinity::CoreId { id: 0 });
-         start_market(market_simulator_clone, web_password);
+         start_market(market_simulator_clone);
      });
     
     // Add the CTRL-C handler to stop the market simulator gracefully

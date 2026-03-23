@@ -27,6 +27,7 @@
   /* ws indicator separate from FIX connection */
   #ws-dot{font-size:10px;color:var(--muted);white-space:nowrap;flex-shrink:0}
   #ws-dot.on{color:var(--teal)}
+  #token-balance{font-size:11px;color:var(--gold);white-space:nowrap;flex-shrink:0}
 
   /* ── mobile tab bar ── */
   #tabbar{display:none;background:var(--panel);border-bottom:1px solid var(--border);
@@ -214,6 +215,7 @@
 
 <div id="topbar">
   <h1>&#x2B21; FIX 4.2 &nbsp;ORDER &amp; MARKET DATA TERMINAL</h1>
+  <span id="token-balance">TOKENS: &#8212;</span>
   <span id="ws-dot">&#9679; WS</span>
   <span id="status-dot">&#9679; DISCONNECTED</span>
 </div>
@@ -272,6 +274,7 @@
   <div class="footer-row">
     <button class="ghost" onclick="send({action:'clear_book'})">clear book</button>
     <button class="ghost" onclick="send({action:'reset_seq'})">reset seq</button>
+    <button class="ghost" onclick="send({action:'reset_tokens'})">reset tokens</button>
   </div>
 </div>
 
@@ -333,6 +336,9 @@ let ws        = null;
 const LEVELS  = 8;
 let clordSeq  = 0;
 const ORDER_PENDING_TIMEOUT_MS = 30000;
+let currentPlayer = null;
+let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
+let lastTokenBalance = null;
 
 // client-side order book (updated from exec reports)
 const book = {
@@ -396,6 +402,9 @@ function handleServerEvent(msg) {
     case 'status':
       handleStatus(msg.connected);
       break;
+    case 'player_state':
+      handlePlayerState(msg);
+      break;
     case 'fix_message':
       appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
       // parse the FIX message to update order book
@@ -422,6 +431,46 @@ function handleStatus(connected) {
   dot.className   = connected ? 'on' : '';
   ge('btn-send').disabled = !connected;
   document.querySelectorAll('.md-btn').forEach(b => b.disabled = !connected);
+
+  if (!connected) {
+    ge('token-balance').textContent = 'TOKENS: —';
+  }
+}
+
+function handlePlayerState(msg) {
+  currentPlayer = msg.username || null;
+  currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+  const tokens = Number(msg.tokens || 0);
+
+  if (lastTokenBalance !== null) {
+    const delta = tokens - lastTokenBalance;
+    if (Math.abs(delta) > 1e-9) {
+      const sign = delta >= 0 ? '+' : '';
+      appendLog({
+        ts: now(),
+        label: 'TOKENS',
+        body: `${sign}${delta.toFixed(2)} (balance: ${tokens.toFixed(2)})`,
+        tag: delta >= 0 ? 'info' : 'err',
+      });
+    }
+  }
+
+  lastTokenBalance = tokens;
+  ge('token-balance').textContent = `TOKENS: ${tokens.toFixed(2)}`;
+
+  // Replace local open-orders view with server truth so reconnect reloads UI.
+  Object.keys(openOrders).forEach(id => delete openOrders[id]);
+  const pending = Array.isArray(msg.pending_orders) ? msg.pending_orders : [];
+  pending.forEach(o => {
+    if (!o || !o.cl_ord_id) return;
+    openOrders[o.cl_ord_id] = {
+      symbol: o.symbol || '',
+      qty: Number(o.qty || 0),
+      price: Number(o.price || 0),
+      side: String(o.side || '1'),
+    };
+  });
+  renderOrders();
 }
 
 // ── side toggle ───────────────────────────────────────────────────────────────
@@ -464,10 +513,15 @@ function sendOrder() {
   const price  = parseFloat(ge('o-price').value);
   const s      = side === 'BUY' ? '1' : '2';
 
-  // FIX OrderId in this project is fixed-size (20 chars); keep ClOrdID <= 20.
+  // FIX OrderId in this project is fixed-size (20 chars); keep ClOrdID <= 20
+  // while embedding the player name prefix.
   clordSeq = (clordSeq + 1) % 1000;
-  const ts = Date.now().toString().slice(-9);
-  const clordId = `ORD-WEB-${ts}${clordSeq.toString().padStart(3, '0')}`;
+  const seq = clordSeq.toString().padStart(3, '0');
+  const ts = Date.now().toString().slice(-6);
+  const rawPlayer = (currentPlayer || 'WEB').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const playerPrefix = (rawPlayer || 'WEB').slice(0, 6);
+  const suffix = currentPlayerSuffix || '0000';
+  const clordId = `${playerPrefix}${suffix}${ts}${seq}`.slice(0, 20);
   book.pending[clordId] = { price, qty, side: s };
   openOrders[clordId] = { symbol, qty, price, side: s };
   schedulePendingTimeout(clordId);

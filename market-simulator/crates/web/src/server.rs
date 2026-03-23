@@ -6,15 +6,14 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use crate::state::EventBus;
+use crate::players::PlayerStore;
 use crate::ws::ws_handler;
 use base64::{Engine as _, engine::general_purpose};
 
-// N must be known at compile time — use a type alias in your types crate
-// or pass it as a const generic. We use a trait object here to avoid
-// leaking N into the web crate.
 pub type FixSender = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
@@ -22,22 +21,33 @@ pub type FixSender = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 pub struct AppState {
     pub bus: EventBus,
     /// Injects a raw FIX message into the engine, bypassing TCP.
-    /// The closure captures net_to_fix_tx from main.rs.
     pub fix_sender: FixSender,
-    pub web_password: Option<String>,
+    /// Per-player state registry (tokens, pending orders, credentials).
+    pub player_store: PlayerStore,
 }
 
-pub fn run_web_server(bus: EventBus, fix_sender: FixSender, port: u16, web_password: Option<String>) {
+pub fn run_web_server(
+    bus: EventBus,
+    fix_sender: FixSender,
+    port: u16,
+    players_file: PathBuf,
+) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_sender, port, web_password))
+        .block_on(serve(bus, fix_sender, port, players_file))
 }
 
-async fn serve(bus: EventBus, fix_sender: FixSender, port: u16, web_password: Option<String>) {
-    let state = AppState { bus, fix_sender, web_password };
+async fn serve(
+    bus: EventBus,
+    fix_sender: FixSender,
+    port: u16,
+    players_file: PathBuf,
+) {
+    let player_store = PlayerStore::load(players_file);
+    let state = AppState { bus, fix_sender, player_store };
 
     let app = Router::new()
         .route("/",   get(index_handler))
@@ -56,10 +66,10 @@ async fn index_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !is_authorized(&headers, state.web_password.as_deref()) {
+    if authenticate(&headers, &state.player_store).is_none() {
         return (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"FIX Web Terminal\"")],
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"Market Simulator\"")],
             "Authentication required",
         )
             .into_response();
@@ -68,30 +78,19 @@ async fn index_handler(
     Html(include_str!("../frontend/index.html")).into_response()
 }
 
-pub(crate) fn is_authorized(headers: &HeaderMap, expected_password: Option<&str>) -> bool {
-    let Some(expected) = expected_password else {
-        return true;
-    };
+/// Extract `(username, password)` from an HTTP Basic-Auth header.
+pub(crate) fn extract_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = auth.strip_prefix("Basic ")?;
+    let decoded = general_purpose::STANDARD.decode(encoded).ok()?;
+    let user_pass = std::str::from_utf8(&decoded).ok()?.to_string();
+    let (user, pass) = user_pass.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
+}
 
-    let Some(auth_header) = headers.get(header::AUTHORIZATION) else {
-        return false;
-    };
-    let Ok(auth_str) = auth_header.to_str() else {
-        return false;
-    };
-
-    let Some(encoded) = auth_str.strip_prefix("Basic ") else {
-        return false;
-    };
-    let Ok(decoded) = general_purpose::STANDARD.decode(encoded) else {
-        return false;
-    };
-    let Ok(user_pass) = std::str::from_utf8(&decoded) else {
-        return false;
-    };
-    let Some((_, password)) = user_pass.split_once(':') else {
-        return false;
-    };
-
-    password == expected
+/// Authenticate (or auto-register) via the player store.
+/// Returns `Some(username)` on success, `None` on missing / wrong credentials.
+pub(crate) fn authenticate(headers: &HeaderMap, store: &PlayerStore) -> Option<String> {
+    let (username, password) = extract_credentials(headers)?;
+    store.authenticate_or_register(&username, &password).ok()
 }

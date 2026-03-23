@@ -5,27 +5,27 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use crate::server::AppState;
-use crate::server::is_authorized;
-use crate::state::{WsEvent, BrowserCommand};
+use crate::server::authenticate;
+use crate::state::{WsEvent, BrowserCommand, PendingOrder};
 
 pub async fn ws_handler(
     ws:           WebSocketUpgrade,
     State(state): State<AppState>,
     headers:      HeaderMap,
 ) -> impl IntoResponse {
-    if !is_authorized(&headers, state.web_password.as_deref()) {
+    let Some(username) = authenticate(&headers, &state.player_store) else {
         return (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"FIX Web Terminal\"")],
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"Market Simulator\"")],
             "Authentication required",
         )
             .into_response();
-    }
+    };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, username))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
     // Split into sender and receiver so we can use both concurrently
     // in the select! loop without borrow issues.
     let (mut sender, mut receiver) = socket.split();
@@ -41,6 +41,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let status = serde_json::to_string(&WsEvent::Status { connected: true }).unwrap();
     let _ = sender.send(Message::Text(status.into())).await;
 
+    // Send the player's current state (tokens + pending orders) on every new connection.
+    if let Some(player) = state.player_store.get_player(&username) {
+        let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
+        let ps = serde_json::to_string(&WsEvent::PlayerState {
+            username: player.username.clone(),
+            tokens:   player.tokens,
+            pending_orders: player.pending_orders.clone(),
+            id_suffix,
+        }).unwrap();
+        let _ = sender.send(Message::Text(ps.into())).await;
+    }
+
     tracing::debug!("Browser WebSocket connected");
 
     loop {
@@ -49,6 +61,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
+                        if let WsEvent::FixMessage { tag, body, .. } = &event {
+                            if tag == "feed" {
+                                // Apply once globally (deduped inside PlayerStore), then
+                                // always refresh this socket's player state so every client
+                                // sees up-to-date tokens/pending orders.
+                                state.player_store.apply_fix_execution_report(body);
+                                if let Some(player) = state.player_store.get_player(&username) {
+                                    let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
+                                    let ps = serde_json::to_string(&WsEvent::PlayerState {
+                                        username: player.username.clone(),
+                                        tokens:   player.tokens,
+                                        pending_orders: player.pending_orders.clone(),
+                                        id_suffix,
+                                    }).unwrap();
+                                    let _ = sender.send(Message::Text(ps.into())).await;
+                                }
+                            }
+                        }
+
                         let json = serde_json::to_string(&event).unwrap();
                         if sender.send(Message::Text(json.into())).await.is_err() {
                             break;
@@ -65,7 +96,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_browser_message(&text, &state).await;
+                        handle_browser_message(&text, &state, &username).await;
+                        // After every command, push the updated player state to this client.
+                        if let Some(player) = state.player_store.get_player(&username) {
+                            let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
+                            let ps = serde_json::to_string(&WsEvent::PlayerState {
+                                username: player.username.clone(),
+                                tokens:   player.tokens,
+                                pending_orders: player.pending_orders.clone(),
+                                id_suffix,
+                            }).unwrap();
+                            let _ = sender.send(Message::Text(ps.into())).await;
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         tracing::debug!("Browser disconnected");
@@ -84,7 +126,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     state.bus.publish(WsEvent::Status { connected: false });
 }
 
-async fn handle_browser_message(text: &str, state: &AppState) {
+async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
     tracing::debug!("Received message from browser: {text}");
     let cmd: BrowserCommand = match serde_json::from_str(text) {
         Ok(c)  => c,
@@ -102,6 +144,16 @@ async fn handle_browser_message(text: &str, state: &AppState) {
 
             let sender_id = sender.unwrap_or_else(|| "BROWSER".into());
             let target_id = target.unwrap_or_else(|| "SERVER1".into());
+
+            // Record the order in the player's pending list.
+            // Token balance is updated only on transaction (execution reports).
+            state.player_store.add_pending_order(username, PendingOrder {
+                cl_ord_id: clord_id.clone(),
+                symbol: symbol.clone(),
+                side: side.clone(),
+                qty,
+                price,
+            });
 
             let fix_bytes = build_new_order_single(
                 &sender_id, &target_id, &symbol,
@@ -128,6 +180,10 @@ async fn handle_browser_message(text: &str, state: &AppState) {
         BrowserCommand::Cancel { clord_id, symbol, qty } => {
             let symbol = symbol.unwrap_or_else(|| "AAPL".into());
             let qty = qty.unwrap_or(0.0);
+
+            // Drop the pending order. Token balance is not changed on cancel.
+            state.player_store.remove_pending_order(username, &clord_id);
+
             let fix_bytes = build_order_cancel_request(
                 "BROWSER", "SERVER1",
                 &clord_id, &symbol, qty,
@@ -151,6 +207,22 @@ async fn handle_browser_message(text: &str, state: &AppState) {
                 body:  "Sequence number reset.".into(),
                 tag:   "info".into(),
             });
+        }
+
+        BrowserCommand::ResetTokens => {
+            if state.player_store.reset_tokens(username) {
+                state.bus.publish(WsEvent::FixMessage {
+                    label: "INFO".into(),
+                    body: "Player token balance reset to initial value.".into(),
+                    tag: "info".into(),
+                });
+            } else {
+                state.bus.publish(WsEvent::FixMessage {
+                    label: "ERROR".into(),
+                    body: "Unable to reset tokens: player not found.".into(),
+                    tag: "err".into(),
+                });
+            }
         }
 
         BrowserCommand::Disconnect => {

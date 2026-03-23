@@ -1,5 +1,16 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+
+/// A single order resting in the order book on behalf of a player.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingOrder {
+    pub cl_ord_id: String,
+    pub symbol: String,
+    /// FIX side: "1" = buy, "2" = sell.
+    pub side: String,
+    pub qty: f64,
+    pub price: f64,
+}
 
 /// Every event the FIX engine produces that the browser needs to know about.
 /// This is a plain serializable type — no FIX internals leak into the web layer.
@@ -17,6 +28,17 @@ pub enum WsEvent {
     /// Connection status changed
     Status {
         connected: bool,
+    },
+
+    /// Sent to the browser immediately after a WebSocket connection is
+    /// established, and after every order / cancel to keep the UI in sync.
+    PlayerState {
+        username: String,
+        tokens: f64,
+        pending_orders: Vec<PendingOrder>,
+        /// Last 4 characters of the stored password hash — used by the browser
+        /// as a stable, unique suffix in ClOrdID generation.
+        id_suffix: String,
     },
 }
 
@@ -73,6 +95,7 @@ pub enum BrowserCommand {
         symbol: String,
         depth:  Option<u32>,
     },
+    ResetTokens,
     ResetSeq,
     Disconnect,
 }
