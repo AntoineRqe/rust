@@ -339,6 +339,7 @@ const ORDER_PENDING_TIMEOUT_MS = 30000;
 let currentPlayer = null;
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
 let lastTokenBalance = null;
+let playerStateTimer = null;    // debounce handle for handlePlayerState
 
 // client-side order book (updated from exec reports)
 const book = {
@@ -403,7 +404,7 @@ function handleServerEvent(msg) {
       handleStatus(msg.connected);
       break;
     case 'player_state':
-      handlePlayerState(msg);
+      schedulePlayerState(msg);
       break;
     case 'fix_message':
       appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
@@ -437,11 +438,11 @@ function handleStatus(connected) {
   }
 }
 
-function handlePlayerState(msg) {
-  currentPlayer = msg.username || null;
-  currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+// Debounce player_state updates so rapid server bursts (exec-report + player_state)
+// don't cause a visible flicker of the orders panel.
+function schedulePlayerState(msg) {
+  // Apply token-balance / delta log immediately so the number feels responsive.
   const tokens = Number(msg.tokens || 0);
-
   if (lastTokenBalance !== null) {
     const delta = tokens - lastTokenBalance;
     if (Math.abs(delta) > 1e-9) {
@@ -454,9 +455,17 @@ function handlePlayerState(msg) {
       });
     }
   }
-
   lastTokenBalance = tokens;
   ge('token-balance').textContent = `TOKENS: ${tokens.toFixed(2)}`;
+
+  // Defer the orders-panel repaint so overlapping pushes coalesce.
+  clearTimeout(playerStateTimer);
+  playerStateTimer = setTimeout(() => handlePlayerState(msg), 200);
+}
+
+function handlePlayerState(msg) {
+  currentPlayer = msg.username || null;
+  currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
 
   // Replace local open-orders view with server truth so reconnect reloads UI.
   Object.keys(openOrders).forEach(id => delete openOrders[id]);

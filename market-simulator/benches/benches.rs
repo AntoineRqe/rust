@@ -12,7 +12,8 @@ use std::time::Duration;
 use std::sync::Mutex;
 use execution_report::{ExecutionReportEngine};
 use spsc::spsc_lock_free::RingBuffer;
-use types::{EntityId, OrderEvent, OrderResult, Trades};
+use types::{OrderEvent, OrderResult, Trades};
+use types::macros::{EntityId, OrderId, FixedString};
 use fix::engine::{FixEngine, FixRawMsg, kill_fix_inbound_engine};
 use std::sync::Arc;
 
@@ -96,15 +97,15 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
             let mut order_event = types::OrderEvent {
                         order_type: types::OrderType::LimitOrder,
-                        cl_ord_id: types::OrderId::from_ascii("CLORD12345"),
+                        cl_ord_id: OrderId::from_ascii("CLORD12345"),
                         orig_cl_ord_id: None,
-                        order_id: types::OrderId::from_ascii("ORDERID"),
+                        order_id: OrderId::from_ascii("ORDERID"),
                         side: types::Side::Buy,
                         price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
                         quantity: types::FixedPointArithmetic(1_000_000),
-                        sender_id: types::EntityId::from_ascii("SENDER"),
-                        target_id: types::EntityId::from_ascii("TARGET"),
-                        symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
+                        sender_id: EntityId::from_ascii("SENDER"),
+                        target_id: EntityId::from_ascii("TARGET"),
+                        symbol: FixedString::from_ascii("TEST_SYMBOL"),
                         timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
                     };
 
@@ -223,15 +224,15 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
             let mut order_event = types::OrderEvent {
                 order_type: types::OrderType::LimitOrder,
-                cl_ord_id: types::OrderId::from_ascii("CLORD12345"),
-                order_id: types::OrderId::from_ascii("ORDERID"),
+                cl_ord_id: OrderId::from_ascii("CLORD12345"),
+                order_id: OrderId::from_ascii("ORDERID"),
                 orig_cl_ord_id: None,
                 side: types::Side::Buy,
                 price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
                 quantity: types::FixedPointArithmetic(1_000_000),
-                sender_id: types::EntityId::from_ascii("SENDER"),
-                target_id: types::EntityId::from_ascii("TARGET"),
-                symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
+                sender_id: EntityId::from_ascii("SENDER"),
+                target_id: EntityId::from_ascii("TARGET"),
+                symbol: FixedString::from_ascii("TEST_SYMBOL"),
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
         

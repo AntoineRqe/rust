@@ -1,4 +1,11 @@
-use types::{EntityId, OrderEvent, OrderResult};
+use types::{
+    OrderEvent,
+    OrderResult,
+    macros:: {
+        EntityId,
+    }
+};
+
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use fix::{engine::FixRawMsg, tags::{exec_type_code_set, msg_types, ord_status_code_set, side_code_set, tags::{self}}};
@@ -285,7 +292,25 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 mod tests {
     use std::time::Instant;
 
-    use types::Trades;
+    use types::{
+        Trade,
+        Trades,
+    };
+
+    use types::macros::{
+        FixedString,
+        OrderId,
+        EntityId,
+        TradeId,
+    };
+
+    use types::{
+        OrderEvent,
+        OrderResult,
+        OrderStatus,
+        OrderType,
+        Side,
+    };
 
     use super::*;
 
@@ -305,22 +330,22 @@ mod tests {
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to start
 
-            let order_event = types::OrderEvent {
+            let order_event = OrderEvent {
                 order_type: types::OrderType::LimitOrder,
-                cl_ord_id: types::OrderId::from_ascii("CLORD12345"),
+                cl_ord_id: OrderId::from_ascii("CLORD12345"),
                 orig_cl_ord_id: None,
-                order_id: types::OrderId::from_ascii("ORDERID"),
+                order_id: OrderId::from_ascii("ORDERID"),
                 side: types::Side::Buy,
-                price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
-                quantity: types::FixedPointArithmetic(1_000_000),
-                sender_id: types::EntityId::from_ascii("SENDER"),
-                target_id: types::EntityId::from_ascii("TARGET"),
-                symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
+                price: FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
+                quantity: FixedPointArithmetic(1_000_000),
+                sender_id: EntityId::from_ascii("SENDER"),
+                target_id: EntityId::from_ascii("TARGET"),
+                symbol: FixedString::from_ascii("TEST_SYMBOL"),
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
 
-            let order_result = types::OrderResult {
-                trades: types::Trades::default(),
+            let order_result = OrderResult {
+                trades: Trades::default(),
                 status: types::OrderStatus::New,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
@@ -332,6 +357,7 @@ mod tests {
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
 
+            assert_eq!(fifo_out_rx.len(), 1); // We should have received one execution report for the new order
             let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated");
             let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
             let parsed_report = fix_parser.get_fields();
@@ -360,33 +386,33 @@ mod tests {
             // assert_eq!(avg_px_field.value, number_to_bytes(0u64).as_ref()); // No trades executed, so AVG_PX should be 0
     
             // Add a SELL order to generate a trade and test that LAST_QTY, LAST_PX, and AVG_PX are populated correctly in the execution report
-            let sell_order_event = types::OrderEvent {
-                order_type: types::OrderType::LimitOrder,
-                cl_ord_id: types::OrderId::from_ascii("CLORD54321"),
+            let sell_order_event = OrderEvent {
+                order_type: OrderType::LimitOrder,
+                cl_ord_id: OrderId::from_ascii("CLORD54321"),
                 orig_cl_ord_id: None,
-                order_id: types::OrderId::from_ascii("ORDERID2"),
-                side: types::Side::Sell,
-                price: types::FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
-                quantity: types::FixedPointArithmetic(1_000_000),
-                sender_id: types::EntityId::from_ascii("SENDER2"),
-                target_id: types::EntityId::from_ascii("TARGET2"),
-                symbol: types::FixedString::from_ascii("TEST_SYMBOL"),
+                order_id: OrderId::from_ascii("ORDERID2"),
+                side: Side::Sell,
+                price: FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
+                quantity: FixedPointArithmetic(1_000_000),
+                sender_id: EntityId::from_ascii("SENDER2"),
+                target_id: EntityId::from_ascii("TARGET2"),
+                symbol: FixedString::from_ascii("TEST_SYMBOL"),
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
 
-            let mut sell_order_result = types::OrderResult {
+            let mut sell_order_result = OrderResult {
                 trades: Trades::default(),
-                status: types::OrderStatus::New,
+                status: OrderStatus::New,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
 
-            sell_order_result.trades.add_trade(types::Trade {
-                price: types::FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
-                quantity: types::FixedPointArithmetic(5_000_000_000), // 50 units in FIX quantity format (6 decimal places)
-                id: types::TradeId::default()   ,
-                cl_ord_id: types::OrderId::from_ascii("CLORD12345"),
-                order_qty: types::FixedPointArithmetic(5_000_000_000),
-                leaves_qty: types::FixedPointArithmetic::ZERO,
+            sell_order_result.trades.add_trade(Trade {
+                price: FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
+                quantity: FixedPointArithmetic(5_000_000_000), // 50 units in FIX quantity format (6 decimal places)
+                id: TradeId::default()   ,
+                cl_ord_id: OrderId::from_ascii("CLORD12345"),
+                order_qty: FixedPointArithmetic(5_000_000_000),
+                leaves_qty: FixedPointArithmetic::ZERO,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             }).expect("Failed to add trade to OrderResult");
             
@@ -398,6 +424,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
 
             // First pop will be the execution report for the new sell order, which we can ignore for this test since we're focused on validating the execution report generated for the buy order when the trade occurs.
+            assert_eq!(fifo_out_rx.len(), 3); // We should have received two execution reports - one for the new sell order and one for the trade execution report for the buy order
             let (_, new_report) = fifo_out_rx.pop().expect("No execution report generated for sell order");
             let mut fix_parser = fix::parser::FixParser::new(&new_report.data[..new_report.len as usize]);
             let parsed_report = fix_parser.get_fields();
@@ -416,7 +443,19 @@ mod tests {
             // Pop the next report, which should be the execution report for the buy order with the trade details populated
             let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated for sell order");
             let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
-            let parsed_report = fix_parser.get_fields();  
+            let parsed_report = fix_parser.get_fields();
+
+            let last_qty_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_QTY).expect("LAST_QTY field missing");
+            assert_eq!(last_qty_field.value, field_str(&FixedPointArithmetic::from_f64(50.0).to_fix_bytes())); // 50 units filled
+            let last_px_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_PX).expect("LAST_PX field missing");
+            assert_eq!(last_px_field.value, field_str(&FixedPointArithmetic::from_f64(123.456).to_fix_bytes())); // 123.456 price
+            let avg_px_field = parsed_report.fields.iter().find(|f| f.tag == tags::AVG_PX).expect("AVG_PX field missing");
+            assert_eq!(avg_px_field.value, field_str(&FixedPointArithmetic::from_f64(123.456).to_fix_bytes())); // 123.456 price, since only one trade executed
+
+            // Pop the next report, which should be the execution report for the sell order with the trade details populated
+            let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated for sell order");
+            let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+            let parsed_report = fix_parser.get_fields();
 
             let last_qty_field = parsed_report.fields.iter().find(|f| f.tag == tags::LAST_QTY).expect("LAST_QTY field missing");
             assert_eq!(last_qty_field.value, field_str(&FixedPointArithmetic::from_f64(50.0).to_fix_bytes())); // 50 units filled
@@ -431,6 +470,10 @@ mod tests {
                 status: types::OrderStatus::Cancelled,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
+
+            let mut order_event = order_event;
+            order_event.orig_cl_ord_id = Some(order_event.cl_ord_id); // Set OrigClOrdID for the cancel order event
+            order_event.order_type = types::OrderType::CancelOrder;
     
             match fifo_in_tx.push((order_event, cancel_order_result)) {
                 Ok(_) => {},
@@ -438,6 +481,8 @@ mod tests {
             }
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
+
+            assert_eq!(fifo_out_rx.len(), 1); // We should have received one execution report for the cancel order
             let (_, raw_report) = fifo_out_rx.try_pop().expect("No execution report generated for cancel order");
             let mut fix_parser = fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
             let parsed_report = fix_parser.get_fields();

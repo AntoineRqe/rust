@@ -1,9 +1,21 @@
 use std::collections::{HashMap, VecDeque};
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 use types::{
-    FixedPointArithmetic, OrderEvent, OrderId, OrderResult, OrderStatus, OrderType, Side, Trade, TradeId, Trades, EntityId,
+    FixedPointArithmetic,
+    OrderEvent,
+    OrderResult,
+    OrderStatus,
+    OrderType,
+    Side,
+    Trade,
+    Trades,
+    macros::{
+        TradeId,
+        EntityId,
+        OrderId,
+    }
 };
-
+ 
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -445,8 +457,8 @@ mod tests {
     use core::f64;
     use std::{thread, time::Instant};
 
-    use types::{EntityId, FixedString, OrderId, Side};
     use super::*;
+    use types::macros::FixedString;
 
     const SYMBOL: FixedString = FixedString::from_ascii("TEST_SYMBOL000000000");
     const SENDER: EntityId = EntityId::from_ascii("SENDER0000000000000");
@@ -500,8 +512,8 @@ mod tests {
 
         let (cancel_order, cancel_result) = order_book.process_order(cancel_order);
         assert_eq!(cancel_result.status, OrderStatus::Cancelled);
-        assert!(cancel_order.price == FixedPointArithmetic::ZERO);
-        assert!(cancel_order.quantity == FixedPointArithmetic::ZERO);
+        assert_eq!(cancel_order.price, order.price); // The cancel acknowledgment should reflect the original order's price
+        assert_eq!(cancel_order.quantity, order.quantity); // The cancel acknowledgment should reflect the original order's quantity
         assert!(order_book.asks.is_empty()); // There should be no asks in the order book
         assert!(order_book.bids.is_empty()); // There should be no bids in the order book
         assert!(order_book.order_map.is_empty()); // There should be no asks in the order book
@@ -542,8 +554,8 @@ mod tests {
 
         let (cancel_order, cancel_result) = order_book.process_order(cancel_order);
         assert_eq!(cancel_result.status, OrderStatus::Cancelled);
-        assert!(cancel_order.price == FixedPointArithmetic::ZERO);
-        assert!(cancel_order.quantity == FixedPointArithmetic::ZERO);
+        assert!(cancel_order.price == order.price); // The cancel acknowledgment should reflect the original order's price
+        assert!(cancel_order.quantity == order.quantity); // The cancel acknowledgment should reflect the original order's quantity
         assert_eq!(order_book.get_best_ask(), None); // The best ask should be removed after cancellation
         assert!(order_book.order_map.is_empty()); // There should be no asks in the order book
 

@@ -91,7 +91,11 @@ impl <'a, T, const N: usize> Producer<'a, T, N> {
     where T: Copy
     {
         self.rb.push_batch(items)
-    }    
+    }
+
+    pub fn len(&self) -> usize {
+        self.rb.len()
+    }
 }
 
 impl <'a, T, const N: usize> Consumer<'a, T, N> {
@@ -124,6 +128,10 @@ impl <'a, T, const N: usize> Consumer<'a, T, N> {
 
     pub fn is_empty(&self) -> bool {
         self.rb.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rb.len()
     }
 }
 
@@ -380,7 +388,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
     pub fn len(&self) -> usize {
         let head = self.head.0.load(Ordering::Acquire);
         let tail = self.tail.0.load(Ordering::Relaxed);
-        (tail + N - head) & (N - 1) // Bitwise mask because N is power of 2
+        (head + N - tail) & (N - 1) // Bitwise mask because N is power of 2
     }
 }
 

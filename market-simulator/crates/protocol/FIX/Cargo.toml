@@ -14,6 +14,7 @@ crossbeam-channel.workspace = true
 serde.workspace = true
 itoa = "1.0.17"
 tracing.workspace = true
+tracing-subscriber = "0.3"
 
 [features]
 default = ["branchless", "simd"]

@@ -2,7 +2,15 @@ use std::{collections::HashMap};
 use std::sync::atomic::AtomicBool;
 
 use crate::tags::{tags, msg_types, side_code_set};
-use types::{EntityId, FixedPointArithmetic, OrderEvent, Side};
+use types::{
+    FixedPointArithmetic,
+    OrderEvent,
+    Side,
+    macros::{
+        EntityId,
+        OrderId,
+    }
+};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -60,6 +68,22 @@ impl<const N: usize> Default for FixRawMsg<N> {
     }
 }
 
+impl <const N: usize> FixRawMsg<N> {
+    pub fn new(data: &[u8], resp_queue: Option<crossbeam_channel::Sender<FixRawMsg<N>>>) -> Self {
+        let mut msg = FixRawMsg::default();
+        msg.len = data.len() as u16;
+        msg.data[..data.len()].copy_from_slice(data);
+        msg.resp_queue = resp_queue;
+        msg
+    }
+
+    pub fn to_human_readable(&self) -> String {
+        String::from_utf8_lossy(&self.data[..self.len as usize])
+            .replace('\x01', " | ")
+            .to_string()
+    }
+}
+
 /// A simple FIX engine that reads raw FIX messages from an input queue, parses them, and pushes structured order events to an output queue. This is a very basic implementation that only handles New Order Single messages and extracts a few fields for demonstration purposes.
 /// In a real system, you would need to handle many more message types and fields, as well as error handling and performance optimizations.
 pub struct FixEngine<'a, const N: usize> {
@@ -113,11 +137,13 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
                 if msg.len == 0 {
+                    tracing::debug!("Shutdown signal received in inbound engine, shutting down...");
                     // This is a signal to stop the engine, so we can set the shutdown flag and return
                     self.request_out.push(OrderEvent {
                         sender_id: EntityId::from_ascii(""), // Use an empty sender ID to indicate a shutdown signal in the response queue, this is a bit of a hack but it allows us to unblock the engine if it's waiting on the response queue
                         ..Default::default()
                     }).ok(); // Ignore errors when pushing the shutdown signal, since we're shutting down anyway
+                    self.shared.shutdown.store(true, Ordering::Relaxed);
                     continue;
                 }
         
@@ -205,7 +231,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                     utils::copy_array(&mut order_event.cl_ord_id.0, field.value);
                 },
                 tags::ORIG_CL_ORD_ID => {
-                    let mut orig_cl_ord_id = types::OrderId::default();
+                    let mut orig_cl_ord_id = OrderId::default();
                     utils::copy_array(&mut orig_cl_ord_id.0, field.value);
                     order_event.orig_cl_ord_id = Some(orig_cl_ord_id);
                 },  
@@ -252,6 +278,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
         while !self.shared.shutdown.load(Ordering::Relaxed) || !self.response_in.is_empty() {
             if let Some((key, _response)) = self.response_in.pop() {
                 if key == EntityId::from_ascii("") {
+                    tracing::info!("Shutdown signal received in outbound engine, shutting down...");
                     // This is a signal to stop the engine, so we can ignore it
                     self.shared.shutdown.store(true, Ordering::Relaxed);
                     continue;
@@ -318,7 +345,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
             counter: 0,
         };
 
-        ( inbound, outbound)
+        (inbound, outbound)
 
     }
 }
@@ -329,10 +356,15 @@ mod tests {
     use super::*;
     use utils::field_str;
     use spsc::spsc_lock_free::RingBuffer;
+    use tracing_subscriber;
 
 
     #[test]
     fn test_fix_engine() {
+        tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .init();
+
         // Inbound : net -> FIX -> order book
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
@@ -376,13 +408,10 @@ mod tests {
 
             net_to_fix_tx.send(raw_msg).expect("Failed to push message");
 
-            // spin wait instead of sleep
-            let order_event = loop {
-                if let Some(event) = fix_to_ob_rx.try_pop() {
-                    break event;
-                }
-                std::hint::spin_loop();
-            };
+            std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to process
+            assert_eq!(fix_to_ob_rx.len(), 1); // We should have received one order event in the order book queue
+
+            let order_event = fix_to_ob_rx.pop().unwrap();
     
             assert_eq!(field_str(order_event.cl_ord_id.as_ref()),  b"12345");
             assert_eq!(field_str(order_event.sender_id.as_ref()), b"SENDER");

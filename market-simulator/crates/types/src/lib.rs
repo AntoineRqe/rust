@@ -1,7 +1,11 @@
 use std::time::Instant;
 use std::{cmp::Ordering};
-use std::ops::{Deref, Index};
+use std::ops::{Index};
 use std::iter::Sum;
+
+pub mod macros;
+
+use macros::{EntityId, OrderId, TradeId, FixedString};
 
 /// Represents an order in the order book.
 /// Orders are compared based on price for sorting in the order book.
@@ -158,23 +162,6 @@ impl Ord for OrderEvent {
         // Higher price first
         self.price
             .cmp(&other.price)
-    }
-}
-
-impl TradeId {
-    pub fn new() -> Self {
-        TradeId([0u8; 20]) // In a real implementation, you would want to generate unique IDs
-    }
-
-    pub fn increment(&mut self) {
-        for i in (0..self.0.len()).rev() {
-            if self.0[i] < 255 {
-                self.0[i] += 1;
-                break;
-            } else {
-                self.0[i] = 0; // Reset to zero and carry over to the next byte
-            }
-        }
     }
 }
 
@@ -335,154 +322,6 @@ pub enum OrderStatus {
     Filled,
     Cancelled,
     CancelRejected,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct FixedString(pub [u8; 20]);
-
-#[derive(Debug, Clone, Copy,PartialEq, Eq, Default)]
-pub struct TradeId(pub [u8; 20]);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Hash)]
-pub struct OrderId(pub [u8; 20]);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Hash)]
-pub struct EntityId(pub [u8; 20]);
-
-impl Deref for EntityId {
-    type Target = [u8; 20];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for EntityId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
-        write!(f, "{}", s.trim_matches(char::from(0)))
-    }
-}
-
-impl std::fmt::Display for OrderId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
-        write!(f, "{}", s.trim_matches(char::from(0)))
-    }
-}
-
-impl Deref for FixedString {
-    type Target = [u8; 20];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Deref for OrderId {
-    type Target = [u8; 20];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Deref for TradeId {
-    type Target = [u8; 20];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl AsRef<[u8]> for OrderId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl AsRef<[u8]> for TradeId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl AsRef<[u8]> for EntityId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl AsRef<[u8]> for FixedString {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl EntityId {
-    pub const fn from_ascii(s: &str) -> Self {
-        let mut bytes = [0u8; 20];
-        let s_bytes = s.as_bytes();
-        let mut i = 0;
-        while i < s_bytes.len() && i < 20 {
-            bytes[i] = s_bytes[i];
-            i += 1;
-        }
-        EntityId(bytes)
-    }
-}
-
-impl OrderId {
-    pub const fn from_ascii(s: &str) -> Self {
-        let mut bytes = [0u8; 20];
-        let s_bytes = s.as_bytes();
-        let mut i = 0;
-        while i < s_bytes.len() && i < 20 {
-            bytes[i] = s_bytes[i];
-            i += 1;
-        }
-        OrderId(bytes)
-    }
-
-    pub fn new() -> Self {
-        OrderId([0u8; 20]) // In a real implementation, you would want to generate unique IDs
-    }
-
-    pub fn increment(&mut self) {
-        for i in (0..self.0.len()).rev() {
-            if self.0[i] < 255 {
-                self.0[i] += 1;
-                break;
-            } else {
-                self.0[i] = 0; // Reset to zero and carry over to the next byte
-            }
-        }
-    }
-}
-
-impl std::ops::Add for OrderId {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        let mut result = [0u8; 20];
-        for i in 0..20 {
-            result[i] = self.0[i] ^ other.0[i]; // Simple XOR for demonstration, not a real ID generation strategy
-        }
-        OrderId(result)
-    }
-}
-
-impl FixedString {
-    pub const fn from_ascii(s: &str) -> Self {
-        let mut bytes = [0u8; 20];
-        let s_bytes = s.as_bytes();
-        let mut i = 0;
-        while i < s_bytes.len() && i < 20 {
-            bytes[i] = s_bytes[i];
-            i += 1;
-        }
-        FixedString(bytes)
-    }
 }
 
 /// Price represented as integer with implicit 8 decimal places
