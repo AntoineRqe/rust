@@ -11,6 +11,7 @@ members = [
     "crates/execution-report",
     "crates/types",
     "crates/web",
+    "crates/db",
 ]
 
 # Shared dependencies across all crates

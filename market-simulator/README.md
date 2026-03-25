@@ -18,6 +18,11 @@ Browser ──WebSocket──► axum web server (crates/web)
               │                               │
     OrderBookEngine ──────────────── ExecutionReportEngine
     (crates/order-book)            (crates/execution-report)
+              │                               │
+              └──────────────┬────────────────┘
+                             │
+                       DatabaseEngine
+                         (crates/db)
 ```
 
 Technical choices and discussion about the architecture and design of the simulator can be found here [Architecture and Design](./papers/market-simulator.md).
@@ -29,11 +34,12 @@ Technical choices and discussion about the architecture and design of the simula
 - `execution-report`: This crate is responsible for generating execution reports based on the results of order processing. It takes the order events and their corresponding results to create detailed execution reports that can be sent back to clients or used for analysis. [Execution Report](crates/execution-report/README.md)
 - `server`: This crate implements the server that handles incoming FIX messages, processes orders through the order book and matching engine, and sends execution reports back to clients. [Server](crates/server/README.md)
 - `logging`: This crate provides logging functionality for the entire project, allowing for detailed logs of the order processing and market events. [Logging](crates/logging/README.md)
-- `types`: This crate defines the common types used across the project, such as orders, trades, and market data.
-- `utils`: This crate provides utility functions and types that are used across the project, such as timestamp handling and fixed-point arithmetic.
+- `types`: This crate defines the common types used across the project, such as orders, trades, and market data. [Types](crates/types/README.md)
+- `utils`: This crate provides utility functions and types that are used across the project, such as timestamp handling and fixed-point arithmetic. [Utils](crates/utils/README.md)
 - `memory`: This crate provides an in-memory implementation of the order book and matching engine, allowing for fast processing of orders without the need for persistent storage. [Memory](crates/memory/README.md)
 - `web`: This crate implements a web-based client that allows users to interact with the market simulator through a web interface. It provides functionality for sending FIX messages to the server and receiving execution reports in real-time. [Web Client](crates/web/README.md)
-
+- `db`: This crate provides a PostgreSQL persistence layer for the market simulator, allowing for the storage and retrieval of order events, order results, trades, and pending orders. [Database](crates/db/README.md)
+─
 ## Running the Simulator
 
 To run the simulator, you can use the following command:

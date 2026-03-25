@@ -410,6 +410,10 @@ impl FixedPointArithmetic {
         buf
     }
 
+    pub fn to_f64(self) -> f64 {
+        self.0 as f64 / Self::SCALE as f64
+    }
+
     pub fn from_f64(number: f64) -> Self {
         FixedPointArithmetic((number * Self::SCALE as f64).round() as i64)
     }
