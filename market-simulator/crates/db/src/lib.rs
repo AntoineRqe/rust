@@ -1,8 +1,11 @@
 use dotenvy::dotenv;
 use sqlx::{query, query_scalar, PgPool, Row, Transaction, Postgres};
+use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::future::Future;
 use std::time::Instant;
+use std::time::Duration;
+use std::sync::OnceLock;
 use types::{
     FixedPointArithmetic,
     OrderEvent,
@@ -39,11 +42,15 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
         block_on_db(create_tables(&self.pool))
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&self) {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
-                if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
-                    tracing::error!("Error persisting order update: {}", e);
+                if exec_report.0.sender_id == EntityId::from_ascii("") {
+                    self.shutdown.store(true, Ordering::Relaxed);
+                } else {
+                    if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
+                        tracing::error!("Error persisting order update: {}", e);
+                    }
                 }
             }
         }
@@ -85,18 +92,37 @@ where
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         tokio::task::block_in_place(|| handle.block_on(future))
     } else {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime for database operation")
-            .block_on(future)
+        static DB_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        let runtime = DB_RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .thread_name("db-runtime")
+                .build()
+                .expect("failed to build shared tokio runtime for database operations")
+        });
+        runtime.block_on(future)
     }
 }
 
 pub async fn connect_from_env() -> Result<PgPool, sqlx::Error> {
     dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    PgPool::connect(&database_url).await
+    tracing::debug!("Connecting to database at {}", database_url);
+    let max_connections = env::var("DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(10);
+    let acquire_timeout_secs = env::var("DB_ACQUIRE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(10);
+
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
+        .connect(&database_url)
+        .await
 }
 
 pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -338,8 +364,8 @@ pub async fn collect_all_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::
     Ok(rows
         .into_iter()
         .map(|row| OrderEvent {
-            price: fixed_from_option_f64(row.get("price")),
-            quantity: fixed_from_option_f64(row.get("quantity")),
+            price: FixedPointArithmetic::from_option_f64(row.get("price")),
+            quantity: FixedPointArithmetic::from_option_f64(row.get("quantity")),
             side: parse_side(row.get("side")),
             symbol: fixed_string_from_option(row.get("symbol")),
             order_type: parse_order_type(row.get("order_type")),
@@ -378,8 +404,8 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
     Ok(rows
         .into_iter()
         .map(|row| Trade {
-            price: fixed_from_option_f64(row.get("price")),
-            quantity: fixed_from_option_f64(row.get("qty")),
+            price: FixedPointArithmetic::from_option_f64(row.get("price")),
+            quantity: FixedPointArithmetic::from_option_f64(row.get("qty")),
             id: trade_id_from_option(row.get("exec_id")),
             cl_ord_id: row
                 .get::<Option<String>, _>("sell_cl_ord_id")
@@ -389,8 +415,8 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
                         .map(|value| OrderId::from_ascii(&value))
                 })
                 .unwrap_or_default(),
-            order_qty: fixed_from_option_f64(row.get("order_qty")),
-            leaves_qty: fixed_from_option_f64(row.get("leaves_qty")),
+            order_qty: FixedPointArithmetic::from_option_f64(row.get("order_qty")),
+            leaves_qty: FixedPointArithmetic::from_option_f64(row.get("leaves_qty")),
             // `Instant` cannot be faithfully reconstructed from SQL text, so we
             // restore a fresh monotonic timestamp here.
             timestamp: Instant::now(),
@@ -446,8 +472,8 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
     Ok(rows
         .into_iter()
         .map(|row| OrderEvent {
-            price: fixed_from_option_f64(row.get("price")),
-            quantity: fixed_from_option_f64(row.get("quantity")),
+            price: FixedPointArithmetic::from_option_f64(row.get("price")),
+            quantity: FixedPointArithmetic::from_option_f64(row.get("quantity")),
             side: parse_side(row.get("side")),
             symbol: fixed_string_from_option(row.get("symbol")),
             order_type: parse_order_type(row.get("order_type")),
@@ -706,12 +732,6 @@ fn parse_order_status(value: Option<String>) -> OrderStatus {
     }
 }
 
-fn fixed_from_option_f64(value: Option<f64>) -> FixedPointArithmetic {
-    value
-        .map(FixedPointArithmetic::from_f64)
-        .unwrap_or(FixedPointArithmetic::ZERO)
-}
-
 fn parse_side(value: Option<String>) -> Side {
     match value.as_deref() {
         Some("Sell") => Side::Sell,
@@ -768,7 +788,6 @@ mod tests {
 
         let pool = connect_from_env().await?;
         create_tables(&pool).await?;
-
         reset_database(&pool).await?;
 
         let orders = collect_all_orders(&pool).await?;

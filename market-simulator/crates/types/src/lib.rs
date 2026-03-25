@@ -418,6 +418,12 @@ impl FixedPointArithmetic {
         FixedPointArithmetic((number * Self::SCALE as f64).round() as i64)
     }
     
+    pub fn from_option_f64(value: Option<f64>) -> FixedPointArithmetic {
+        value
+            .map(FixedPointArithmetic::from_f64)
+            .unwrap_or(FixedPointArithmetic::ZERO)
+    }
+
     pub fn from_raw(raw: i64) -> Self {
         FixedPointArithmetic(raw)
     }

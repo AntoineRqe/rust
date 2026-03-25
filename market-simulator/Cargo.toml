@@ -45,6 +45,7 @@ spsc.workspace = true
 memory = { path = "crates/memory" }
 execution-report = { path = "crates/execution-report" }
 types = { path = "crates/types" }
+db = { path = "crates/db" }
 core_affinity = "0.8.3"
 ctrlc = "3.2.0"
 web   = { path = "crates/web" }
@@ -86,3 +87,4 @@ lazy_static.workspace = true
 execution-report = { path = "crates/execution-report" }
 types = { path = "crates/types" }
 fix = { path = "crates/protocol/FIX" }
+db = { path = "crates/db" }

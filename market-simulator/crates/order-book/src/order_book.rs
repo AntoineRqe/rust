@@ -33,18 +33,24 @@ pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent
 
 pub struct OrderBookEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, OrderEvent, N>,
-    fifo_out: Producer<'a, (OrderEvent, OrderResult), N>,
+    fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2],
     order_book: OrderBook,
     shutdown: Arc<AtomicBool>,
 }
 
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, OrderEvent, N>, fifo_out: Producer<'a, (OrderEvent, OrderResult), N>) -> Self {
+    pub fn new(fifo_in: Consumer<'a, OrderEvent, N>, fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2]) -> Self {
         OrderBookEngine {
             fifo_in,
             fifo_out,
             order_book: OrderBook::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn import_order_book(&mut self, orders: Vec<OrderEvent>) {
+        for order in orders {
+            self.order_book.process_order(order);
         }
     }
 
@@ -54,13 +60,21 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 
                 if event.sender_id == EntityId::from_ascii("") {
                     self.shutdown.store(true, Ordering::Relaxed);
-                    self.fifo_out.push((event, OrderResult::default())).ok(); // Push a dummy message to unblock any waiting consumers
+                    for producer in &self.fifo_out {
+                        if let Some(producer) = producer {
+                            producer.push((event, OrderResult::default())).ok(); // Push a dummy message to unblock any waiting consumers
+                        }
+                    }
                 } else {
                     let (event, result) = self.order_book.process_order(event);
                     let mut execution_report_input = (event, result);
-                    while let Err((event_er, result_er)) = self.fifo_out.push(execution_report_input) {
-                        execution_report_input = (event_er, result_er);
-                        std::hint::spin_loop(); // If the output queue is full, spin until there is space
+                    for producer in &self.fifo_out {
+                        if let Some(producer) = producer {
+                            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
+                                execution_report_input = (event_er, result_er);
+                                std::hint::spin_loop(); // If the output queue is full, spin until there is space
+                            }
+                        }
                     }
                 }
             }
@@ -1056,7 +1070,7 @@ mod tests {
 
             let mut engine = OrderBookEngine::new(
                 inbound_consumer,
-                outbound_producer,
+                [Some(outbound_producer), None],
             );
             
             let ob_handle = s.spawn(move || {

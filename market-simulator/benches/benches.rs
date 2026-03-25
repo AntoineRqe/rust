@@ -210,7 +210,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let er_inbound_tx = Arc::new(er_inbound_tx);
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
 
-        let mut engine = OrderBookEngine::new(er_rx, er_tx);
+        let mut engine = OrderBookEngine::new(er_rx, [Some(er_tx), None]);
 
         let handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
@@ -452,7 +452,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         });
 
         // Book engine thread
-        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, ob_tx);
+        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, [Some(ob_tx), None]);
         let ob_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 6 });
             order_book_engine.run();
