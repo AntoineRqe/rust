@@ -2,6 +2,7 @@ use types::{OrderEvent, OrderResult};
 use types::macros::{EntityId};
 use clap::Parser;
 use order_book::order_book::{OrderBookEngine};
+use order_book::OrderBookControl;
 use server::tcp::{
     FixServer,
 };
@@ -38,6 +39,7 @@ struct ThreadHandles {
     db_thread: Option<std::thread::JoinHandle<()>>,
     web_thread: Option<std::thread::JoinHandle<()>>,
     tcp_thread: Option<std::thread::JoinHandle<()>>,
+    grpc_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 struct MarketSimulator {
@@ -134,6 +136,9 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         }
     };
 
+    // Grab the database pool for the gRPC service before moving db_engine into its thread.
+    let db_pool = db_engine.pool();
+
     let _db_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.db_core });
         db_engine.run();
@@ -143,8 +148,11 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         market_simulator.thread_handles.lock().unwrap().db_thread = Some(_db_thread);
     }
 
+    // Order-book control channel (used by the gRPC reset service).
+    let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
+
     // Book engine thread
-    let mut order_book_engine = OrderBookEngine::new(ob_rx, [Some(ob_tx), Some(ob_db_tx)]);
+    let mut order_book_engine = OrderBookEngine::new(ob_rx, [Some(ob_tx), Some(ob_db_tx)], ob_control_rx);
 
     order_book_engine.import_order_book(initial_orders);
 
@@ -186,11 +194,12 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.web_core });
         let bus = bus.clone();
         let fix_tcp_addr = format!("{}:{}", config.tcp.ip, config.tcp.port);
+        let grpc_addr    = format!("http://127.0.0.1:{}", config.grpc.port);
         let web_ip = config.web.ip.clone();
         let web_port = config.web.port;
         let web_shutdown = Arc::clone(&web_shutdown);
         move || {
-            run_web_server(bus, fix_tcp_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), web_shutdown);
+            run_web_server(bus, fix_tcp_addr, grpc_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), web_shutdown);
         }
     });
 
@@ -217,8 +226,31 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         market_simulator.thread_handles.lock().unwrap().tcp_thread = Some(_tcp_thread);
     }
 
+    // gRPC MarketControl server — handles ResetMarket (order book + DB).
+    let grpc_ip   = config.grpc.ip.clone();
+    let grpc_port = config.grpc.port;
+    let grpc_service = grpc::MarketControlService::new(ob_control_tx, db_pool);
+    let _grpc_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime for gRPC server");
+        let addr: std::net::SocketAddr = format!("{grpc_ip}:{grpc_port}")
+            .parse()
+            .expect("invalid gRPC address");
+        if let Err(e) = rt.block_on(grpc::serve(addr, grpc_service)) {
+            tracing::error!("gRPC server error: {e:#}");
+        }
+    });
+
+    {
+        market_simulator.thread_handles.lock().unwrap().grpc_thread = Some(_grpc_thread);
+    }
+
     tracing::info!("[{}] FIX server    -> {}:{}", config.name, config.tcp.ip, config.tcp.port);
     tracing::info!("[{}] Web terminal  -> http://{}:{}", config.name, config.web.ip, config.web.port);
+    tracing::info!("[{}] gRPC control  -> {}:{}", config.name, config.grpc.ip, config.grpc.port);
 
     Ok(())
 }
@@ -272,6 +304,12 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     if let Some(handle) = thread_handles.tcp_thread.take() {
         handle.join().expect("Failed to join TCP Server thread");
     }
+    // The gRPC server thread runs a single-threaded tokio runtime; dropping
+    // all senders/channels will eventually cause it to stop on its own, but
+    // we join it here for a clean shutdown.
+    if let Some(handle) = thread_handles.grpc_thread.take() {
+        handle.join().expect("Failed to join gRPC Server thread");
+    }
 }
 
 fn main() {
@@ -308,6 +346,7 @@ fn main() {
                 db_thread: None,
                 web_thread: None,
                 tcp_thread: None,
+                grpc_thread: None,
             })),
             entry_point: None,
             tcp_shutdown: None,

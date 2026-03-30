@@ -190,6 +190,33 @@ impl PlayerStore {
         true
     }
 
+    /// Reset player-side market state after a global market reset.
+    ///
+    /// Clears all pending orders for every player and drops execution-report
+    /// deduplication state so future reports are processed normally.
+    ///
+    /// Returns `(players_touched, orders_removed)`.
+    pub fn reset_market_state(&self) -> (usize, usize) {
+        let mut inner = self.inner.lock().unwrap();
+        let mut players_touched = 0usize;
+        let mut orders_removed = 0usize;
+
+        for player in inner.players.values_mut() {
+            if !player.pending_orders.is_empty() {
+                players_touched += 1;
+                orders_removed += player.pending_orders.len();
+                player.pending_orders.clear();
+            }
+        }
+
+        inner.processed_exec_ids.clear();
+        drop(inner);
+
+        // Always persist to keep on-disk state aligned with the market reset.
+        self.flush();
+        (players_touched, orders_removed)
+    }
+
     /// Apply a FIX execution report to player balances and pending orders.
     ///
     /// Returns `true` if any player state was updated.

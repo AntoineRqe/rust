@@ -408,6 +408,9 @@ function handleServerEvent(msg) {
       break;
     case 'fix_message':
       appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
+      if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
+        resetClientMarketView();
+      }
       // parse the FIX message to update order book
       updateBookFromFix(msg.body, msg.tag);
       break;
@@ -553,6 +556,23 @@ function cleanupOrderState(clordId) {
   delete book.pending[clordId];
   delete book.orderState[clordId];
   delete openOrders[clordId];
+}
+
+function resetClientMarketView() {
+  Object.keys(orderTimeouts).forEach(id => clearPendingTimeout(id));
+
+  book.bids = {};
+  book.asks = {};
+  book.trades = [];
+  book.last = null;
+  book.pending = {};
+  book.orderState = {};
+
+  Object.keys(openOrders).forEach(id => delete openOrders[id]);
+
+  clearChart();
+  renderOrders();
+  renderBook();
 }
 
 function schedulePendingTimeout(clordId) {

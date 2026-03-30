@@ -20,3 +20,5 @@ types           = { path = "../types" }
 order-book      = { path = "../order-book" }
 execution-report = { path = "../execution-report" }
 fix            = { path = "../protocol/FIX" }
+grpc           = { path = "../grpc" }
+tonic          = "0.12"

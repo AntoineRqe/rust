@@ -11,6 +11,10 @@
                 "ip": "127.0.0.1",
                 "port": 9877
             },
+            "grpc": {
+                "ip": "0.0.0.0",
+                "port": 50051
+            },
             "core_mapping": {
                 "order_book_core": 0,
                 "fix_inbound_core": 1,
@@ -31,6 +35,10 @@
             "tcp": {
                 "ip": "127.0.0.1",
                 "port": 9879
+            },
+            "grpc": {
+                "ip": "0.0.0.0",
+                "port": 50052
             },
             "core_mapping": {
                 "order_book_core": 0,

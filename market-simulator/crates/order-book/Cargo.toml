@@ -9,3 +9,4 @@ spsc.workspace = true
 logging = { path = "../logging" }
 types = { path = "../types" }
 utils = { path = "../utils" }
+crossbeam-channel.workspace = true

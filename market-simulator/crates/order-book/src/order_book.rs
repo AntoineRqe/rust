@@ -21,6 +21,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+pub enum OrderBookControl {
+    Reset,
+}
+
 fn market_name() -> &'static str {
     static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MARKET_NAME
@@ -41,17 +45,33 @@ pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent
 pub struct OrderBookEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, OrderEvent, N>,
     fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2],
+    control_rx: crossbeam_channel::Receiver<OrderBookControl>,
     order_book: OrderBook,
     shutdown: Arc<AtomicBool>,
 }
 
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, OrderEvent, N>, fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2]) -> Self {
+    pub fn new(
+        fifo_in: Consumer<'a, OrderEvent, N>,
+        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2],
+        control_rx: crossbeam_channel::Receiver<OrderBookControl>,
+    ) -> Self {
+        Self::with_shutdown(fifo_in, fifo_out, control_rx, None)
+    }
+
+    pub fn with_shutdown(
+        fifo_in: Consumer<'a, OrderEvent, N>,
+        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2],
+        control_rx: crossbeam_channel::Receiver<OrderBookControl>,
+        shutdown: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        let shutdown = shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         OrderBookEngine {
             fifo_in,
             fifo_out,
+            control_rx,
             order_book: OrderBook::new(),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown,
         }
     }
 
@@ -62,28 +82,45 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     }
 
     pub fn run(&mut self) {
-        while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
-            if let Some(event) = self.fifo_in.pop() {
+        loop {
+            // Process control messages first
+            while let Ok(control) = self.control_rx.try_recv() {
+                match control {
+                    OrderBookControl::Reset => {
+                        self.order_book = OrderBook::new();
+                        tracing::info!("[{}] Order book reset completed", market_name());
+                    }
+                }
+            }
 
+            // Blocking pop: shutdown should be triggered by a kill message
+            // to unblock this receive path.
+            if let Some(event) = self.fifo_in.pop() {
                 if event.sender_id == EntityId::from_ascii("") {
                     self.shutdown.store(true, Ordering::Relaxed);
-                    for producer in &self.fifo_out {
-                        if let Some(producer) = producer {
-                            producer.push((event, OrderResult::default())).ok(); // Push a dummy message to unblock any waiting consumers
-                        }
+
+                    if self.fifo_in.is_empty() {
+                        break;
                     }
-                } else {
-                    let (event, result) = self.order_book.process_order(event);
-                    let mut execution_report_input = (event, result);
-                    for producer in &self.fifo_out {
-                        if let Some(producer) = producer {
-                            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
-                                execution_report_input = (event_er, result_er);
-                                std::hint::spin_loop(); // If the output queue is full, spin until there is space
-                            }
+
+                    continue;
+                }
+
+                let (event, result) = self.order_book.process_order(event);
+                let mut execution_report_input = (event, result);
+                for producer in &self.fifo_out {
+                    if let Some(producer) = producer {
+                        while let Err((event_er, result_er)) = producer.push(execution_report_input) {
+                            execution_report_input = (event_er, result_er);
+                            std::hint::spin_loop(); // If the output queue is full, spin until there is space
                         }
                     }
                 }
+            }
+
+            // Break only when shutdown is signaled AND fifo is empty
+            if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
+                break;
             }
         }
 
@@ -1075,9 +1112,11 @@ mod tests {
             let(inbound_producer, inbound_consumer) = inbound_queue.split();
             let(outbound_producer, outbound_consumer) = outbound_queue.split();
 
+            let (_control_tx, control_rx) = crossbeam_channel::unbounded();
             let mut engine = OrderBookEngine::new(
                 inbound_consumer,
                 [Some(outbound_producer), None],
+                control_rx,
             );
             
             let ob_handle = s.spawn(move || {

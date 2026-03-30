@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package market_control;
+
+// Service for controlling the market simulator.
+service MarketControl {
+    // Reset both the order book and the database tables.
+    rpc ResetMarket (ResetRequest) returns (ResetResponse);
+}
+
+message ResetRequest {}
+
+message ResetResponse {
+    bool   success = 1;
+    string message = 2;
+}

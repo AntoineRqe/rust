@@ -324,6 +324,63 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, tc
             });
         }
 
+        BrowserCommand::ClearBook => {
+            use grpc::proto::market_control_client::MarketControlClient;
+            use grpc::proto::ResetRequest;
+            match MarketControlClient::connect(state.grpc_addr.clone()).await {
+                Ok(mut client) => {
+                    match client.reset_market(ResetRequest {}).await {
+                        Ok(resp) => {
+                            let r = resp.into_inner();
+                            let (tag, label, body, recipient) = if r.success {
+                                let (players_touched, orders_removed) = state.player_store.reset_market_state();
+                                (
+                                    "info",
+                                    "RESET ✓  Order book and database cleared.".to_string(),
+                                    format!(
+                                        "{} Player state cleared: {} pending order(s) removed across {} player(s).",
+                                        r.message,
+                                        orders_removed,
+                                        players_touched
+                                    ),
+                                    None,
+                                )
+                            } else {
+                                (
+                                    "err",
+                                    format!("RESET FAILED: {}", r.message),
+                                    r.message,
+                                    Some(username.to_string()),
+                                )
+                            };
+                            state.bus.publish(WsEvent::FixMessage {
+                                label,
+                                body,
+                                tag: tag.into(),
+                                recipient,
+                            });
+                        }
+                        Err(e) => {
+                            state.bus.publish(WsEvent::FixMessage {
+                                label: "ERROR".into(),
+                                body: format!("gRPC ResetMarket call failed: {e}"),
+                                tag: "err".into(),
+                                recipient: Some(username.to_string()),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.bus.publish(WsEvent::FixMessage {
+                        label: "ERROR".into(),
+                        body: format!("Failed to connect to gRPC server: {e}"),
+                        tag: "err".into(),
+                        recipient: Some(username.to_string()),
+                    });
+                }
+            }
+        }
+
         BrowserCommand::ResetTokens => {
             if state.player_store.reset_tokens(username) {
                 state.bus.publish(WsEvent::FixMessage {

@@ -12,6 +12,7 @@ members = [
     "crates/types",
     "crates/web",
     "crates/db",
+    "crates/grpc",
 ]
 
 # Shared dependencies across all crates
@@ -54,6 +55,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 config = { path = "crates/config" }
 clap = { version = "=4.5.49", features = ["derive"] }
+grpc  = { path = "crates/grpc" }
 
 
 # Optimization profiles

@@ -13,6 +13,7 @@ pub struct MarketConfig {
     pub name: String,
     pub web: Connection,
     pub tcp: Connection,
+    pub grpc: Connection,
     pub core_mapping: EngineCoreMapping,
 }
 

@@ -31,7 +31,6 @@ pub struct DatabaseEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
     shutdown: Arc<AtomicBool>,
     pool: Arc<PgPool>,
-
 }
 
 impl <'a, const N: usize> DatabaseEngine<'a, N> {
@@ -89,6 +88,12 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
 
     pub fn reset_database(&self) -> Result<(), sqlx::Error> {
         block_on_db(reset_database(&self.pool))
+    }
+
+    /// Returns a clone of the shared database pool, suitable for passing to
+    /// the gRPC control service.
+    pub fn pool(&self) -> Arc<PgPool> {
+        Arc::clone(&self.pool)
     }
 }
 

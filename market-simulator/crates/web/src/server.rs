@@ -30,6 +30,8 @@ pub struct AppState {
     pub bus: EventBus,
     /// Address of the FIX TCP gateway for this market instance.
     pub fix_tcp_addr: String,
+    /// gRPC address of the MarketControl service (e.g. "http://[::1]:50051").
+    pub grpc_addr: String,
     /// Per-player state registry (tokens, pending orders, credentials).
     pub player_store: PlayerStore,
 }
@@ -37,6 +39,7 @@ pub struct AppState {
 pub fn run_web_server(
     bus: EventBus,
     fix_tcp_addr: String,
+    grpc_addr: String,
     ip: &str,
     port: u16,
     players_file: PathBuf,
@@ -47,19 +50,20 @@ pub fn run_web_server(
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_tcp_addr, ip, port, players_file, shutdown))
+        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, players_file, shutdown))
 }
 
 async fn serve(
     bus: EventBus,
     fix_tcp_addr: String,
+    grpc_addr: String,
     ip: &str,
     port: u16,
     players_file: PathBuf,
     shutdown: Arc<AtomicBool>,
 ) {
     let player_store = PlayerStore::load(players_file);
-    let state = AppState { bus, fix_tcp_addr, player_store };
+    let state = AppState { bus, fix_tcp_addr, grpc_addr, player_store };
 
     let app = Router::new()
         .route("/",   get(index_handler))

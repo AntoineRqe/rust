@@ -99,5 +99,6 @@ pub enum BrowserCommand {
     },
     ResetTokens,
     ResetSeq,
+    ClearBook,
     Disconnect,
 }
