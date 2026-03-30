@@ -336,10 +336,14 @@ let ws        = null;
 const LEVELS  = 8;
 let clordSeq  = 0;
 const ORDER_PENDING_TIMEOUT_MS = 30000;
+const UI_RENDER_DELAY_MS = 120;
+const PENDING_VISIBILITY_DELAY_MS = 250;
 let currentPlayer = null;
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
 let lastTokenBalance = null;
 let playerStateTimer = null;    // debounce handle for handlePlayerState
+let orderBookRenderTimer = null;
+let openOrdersRenderTimer = null;
 
 // client-side order book (updated from exec reports)
 const book = {
@@ -354,6 +358,7 @@ const book = {
 
 // open orders (by clordId)
 const openOrders = {}; // clordId → {symbol, qty, price, side}
+const openOrderFirstSeen = {}; // clordId → first-seen timestamp (ms)
 const orderTimeouts = {}; // clordId → timeout handle
 
 // chart history
@@ -470,17 +475,33 @@ function handlePlayerState(msg) {
   currentPlayer = msg.username || null;
   currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
 
-  // Replace local open-orders view with server truth so reconnect reloads UI.
-  Object.keys(openOrders).forEach(id => delete openOrders[id]);
+  // Replace local open-orders view with server truth while preserving
+  // first-seen timestamps for orders that still exist.
+  const nextOpenOrders = {};
   const pending = Array.isArray(msg.pending_orders) ? msg.pending_orders : [];
   pending.forEach(o => {
     if (!o || !o.cl_ord_id) return;
-    openOrders[o.cl_ord_id] = {
+    nextOpenOrders[o.cl_ord_id] = {
       symbol: o.symbol || '',
       qty: Number(o.qty || 0),
       price: Number(o.price || 0),
       side: String(o.side || '1'),
     };
+
+    if (!openOrderFirstSeen[o.cl_ord_id]) {
+      openOrderFirstSeen[o.cl_ord_id] = Date.now();
+    }
+  });
+
+  Object.keys(openOrders).forEach(id => {
+    if (!nextOpenOrders[id]) {
+      delete openOrders[id];
+      delete openOrderFirstSeen[id];
+    }
+  });
+
+  Object.keys(nextOpenOrders).forEach(id => {
+    openOrders[id] = nextOpenOrders[id];
   });
   renderOrders();
 }
@@ -535,11 +556,9 @@ function sendOrder() {
   const suffix = currentPlayerSuffix || '0000';
   const clordId = `${playerPrefix}${suffix}${ts}${seq}`.slice(0, 20);
   book.pending[clordId] = { price, qty, side: s };
-  openOrders[clordId] = { symbol, qty, price, side: s };
   schedulePendingTimeout(clordId);
 
   send({ action: 'order', clord_id: clordId, symbol, qty, price, side: s });
-  renderOrders();
 }
 
 function clearPendingTimeout(clordId) {
@@ -556,6 +575,7 @@ function cleanupOrderState(clordId) {
   delete book.pending[clordId];
   delete book.orderState[clordId];
   delete openOrders[clordId];
+  delete openOrderFirstSeen[clordId];
 }
 
 function resetClientMarketView() {
@@ -569,6 +589,7 @@ function resetClientMarketView() {
   book.orderState = {};
 
   Object.keys(openOrders).forEach(id => delete openOrders[id]);
+  Object.keys(openOrderFirstSeen).forEach(id => delete openOrderFirstSeen[id]);
 
   clearChart();
   renderOrders();
@@ -591,9 +612,26 @@ function schedulePendingTimeout(clordId) {
 }
 
 // ── render open orders ─────────────────────────────────────────────────────────
-function renderOrders() {
+function renderOrders(immediate = false) {
+  if (!immediate) {
+    clearTimeout(openOrdersRenderTimer);
+    openOrdersRenderTimer = setTimeout(() => renderOrders(true), UI_RENDER_DELAY_MS);
+    return;
+  }
+
   const list = ge('orders-list');
-  const orderIds = Object.keys(openOrders);
+  const nowMs = Date.now();
+  const orderIds = Object.keys(openOrders).filter(id => {
+    const firstSeen = openOrderFirstSeen[id] || nowMs;
+    return (nowMs - firstSeen) >= PENDING_VISIBILITY_DELAY_MS;
+  });
+
+  const hiddenIds = Object.keys(openOrders).filter(id => !orderIds.includes(id));
+  if (hiddenIds.length > 0) {
+    const maxAge = Math.max(...hiddenIds.map(id => nowMs - (openOrderFirstSeen[id] || nowMs)));
+    const waitMs = Math.max(10, PENDING_VISIBILITY_DELAY_MS - maxAge);
+    setTimeout(() => renderOrders(), waitMs);
+  }
   
   if (orderIds.length === 0) {
     list.innerHTML = '<span style="color:var(--muted);font-size:10px">No open orders</span>';
@@ -620,6 +658,7 @@ function cancelOrder(clordId, symbol, qty) {
   clearPendingTimeout(clordId);
   send({ action: 'cancel', clord_id: clordId, symbol, qty });
   delete openOrders[clordId];
+  delete openOrderFirstSeen[clordId];
   renderOrders();
 }
 
@@ -810,7 +849,13 @@ function updateBookFromFix(body, tag) {
 }
 
 // ── render order book ─────────────────────────────────────────────────────────
-function renderBook() {
+function renderBook(immediate = false) {
+  if (!immediate) {
+    clearTimeout(orderBookRenderTimer);
+    orderBookRenderTimer = setTimeout(() => renderBook(true), UI_RENDER_DELAY_MS);
+    return;
+  }
+
   ge('book-sym').textContent  = 'ORDER BOOK  ' + book.symbol;
   ge('book-last').textContent = book.last != null ? 'last: ' + fmt(book.last) : 'last: —';
 
