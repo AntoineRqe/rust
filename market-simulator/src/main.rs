@@ -36,11 +36,15 @@ struct ThreadHandles {
     ob_thread: Option<std::thread::JoinHandle<()>>,
     er_thread: Option<std::thread::JoinHandle<()>>,
     db_thread: Option<std::thread::JoinHandle<()>>,
+    web_thread: Option<std::thread::JoinHandle<()>>,
+    tcp_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 struct MarketSimulator {
     thread_handles: Arc<Mutex<ThreadHandles>>,
     entry_point: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
+    /// Shared flag to stop the TCP accept loop gracefully.
+    tcp_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -196,7 +200,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
     });
 
     // Start the web server in a separate thread, passing it the event bus
-    std::thread::spawn({
+    let _web_thread = std::thread::spawn({
         core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.web_core });
         let bus = bus.clone();
         let web_ip = config.web.ip.clone();
@@ -206,27 +210,47 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
         }
     });
 
+    {
+        market_simulator.thread_handles.lock().unwrap().web_thread = Some(_web_thread);
+    }
 
-    core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.tcp_core });
     // tcp server — each client pushes directly into fifo_in
     let server: FixServer<RB_SIZE> = FixServer::new(Arc::clone(&net_to_fix_tx), bus.clone());
     let listener = TcpListener::bind(format!("{}:{}", config.tcp.ip, config.tcp.port)).unwrap();
 
-    drop(market_simulator); // Release the lock before starting the server loop, which runs indefinitely
+    // Grab the shutdown flag before releasing the lock so the Ctrl-C handler
+    // can signal the accept loop without holding any other lock.
+    let tcp_shutdown = server.shutdown_flag();
+    market_simulator.tcp_shutdown = Some(Arc::clone(&tcp_shutdown));
+
+    let tcp_core = config.core_mapping.tcp_core;
+    let _tcp_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: tcp_core });
+        server.accept_loop(listener);
+    });
+
+    {
+        market_simulator.thread_handles.lock().unwrap().tcp_thread = Some(_tcp_thread);
+    }
 
     tracing::info!("FIX server    -> {}:{}", config.tcp.ip, config.tcp.port);
     tracing::info!("Web terminal  -> http://{}:{}", config.web.ip, config.web.port);
 
-    // Block the main thread on the server accept loop, which will run until the process is killed
-    // If we leave the lock on market_simulator held, the CTRL-C handler won't be able to acquire it to stop the market simulator gracefully
-    // Leaving this function will drop shared memory queues, possible crashes 
-    server.accept_loop(listener);
-
-    Ok(())
+    // Keep shared-memory queue handles alive for the lifetime of the market.
+    // Park the thread; the Ctrl-C handler will call stop_market and then exit.
+    drop(market_simulator);
+    loop {
+        std::thread::park();
+    }
 }
 
 fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     let market_simulator = market_simulator.lock().unwrap();
+
+    // Signal the TCP accept loop to stop.
+    if let Some(flag) = &market_simulator.tcp_shutdown {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Send a shutdown message to the FIX engine to unblock it if it's waiting on the queue, in a real implementation you would want a more robust way to ensure the thread has stopped
     if let Some(entry_point) = &market_simulator.entry_point {
@@ -253,6 +277,12 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     if let Some(handle) = thread_handles.db_thread.take() {
         handle.join().expect("Failed to join Database thread");
     }
+    if let Some(handle) = thread_handles.web_thread.take() {
+        handle.join().expect("Failed to join Web Server thread");
+    }
+    if let Some(handle) = thread_handles.tcp_thread.take() {
+        handle.join().expect("Failed to join TCP Server thread");
+    }
 }
 
 fn main() {
@@ -275,19 +305,26 @@ fn main() {
             ob_thread: None,
             er_thread: None,
             db_thread: None,
+            web_thread: None,
+            tcp_thread: None,
         })),
         entry_point: None,
+        tcp_shutdown: None,
     }));
 
     let market_simulator_clone = Arc::clone(&market_simulator);
 
-    std::thread::spawn(move || {
+    let _tcp_thread = std::thread::spawn(move || {
         if let Err(e) = start_market(market_simulator_clone, market_config) {
             eprintln!("Market simulator failed to start: {}", e);
             std::process::exit(1);
         }
     });
-    
+
+    {
+        market_simulator.lock().unwrap().thread_handles.lock().unwrap().tcp_thread = Some(_tcp_thread);
+    }
+
     // Add the CTRL-C handler to stop the market simulator gracefully
     ctrlc::set_handler( move || {
         stop_market(Arc::clone(&market_simulator));

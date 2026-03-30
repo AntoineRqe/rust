@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::signal;
 use crate::state::EventBus;
 use crate::players::PlayerStore;
 use crate::ws::ws_handler;
@@ -61,7 +62,16 @@ async fn serve(
         .unwrap_or_else(|e| panic!("Cannot bind to port {port}: {e}"));
 
     tracing::info!("Web terminal → http://{}:{}", ip, port);
-    axum::serve(listener, app).await.expect("axum server error");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("axum server error");
+}
+
+async fn shutdown_signal() {
+    if signal::ctrl_c().await.is_ok() {
+        tracing::info!("Ctrl+C received, shutting down web server");
+    }
 }
 
 async fn index_handler(

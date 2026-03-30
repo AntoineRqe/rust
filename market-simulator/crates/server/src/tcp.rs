@@ -28,22 +28,51 @@ impl <'a, const N: usize> FixServer<N> {
         }
     }
 
+    /// Returns a handle to the shutdown flag so external code (e.g. the
+    /// Ctrl-C handler in main) can stop the accept loop cleanly.
+    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+
     pub fn accept_loop(&self, listener: TcpListener) {
-        for stream in listener.incoming() {
-            let stream = stream.unwrap();
-            // Disable Nagle's algorithm for lower latency
-            stream.set_nodelay(true).unwrap();
+        // Non-blocking mode lets us poll the shutdown flag between accepts.
+        listener.set_nonblocking(true)
+            .expect("Cannot set non-blocking on TCP listener");
 
-            let queue = Arc::clone(&self.fifo_in);
-            let shutdown = Arc::clone(&self.shutdown);
-            let bus = self.bus.clone();
+        loop {
+            if self.shutdown.load(Ordering::Relaxed) {
+                tracing::info!("TCP accept loop: shutdown signal received, stopping");
+                break;
+            }
 
-            tracing::info!("New client connected from {}", stream.peer_addr().unwrap());
-            // Spawn a thread to handle this client connection
-            std::thread::spawn(move || {
-                Self::handle_client(stream, queue, shutdown, bus);
-            });
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    // Restore blocking mode for the connected socket.
+                    stream.set_nonblocking(false).unwrap();
+                    // Disable Nagle's algorithm for lower latency
+                    stream.set_nodelay(true).unwrap();
+
+                    let queue    = Arc::clone(&self.fifo_in);
+                    let shutdown = Arc::clone(&self.shutdown);
+                    let bus      = self.bus.clone();
+
+                    tracing::info!("New client connected from {}", addr);
+                    std::thread::spawn(move || {
+                        Self::handle_client(stream, queue, shutdown, bus);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No pending connection yet — sleep briefly and retry.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => {
+                    tracing::error!("TCP accept error: {e}");
+                    break;
+                }
+            }
         }
+
+        tracing::info!("TCP server exited gracefully");
     }
 
     fn handle_client(
