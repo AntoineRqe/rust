@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::PendingOrder;
 
+fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
 /// Tokens each new player receives on registration.
 pub const INITIAL_TOKENS: f64 = 100_000.0;
 
@@ -70,7 +77,8 @@ impl PlayerStore {
             HashMap::new()
         };
         tracing::info!(
-            "Player store: {} player(s) loaded from {:?}",
+            "[{}] Player store: {} player(s) loaded from {:?}",
+            market_name(),
             players.len(),
             path
         );
@@ -98,25 +106,26 @@ impl PlayerStore {
             Some(player) => {
                 match verify_or_upgrade_password(&player.password, password) {
                     Ok(PasswordCheck::Verified) => {
-                        tracing::debug!("Player '{username}' authenticated");
+                        tracing::debug!("[{}] Player '{username}' authenticated", market_name());
                         Ok(username.to_string())
                     }
                     Ok(PasswordCheck::VerifiedAndUpgraded(new_hash)) => {
                         player.password = new_hash;
-                        tracing::info!("Player '{username}' password upgraded to hash");
+                        tracing::info!("[{}] Player '{username}' password upgraded to hash", market_name());
                         drop(inner);
                         self.flush();
                         Ok(username.to_string())
                     }
                     Err(_) => {
-                        tracing::warn!("Player '{username}': wrong password");
+                        tracing::warn!("[{}] Player '{username}': wrong password", market_name());
                         Err("Wrong password".into())
                     }
                 }
             }
             None => {
                 tracing::info!(
-                    "Registering new player '{username}' with {INITIAL_TOKENS} tokens"
+                    "[{}] Registering new player '{username}' with {INITIAL_TOKENS} tokens",
+                    market_name()
                 );
                 let password_hash = hash_password(password)
                     .map_err(|_| "Password hashing failed")?;
@@ -282,12 +291,13 @@ impl PlayerStore {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&inner.path, json) {
                     tracing::error!(
-                        "Failed to persist player data to {:?}: {e}",
+                        "[{}] Failed to persist player data to {:?}: {e}",
+                        market_name(),
                         inner.path
                     );
                 }
             }
-            Err(e) => tracing::error!("Failed to serialise player data: {e}"),
+            Err(e) => tracing::error!("[{}] Failed to serialise player data: {e}", market_name()),
         }
     }
 }

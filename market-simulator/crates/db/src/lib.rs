@@ -20,6 +20,13 @@ use spsc::spsc_lock_free::{Consumer};
 use std::sync::{Arc, atomic::{AtomicBool}};
 use std::sync::atomic::Ordering;
 
+fn market_name() -> &'static str {
+    static MARKET_NAME: OnceLock<String> = OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
 pub struct DatabaseEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
     shutdown: Arc<AtomicBool>,
@@ -49,7 +56,7 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
                     self.shutdown.store(true, Ordering::Relaxed);
                 } else {
                     if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
-                        tracing::error!("Error persisting order update: {}", e);
+                        tracing::error!("[{}] Error persisting order update: {}", market_name(), e);
                     }
                 }
             }
@@ -57,7 +64,7 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
         
         block_on_db(self.pool.close());
 
-        tracing::info!("Database engine shutting down gracefully");
+        tracing::info!("[{}] Database engine shutting down gracefully", market_name());
     }
 
     pub fn persist_order_update(
@@ -108,7 +115,7 @@ where
 pub async fn connect_from_env() -> Result<PgPool, sqlx::Error> {
     dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    tracing::debug!("Connecting to database at {}", database_url);
+    tracing::debug!("[{}] Connecting to database at {}", market_name(), database_url);
     let max_connections = env::var("DB_MAX_CONNECTIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())

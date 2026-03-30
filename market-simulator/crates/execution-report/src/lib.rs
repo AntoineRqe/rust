@@ -13,6 +13,13 @@ use utils::{field_str, number_to_bytes};
 use std::sync::Arc;
 use types::FixedPointArithmetic;
 
+fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
 pub fn kill_execution_report_engine<const N: usize>(producer: &Producer<'_, (OrderEvent, OrderResult), N>) {
     // Send a dummy message with an empty sender_id to signal the engine to shut down
     let _ = producer.push((OrderEvent::default(), OrderResult::default()));
@@ -41,7 +48,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             }
         }
         
-        tracing::info!("Execution report engine shutting down gracefully");
+        tracing::info!("[{}] Execution report engine shutting down gracefully", market_name());
     }
 
     fn build_cancel_report(&self, exec_report: &(OrderEvent, OrderResult)) -> FixRawMsg<N> {

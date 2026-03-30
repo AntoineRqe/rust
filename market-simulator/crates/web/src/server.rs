@@ -8,12 +8,21 @@ use axum::{
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use crate::state::EventBus;
 use crate::players::PlayerStore;
 use crate::ws::ws_handler;
 use base64::{Engine as _, engine::general_purpose};
+
+fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
 
 pub type FixSender = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 
@@ -33,13 +42,14 @@ pub fn run_web_server(
     ip: &str,
     port: u16,
     players_file: PathBuf,
+    shutdown: Arc<AtomicBool>,
 ) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_sender, ip, port, players_file))
+        .block_on(serve(bus, fix_sender, ip, port, players_file, shutdown))
 }
 
 async fn serve(
@@ -48,6 +58,7 @@ async fn serve(
     ip: &str,
     port: u16,
     players_file: PathBuf,
+    shutdown: Arc<AtomicBool>,
 ) {
     let player_store = PlayerStore::load(players_file);
     let state = AppState { bus, fix_sender, player_store };
@@ -61,16 +72,27 @@ async fn serve(
     let listener = TcpListener::bind(addr).await
         .unwrap_or_else(|e| panic!("Cannot bind to port {port}: {e}"));
 
-    tracing::info!("Web terminal → http://{}:{}", ip, port);
+    tracing::info!("[{}] Web terminal → http://{}:{}", market_name(), ip, port);
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .expect("axum server error");
+
+    tracing::info!("[{}] Web server has shut down", market_name());
 }
 
-async fn shutdown_signal() {
-    if signal::ctrl_c().await.is_ok() {
-        tracing::info!("Ctrl+C received, shutting down web server");
+async fn shutdown_signal(shutdown: Arc<AtomicBool>) {
+    tokio::select! {
+        _ = signal::ctrl_c() => {
+            tracing::info!("[{}] Ctrl+C received, shutting down web server", market_name());
+        }
+        _ = async {
+            while !shutdown.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        } => {
+            tracing::info!("[{}] Stop request received, shutting down web server", market_name());
+        }
     }
 }
 

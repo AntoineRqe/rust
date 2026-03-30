@@ -20,6 +20,13 @@ use serde::Serialize;
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
+fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
 pub fn kill_fix_inbound_engine<const N: usize>(net_to_fix_tx: &crossbeam::channel::Sender<FixRawMsg<N>>) {
     // Send a special shutdown message to the FIX engine's inbound queue
     // The FIX engine should be designed to recognize this message and exit its run loop
@@ -133,11 +140,11 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
     pub fn run(&mut self) {
         while !self.shared.shutdown.load(Ordering::Relaxed) || !self.request_in.is_empty() {
             if let Some(mut msg) = self.request_in.recv().ok() {
-                tracing::debug!("Received message from network layer, parsing FIX message...");
+                tracing::debug!("[{}] Received message from network layer, parsing FIX message...", market_name());
                 let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
                 if msg.len == 0 {
-                    tracing::debug!("Shutdown signal received in inbound engine, shutting down...");
+                    tracing::debug!("[{}] Shutdown signal received in inbound engine, shutting down...", market_name());
                     // This is a signal to stop the engine, so we can set the shutdown flag and return
                     self.request_out.push(OrderEvent {
                         sender_id: EntityId::from_ascii(""), // Use an empty sender ID to indicate a shutdown signal in the response queue, this is a bit of a hack but it allows us to unblock the engine if it's waiting on the response queue
@@ -150,7 +157,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 let order_event = match self.build_order(msg) {
                     Ok(event) => event,
                     Err(e) => {
-                        tracing::error!("Failed to parse FIX message: {}, skipping", e);
+                        tracing::error!("[{}] Failed to parse FIX message: {}, skipping", market_name(), e);
                         continue; // Skip malformed messages
                     }
                 };
@@ -159,7 +166,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 match order_event.check_valid() {
                     Ok(_) => {},
                     Err(e) => {
-                        tracing::error!("Invalid order event parsed: {}, skipping", e);
+                        tracing::error!("[{}] Invalid order event parsed: {}, skipping", market_name(), e);
                         continue; // Skip invalid events
                     }
                 }
@@ -174,18 +181,18 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 // Push the structured order event to the order book queue.
                 match self.request_out.push(order_event) {
                     Ok(_) => {
-                        tracing::debug!("Parsed order event pushed to order book queue successfully");
+                        tracing::debug!("[{}] Parsed order event pushed to order book queue successfully", market_name());
                         self.counter += 1;
                     },
                     Err(e) => {
-                        tracing::error!("Failed to push order event to order book queue: {}, skipping", e);
+                        tracing::error!("[{}] Failed to push order event to order book queue: {}, skipping", market_name(), e);
                         continue; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
                     }
                 }
             }
         }
 
-        tracing::info!("Inbound FIX engine shutting down, processed {} messages", self.counter);
+        tracing::info!("[{}] Inbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
     }
 
     fn build_order(
@@ -278,7 +285,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
         while !self.shared.shutdown.load(Ordering::Relaxed) || !self.response_in.is_empty() {
             if let Some((key, _response)) = self.response_in.pop() {
                 if key == EntityId::from_ascii("") {
-                    tracing::info!("Shutdown signal received in outbound engine, shutting down...");
+                    tracing::info!("[{}] Shutdown signal received in outbound engine, shutting down...", market_name());
                     // This is a signal to stop the engine, so we can ignore it
                     self.shared.shutdown.store(true, Ordering::Relaxed);
                     continue;
@@ -286,14 +293,14 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                     if let Some(resp_queue) = self.shared.get_pending(&key) {
                         match resp_queue.send(_response) {
                             Ok(_) => {self.counter += 1;},
-                            Err(_) => { tracing::error!("Failed to push response back to client, dropping response"); },
+                            Err(_) => { tracing::error!("[{}] Failed to push response back to client, dropping response", market_name()); },
                         }
                     }
                 }
             }
         }
         
-        tracing::info!("Outbound FIX engine shutting down, processed {} messages", self.counter);
+        tracing::info!("[{}] Outbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
     }
 }
 

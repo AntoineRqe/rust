@@ -28,6 +28,9 @@ const RB_SIZE: usize = 1024;
 struct Cli {
     #[arg(short = 'c', long = "config", default_value = "crates/config/default.json")]
     config_file: String,
+    /// Internal: index of the market to run (used by child processes).
+    #[arg(long = "market-index")]
+    market_index: Option<usize>,
 }
 
 struct ThreadHandles {
@@ -41,31 +44,60 @@ struct ThreadHandles {
 }
 
 struct MarketSimulator {
+    config: MarketConfig,
     thread_handles: Arc<Mutex<ThreadHandles>>,
     entry_point: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
     /// Shared flag to stop the TCP accept loop gracefully.
     tcp_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Shared flag to stop the web server gracefully.
+    web_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
-fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketConfig) -> Result<(), Box<dyn std::error::Error>> {
+struct QueueHandle {
+    net_to_fix_tx: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
+    net_to_fix_rx: Option<Arc<channel::Receiver<FixRawMsg<RB_SIZE>>>>,
+    fix_to_ob: Option<memory::SharedQueue<RB_SIZE, OrderEvent>>,
+    ob_to_er: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
+    ob_to_db: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
+    er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>>,
+}
+
+impl QueueHandle {
+    fn new(market_simulator: &mut MarketSimulator, market_name: &str) -> Self {
+        let (net_to_fix_tx, net_to_fix_rx) = channel::bounded::<FixRawMsg<RB_SIZE>>(RB_SIZE);
+        let fix_to_ob    = memory::open_shared_queue::<RB_SIZE, OrderEvent>(&format!("{market_name}_fix_to_order_book"), true);
+        let ob_to_er     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_execution_report"), true);
+        let ob_to_db     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_db"), true);
+        let er_to_fix     = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(&format!("{market_name}_execution_report_to_fix"), true);
+
+        // Bind Fix entry point to global struct so it can be accessed by the TCP server
+        market_simulator.entry_point = Some(Arc::new(net_to_fix_tx.clone()));
+
+        Self {
+            net_to_fix_tx: Some(Arc::new(net_to_fix_tx)),
+            net_to_fix_rx: Some(Arc::new(net_to_fix_rx)),
+            fix_to_ob: Some(fix_to_ob),
+            ob_to_er: Some(ob_to_er),
+            ob_to_db: Some(ob_to_db),
+            er_to_fix: Some(er_to_fix),
+        }
+    }
+}
+
+fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut market_simulator = market_simulator.lock().unwrap();
 
+    let config = market_simulator.config.clone();
     let bus = EventBus::new();
 
-    // inbound: network → fix engine → order book -> exection report
-    let (net_to_fix_tx, net_to_fix_rx) = channel::bounded::<FixRawMsg<RB_SIZE>>(RB_SIZE);
-    let fix_to_ob    = memory::open_shared_queue::<RB_SIZE, OrderEvent>("fix_to_order_book", true);
-    let ob_to_er     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>("order_book_to_execution_report", true);
-    let ob_to_db     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>("order_book_to_db", true);
+    let mut queues = QueueHandle::new(&mut market_simulator, &config.name);
 
-    // outbound: execution report → fix engine → network
-    let er_to_fix     = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>("execution_report_to_fix", true);
-
-    let (fix_tx, ob_rx) = fix_to_ob.queue.split();
-    let (ob_tx, er_rx) = ob_to_er.queue.split();
-    let (er_tx, fix_resp_rx) = er_to_fix.queue.split();
-    let (ob_db_tx, ob_db_rx) = ob_to_db.queue.split();
+    let net_to_fix_tx = queues.net_to_fix_tx.as_ref().unwrap().clone();
+    let (fix_tx, ob_rx) = queues.fix_to_ob.take().unwrap().queue.split();
+    let (ob_tx, er_rx) = queues.ob_to_er.take().unwrap().queue.split();
+    let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
+    let (ob_db_tx, ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
 
     // execution report engine thread
     let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
@@ -97,7 +129,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
     // Import initial order book state from the database before starting the engine
     let initial_orders = match db_engine.get_all_pending_orders() {
         Ok(orders) => {
-            tracing::info!("Loaded {} pending orders from database", orders.len());
+            tracing::info!("[{}] Loaded {} pending orders from database", config.name, orders.len());
             orders
         },
         Err(e) => {
@@ -129,7 +161,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
     }
 
     // fix engine thread
-    let fix_engine = FixEngine ::new(Arc::new(net_to_fix_rx), fix_tx, fix_resp_rx);
+    let fix_engine = FixEngine ::new(Arc::clone(&queues.net_to_fix_rx.as_ref().unwrap()), fix_tx, fix_resp_rx);
     let (mut inbound_engine, mut outbound_engine) = fix_engine.split();
 
     let _fix_inbound_thread = std::thread::spawn(move || {
@@ -148,12 +180,9 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
         thread_handles.fix_outbound_thread = Some(_fix_outbound_thread);
     }
 
-    let net_to_fix_tx = Arc::new(net_to_fix_tx);
-    // Bind Fix entry point to global struct so it can be accessed by the TCP server
-    market_simulator.entry_point = Some(Arc::clone(&net_to_fix_tx));
-
     
     let net_to_fix_tx_web = Arc::clone(&net_to_fix_tx);
+    let market_name_for_web = config.name.clone();
     let bus_for_sender = bus.clone();
     // Build the closure that converts raw bytes into a FixRawMsg
     // and injects it into the engine — same path as tcp.rs
@@ -167,7 +196,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
         msg.resp_queue = Some(response_tx);
         
         if let Err(e) = net_to_fix_tx_web.send(msg) {
-            tracing::warn!("Browser order injection failed: {e}");
+            tracing::warn!("[{}] Browser order injection failed: {e}", market_name_for_web);
         }
 
         // Spawn a thread to collect the response and publish to browser
@@ -199,14 +228,18 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
         });
     });
 
+    let web_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    market_simulator.web_shutdown = Some(Arc::clone(&web_shutdown));
+
     // Start the web server in a separate thread, passing it the event bus
     let _web_thread = std::thread::spawn({
         core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.web_core });
         let bus = bus.clone();
         let web_ip = config.web.ip.clone();
         let web_port = config.web.port;
+        let web_shutdown = Arc::clone(&web_shutdown);
         move || {
-            run_web_server(bus, fix_sender, &web_ip, web_port, std::path::PathBuf::from("players.json"));
+            run_web_server(bus, fix_sender, &web_ip, web_port, std::path::PathBuf::from("players.json"), web_shutdown);
         }
     });
 
@@ -233,34 +266,39 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketCon
         market_simulator.thread_handles.lock().unwrap().tcp_thread = Some(_tcp_thread);
     }
 
-    tracing::info!("FIX server    -> {}:{}", config.tcp.ip, config.tcp.port);
-    tracing::info!("Web terminal  -> http://{}:{}", config.web.ip, config.web.port);
+    tracing::info!("[{}] FIX server    -> {}:{}", config.name, config.tcp.ip, config.tcp.port);
+    tracing::info!("[{}] Web terminal  -> http://{}:{}", config.name, config.web.ip, config.web.port);
 
-    // Keep shared-memory queue handles alive for the lifetime of the market.
-    // Park the thread; the Ctrl-C handler will call stop_market and then exit.
-    drop(market_simulator);
-    loop {
-        std::thread::park();
-    }
+    Ok(())
 }
 
 fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
-    let market_simulator = market_simulator.lock().unwrap();
+    let (tcp_shutdown, web_shutdown, entry_point, thread_handles) = {
+        let market_simulator = market_simulator.lock().unwrap();
+        (
+            market_simulator.tcp_shutdown.clone(),
+            market_simulator.web_shutdown.clone(),
+            market_simulator.entry_point.clone(),
+            Arc::clone(&market_simulator.thread_handles),
+        )
+    };
 
     // Signal the TCP accept loop to stop.
-    if let Some(flag) = &market_simulator.tcp_shutdown {
+    if let Some(flag) = tcp_shutdown {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    // Send a shutdown message to the FIX engine to unblock it if it's waiting on the queue, in a real implementation you would want a more robust way to ensure the thread has stopped
-    if let Some(entry_point) = &market_simulator.entry_point {
-        entry_point.send(FixRawMsg::default()).expect("Failed to push shutdown message");
+    // Signal the web server to stop.
+    if let Some(flag) = web_shutdown {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    let thread_handles = &mut market_simulator
-    .thread_handles
-    .lock()
-    .unwrap();
+    // Send a shutdown message to the FIX engine to unblock it if it's waiting on the queue.
+    if let Some(entry_point) = entry_point {
+        let _ = entry_point.send(FixRawMsg::default());
+    }
+
+    let thread_handles = &mut thread_handles.lock().unwrap();
 
     if let Some(handle) = thread_handles.fix_inbound_thread.take() {
         handle.join().expect("Failed to join FIX inbound thread");
@@ -288,51 +326,81 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 fn main() {
     let cli = Cli::parse();
     let config = MarketsConfig::parse_from_file(&cli.config_file);
-    let market_config: MarketConfig = config
-        .markets
-        .first()
-        .unwrap_or_else(|| panic!("no market defined in config file '{}'", cli.config_file))
-        .clone();
 
     tracing_subscriber::fmt()
         .with_env_filter("debug")
         .init();
 
-    let market_simulator = Arc::new(Mutex::new(MarketSimulator {
-        thread_handles: Arc::new(Mutex::new(ThreadHandles {
-            fix_inbound_thread: None,
-            fix_outbound_thread: None,
-            ob_thread: None,
-            er_thread: None,
-            db_thread: None,
-            web_thread: None,
-            tcp_thread: None,
-        })),
-        entry_point: None,
-        tcp_shutdown: None,
-    }));
+    if config.markets.is_empty() {
+        eprintln!("No markets defined in config file '{}'", cli.config_file);
+        std::process::exit(1);
+    }
 
-    let market_simulator_clone = Arc::clone(&market_simulator);
+    // ── Single-market mode (child process) ──────────────────────────────────
+    if let Some(index) = cli.market_index {
+        let market_config = config
+            .markets
+            .into_iter()
+            .nth(index)
+            .unwrap_or_else(|| {
+                eprintln!("Market index {index} out of range");
+                std::process::exit(1);
+            });
 
-    let _tcp_thread = std::thread::spawn(move || {
-        if let Err(e) = start_market(market_simulator_clone, market_config) {
-            eprintln!("Market simulator failed to start: {}", e);
+        let simulator = Arc::new(Mutex::new(MarketSimulator {
+            config: market_config,
+            thread_handles: Arc::new(Mutex::new(ThreadHandles {
+                fix_inbound_thread: None,
+                fix_outbound_thread: None,
+                ob_thread: None,
+                er_thread: None,
+                db_thread: None,
+                web_thread: None,
+                tcp_thread: None,
+            })),
+            entry_point: None,
+            tcp_shutdown: None,
+            web_shutdown: None,
+        }));
+
+        if let Err(e) = start_market(Arc::clone(&simulator)) {
+            eprintln!("Market failed to start: {e}");
             std::process::exit(1);
         }
-    });
 
-    {
-        market_simulator.lock().unwrap().thread_handles.lock().unwrap().tcp_thread = Some(_tcp_thread);
+        ctrlc::set_handler(move || {
+            stop_market(Arc::clone(&simulator));
+            std::process::exit(0);
+        })
+        .expect("Error setting Ctrl-C handler");
+
+        loop {
+            std::thread::park();
+        }
     }
 
-    // Add the CTRL-C handler to stop the market simulator gracefully
-    ctrlc::set_handler( move || {
-        stop_market(Arc::clone(&market_simulator));
-        std::process::exit(0);
-    }).expect("Error setting Ctrl-C handler");
+    // ── Multi-market mode (parent process) ──────────────────────────────────
+    // Fork one child process per market entry; each child re-execs this binary
+    // with --market-index <n> so it runs in single-market mode above.
+    let exe = std::env::current_exe().expect("Cannot determine current executable path");
 
-    loop {
-        std::thread::park();
+    let mut children: Vec<std::process::Child> = config
+        .markets
+        .iter()
+        .enumerate()
+        .map(|(index, market)| {
+            tracing::info!("[{}] Spawning process (index {index})", market.name);
+            std::process::Command::new(&exe)
+                .args(["--config", &cli.config_file, "--market-index", &index.to_string()])
+                .env("MARKET_NAME", &market.name)
+                .spawn()
+                .unwrap_or_else(|e| panic!("Failed to spawn process for market '{}': {e}", market.name))
+        })
+        .collect();
+
+    // Ctrl+C from the terminal goes to the whole process group, so every
+    // child's own ctrlc handler will fire.  Just wait for them here.
+    for child in &mut children {
+        let _ = child.wait();
     }
-
 }

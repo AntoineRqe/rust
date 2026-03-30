@@ -9,6 +9,13 @@ use web::state::{
     WsEvent,
 };
 
+fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
 
 pub struct FixServer<const N: usize> {
     fifo_in: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
@@ -41,7 +48,7 @@ impl <'a, const N: usize> FixServer<N> {
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
-                tracing::info!("TCP accept loop: shutdown signal received, stopping");
+                tracing::info!("[{}] TCP accept loop: shutdown signal received, stopping", market_name());
                 break;
             }
 
@@ -56,7 +63,7 @@ impl <'a, const N: usize> FixServer<N> {
                     let shutdown = Arc::clone(&self.shutdown);
                     let bus      = self.bus.clone();
 
-                    tracing::info!("New client connected from {}", addr);
+                    tracing::info!("[{}] New client connected from {}", market_name(), addr);
                     std::thread::spawn(move || {
                         Self::handle_client(stream, queue, shutdown, bus);
                     });
@@ -66,13 +73,13 @@ impl <'a, const N: usize> FixServer<N> {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(e) => {
-                    tracing::error!("TCP accept error: {e}");
+                    tracing::error!("[{}] TCP accept error: {e}", market_name());
                     break;
                 }
             }
         }
 
-        tracing::info!("TCP server exited gracefully");
+        tracing::info!("[{}] TCP server exited gracefully", market_name());
     }
 
     fn handle_client(
@@ -99,7 +106,7 @@ impl <'a, const N: usize> FixServer<N> {
         while !shutdown.load(Ordering::Relaxed) {
             match stream.read(&mut buf) {
                 Ok(0) => {
-                    tracing::info!("Client disconnected");
+                    tracing::info!("[{}] Client disconnected", market_name());
                     break
                 }, // no message, client closed connection
                 Ok(n) => {
@@ -121,12 +128,12 @@ impl <'a, const N: usize> FixServer<N> {
                     msg.resp_queue = Some(response_tx.clone());
 
                     queue.send(msg).expect("Failed to send message to FIX engine");
-                    tracing::debug!("Message from client forwarded to FIX engine, waiting for response...");
+                    tracing::debug!("[{}] Message from client forwarded to FIX engine, waiting for response...", market_name());
 
                     loop {
                         if let Ok(response) = response_rx.recv() {
                             if let Err(e) = stream.write_all(&response.data[..response.len as usize]) {
-                                tracing::error!("Failed to send response to client: {}", e);
+                                tracing::error!("[{}] Failed to send response to client: {}", market_name(), e);
                                 break;
                             }
 
@@ -138,7 +145,7 @@ impl <'a, const N: usize> FixServer<N> {
                                 body,
                                 tag: "feed".into(),
                             });
-                            tracing::debug!("Response from FIX engine sent back to client");
+                            tracing::debug!("[{}] Response from FIX engine sent back to client", market_name());
                             break; // response sent, go back to reading from the client
                         } else {
                             continue; // no more responses, go back to reading from the client
@@ -146,7 +153,7 @@ impl <'a, const N: usize> FixServer<N> {
                     }
                 }
                 Err(_) => {
-                    tracing::error!("Error reading from client");
+                    tracing::error!("[{}] Error reading from client", market_name());
                     break
                 },
             }

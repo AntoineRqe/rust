@@ -8,6 +8,13 @@ use crate::server::AppState;
 use crate::server::authenticate;
 use crate::state::{WsEvent, BrowserCommand, PendingOrder};
 
+fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
 pub async fn ws_handler(
     ws:           WebSocketUpgrade,
     State(state): State<AppState>,
@@ -53,7 +60,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
         let _ = sender.send(Message::Text(ps.into())).await;
     }
 
-    tracing::debug!("Browser WebSocket connected");
+    tracing::debug!("[{}] Browser WebSocket connected", market_name());
 
     loop {
         tokio::select! {
@@ -86,7 +93,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Browser lagged, dropped {n} events");
+                        tracing::warn!("[{}] Browser lagged, dropped {n} events", market_name());
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -110,11 +117,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        tracing::debug!("Browser disconnected");
+                        tracing::debug!("[{}] Browser disconnected", market_name());
                         break;
                     }
                     Some(Err(e)) => {
-                        tracing::warn!("WebSocket error: {e}");
+                        tracing::warn!("[{}] WebSocket error: {e}", market_name());
                         break;
                     }
                     _ => {}
@@ -127,18 +134,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
 }
 
 async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
-    tracing::debug!("Received message from browser: {text}");
+    tracing::debug!("[{}] Received message from browser: {text}", market_name());
     let cmd: BrowserCommand = match serde_json::from_str(text) {
         Ok(c)  => c,
         Err(e) => {
-            tracing::warn!("Invalid browser command: {e} — raw: {text}");
+            tracing::warn!("[{}] Invalid browser command: {e} — raw: {text}", market_name());
             return;
         }
     };
 
     match cmd {
         BrowserCommand::Order { clord_id, symbol, qty, price, side, sender, target } => {
-            tracing::info!("Browser order: {} {} {} @ {}",
+            tracing::info!("[{}] Browser order: {} {} {} @ {}",
+                market_name(),
                 if side == "1" { "BUY" } else { "SELL" },
                 qty as u32, symbol, price);
 
@@ -161,7 +169,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
                 qty, price, &clord_id,
             );
 
-            tracing::debug!("Built FIX message for browser order, injecting into FIX engine...");
+            tracing::debug!("[{}] Built FIX message for browser order, injecting into FIX engine...", market_name());
             // Log it to the browser as a SENT message
             state.bus.publish(WsEvent::FixMessage {
                 label: format!("SENT ▶  ({} {} {} @ {})",
@@ -174,7 +182,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
             // Inject into the FIX engine
             (state.fix_sender)(fix_bytes);
 
-            tracing::debug!("Browser order injected into FIX engine");
+            tracing::debug!("[{}] Browser order injected into FIX engine", market_name());
         }
 
         BrowserCommand::Cancel { clord_id, symbol, qty } => {
@@ -189,7 +197,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
                 &clord_id, &symbol, qty,
             );
 
-            tracing::info!("Browser cancel: {}", clord_id);
+            tracing::info!("[{}] Browser cancel: {}", market_name(), clord_id);
             state.bus.publish(WsEvent::FixMessage {
                 label: format!("CANCEL ✕ ({})", clord_id),
                 body: pretty_fix(&fix_bytes),

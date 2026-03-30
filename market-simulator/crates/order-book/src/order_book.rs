@@ -21,6 +21,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
 
 pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent, N>) {
     let order_event = OrderEvent {
@@ -80,7 +87,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             }
         }
 
-        tracing::info!("Order book engine shutting down gracefully");
+        tracing::info!("[{}] Order book engine shutting down gracefully", market_name());
     }
 }
 
@@ -177,7 +184,7 @@ impl OrderBook {
 
     fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         if order.orig_cl_ord_id.is_none() {
-            tracing::error!("Cancel order with ID: {} is missing original client order ID, cannot process cancellation", order.order_id);
+            tracing::error!("[{}] Cancel order with ID: {} is missing original client order ID, cannot process cancellation", market_name(), order.order_id);
             return (order, OrderResult {
                 trades: Trades::default(),
                 status: OrderStatus::CancelRejected,
@@ -229,13 +236,13 @@ impl OrderBook {
                                 timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                             });
                         }
-                        None => tracing::error!("Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", order.order_id, order_ref.side, order_ref.price, index),
+                        None => tracing::error!("[{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", market_name(), order.order_id, order_ref.side, order_ref.price, index),
                     }
                 }
             }
         }
 
-        tracing::error!("Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", order.order_id, orig_cl_ord_id);
+        tracing::error!("[{}] Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", market_name(), order.order_id, orig_cl_ord_id);
         // If we reach this point, it means the order was not found or could not be cancelled
         (order, OrderResult {
             trades: Trades::default(),
@@ -261,7 +268,7 @@ impl OrderBook {
             Side::Sell => self.asks.get(&order.price).map_or(0, |queue| queue.len()),
         };
         self.order_map.insert(order.cl_ord_id, OrderRef::new(order.side, order.price, position));
-        tracing::debug!("Added order with ID: {}, side: {:?}, price: {}, position: {} to order map", order.cl_ord_id, order.side, order.price, position);
+        tracing::debug!("[{}] Added order with ID: {}, side: {:?}, price: {}, position: {} to order map", market_name(), order.cl_ord_id, order.side, order.price, position);
     }
 
     /// Processes a sell limit order by matching it against the best available bids in the order book. If the order is not fully filled, it is added to the asks heap.
@@ -295,7 +302,7 @@ impl OrderBook {
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
-                        tracing::error!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
+                        tracing::error!("[{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name());
                     }
 
                     self.id_counter.increment(); // Increment the trade ID counter
@@ -370,7 +377,7 @@ impl OrderBook {
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
-                        tracing::error!("Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult");
+                        tracing::error!("[{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name());
                     }
 
                     self.id_counter.increment(); // Increment the trade ID counter
