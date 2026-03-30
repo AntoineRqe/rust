@@ -52,6 +52,9 @@ web   = { path = "crates/web" }
 tokio = { version = "1", features = ["full"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+config = { path = "crates/config" }
+clap = { version = "=4.5.49", features = ["derive"] }
+
 
 # Optimization profiles
 [profile.dev]

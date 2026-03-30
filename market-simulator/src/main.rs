@@ -1,5 +1,6 @@
 use types::{OrderEvent, OrderResult};
 use types::macros::{EntityId};
+use clap::Parser;
 use order_book::order_book::{OrderBookEngine};
 use server::tcp::{
     FixServer,
@@ -17,9 +18,17 @@ use web::state::{
     WsEvent,
 };
 use web::server::run_web_server;
+use config::{MarketConfig, MarketsConfig};
 
 
 const RB_SIZE: usize = 1024;
+
+#[derive(Parser, Debug)]
+#[command(name = "market-simulator")]
+struct Cli {
+    #[arg(short = 'c', long = "config", default_value = "crates/config/default.json")]
+    config_file: String,
+}
 
 struct ThreadHandles {
     fix_inbound_thread: Option<std::thread::JoinHandle<()>>,
@@ -34,18 +43,7 @@ struct MarketSimulator {
     entry_point: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
 }
 
-struct EngineCoreMapping {
-    fix_inbound_core: usize,
-    fix_outbound_core: usize,
-    order_book_core: usize,
-    execution_report_core: usize,
-    db_core: usize,
-    web_core: usize,
-    tcp_core: usize,
-    global_core: usize,
-}
-
-fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, mapping: EngineCoreMapping) -> Result<(), Box<dyn std::error::Error>> {
+fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, config: MarketConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut market_simulator = market_simulator.lock().unwrap();
 
@@ -69,7 +67,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, mapping: EngineCo
     let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
 
     let _er_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: mapping.execution_report_core });
+        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.execution_report_core });
         execution_report_engine.run();
     });
 
@@ -104,7 +102,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, mapping: EngineCo
     };
 
     let _db_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: mapping.db_core });
+        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.db_core });
         db_engine.run();
     });
 
@@ -118,7 +116,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, mapping: EngineCo
     order_book_engine.import_order_book(initial_orders);
 
     let _ob_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: mapping.order_book_core });
+        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.order_book_core });
         order_book_engine.run();
     });
 
@@ -131,12 +129,12 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, mapping: EngineCo
     let (mut inbound_engine, mut outbound_engine) = fix_engine.split();
 
     let _fix_inbound_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: mapping.fix_inbound_core });
+        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.fix_inbound_core });
         inbound_engine.run();
     });
 
     let _fix_outbound_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: mapping.fix_outbound_core });
+        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.fix_outbound_core });
         outbound_engine.run();
     });
 
@@ -199,24 +197,29 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>, mapping: EngineCo
 
     // Start the web server in a separate thread, passing it the event bus
     std::thread::spawn({
-        core_affinity::set_for_current(core_affinity::CoreId { id: mapping.web_core });
+        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.web_core });
         let bus = bus.clone();
+        let web_ip = config.web.ip.clone();
+        let web_port = config.web.port;
         move || {
-            run_web_server(bus, fix_sender, 7654, std::path::PathBuf::from("players.json"));
+            run_web_server(bus, fix_sender, &web_ip, web_port, std::path::PathBuf::from("players.json"));
         }
     });
 
 
-    core_affinity::set_for_current(core_affinity::CoreId { id: mapping.tcp_core });
+    core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.tcp_core });
     // tcp server — each client pushes directly into fifo_in
     let server: FixServer<RB_SIZE> = FixServer::new(Arc::clone(&net_to_fix_tx), bus.clone());
-    let listener = TcpListener::bind("127.0.0.1:9876").unwrap();
+    let listener = TcpListener::bind(format!("{}:{}", config.tcp.ip, config.tcp.port)).unwrap();
 
-    drop(market_simulator); // Release the lock before starting the server loop
+    drop(market_simulator); // Release the lock before starting the server loop, which runs indefinitely
 
-    tracing::info!("FIX server    -> localhost:9876");
-    tracing::info!("Web terminal  -> http://localhost:7654");
+    tracing::info!("FIX server    -> {}:{}", config.tcp.ip, config.tcp.port);
+    tracing::info!("Web terminal  -> http://{}:{}", config.web.ip, config.web.port);
 
+    // Block the main thread on the server accept loop, which will run until the process is killed
+    // If we leave the lock on market_simulator held, the CTRL-C handler won't be able to acquire it to stop the market simulator gracefully
+    // Leaving this function will drop shared memory queues, possible crashes 
     server.accept_loop(listener);
 
     Ok(())
@@ -253,6 +256,14 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 }
 
 fn main() {
+    let cli = Cli::parse();
+    let config = MarketsConfig::parse_from_file(&cli.config_file);
+    let market_config: MarketConfig = config
+        .markets
+        .first()
+        .unwrap_or_else(|| panic!("no market defined in config file '{}'", cli.config_file))
+        .clone();
+
     tracing_subscriber::fmt()
         .with_env_filter("debug")
         .init();
@@ -270,19 +281,8 @@ fn main() {
 
     let market_simulator_clone = Arc::clone(&market_simulator);
 
-    let mapping = EngineCoreMapping {
-        fix_inbound_core: 0,
-        fix_outbound_core: 2,
-        order_book_core: 4,
-        execution_report_core: 6,
-        db_core: 8,
-        web_core: 10,
-        tcp_core: 12,
-        global_core: 8,
-    };
-
     std::thread::spawn(move || {
-        if let Err(e) = start_market(market_simulator_clone, mapping) {
+        if let Err(e) = start_market(market_simulator_clone, market_config) {
             eprintln!("Market simulator failed to start: {}", e);
             std::process::exit(1);
         }

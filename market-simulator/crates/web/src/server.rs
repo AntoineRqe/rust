@@ -29,6 +29,7 @@ pub struct AppState {
 pub fn run_web_server(
     bus: EventBus,
     fix_sender: FixSender,
+    ip: &str,
     port: u16,
     players_file: PathBuf,
 ) {
@@ -37,12 +38,13 @@ pub fn run_web_server(
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_sender, port, players_file))
+        .block_on(serve(bus, fix_sender, ip, port, players_file))
 }
 
 async fn serve(
     bus: EventBus,
     fix_sender: FixSender,
+    ip: &str,
     port: u16,
     players_file: PathBuf,
 ) {
@@ -58,7 +60,7 @@ async fn serve(
     let listener = TcpListener::bind(addr).await
         .unwrap_or_else(|e| panic!("Cannot bind to port {port}: {e}"));
 
-    tracing::info!("Web terminal → http://localhost:{port}");
+    tracing::info!("Web terminal → http://{}:{}", ip, port);
     axum::serve(listener, app).await.expect("axum server error");
 }
 
