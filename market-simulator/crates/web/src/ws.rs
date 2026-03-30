@@ -86,17 +86,21 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
         std::thread::spawn(move || {
             let mut stream = tcp_reader;
             let mut buf = [0u8; 4096];
+            let mut stream_buf: Vec<u8> = Vec::with_capacity(8192);
 
             while !tcp_stop.load(Ordering::Relaxed) {
                 match stream.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        bus.publish(WsEvent::FixMessage {
-                            label: classify_fix_msg(&buf[..n]),
-                            body: pretty_fix(&buf[..n]),
-                            tag: "feed".into(),
-                            recipient: Some(username.clone()),
-                        });
+                        stream_buf.extend_from_slice(&buf[..n]);
+                        for raw_msg in extract_fix_messages(&mut stream_buf) {
+                            bus.publish(WsEvent::FixMessage {
+                                label: classify_fix_msg(&raw_msg),
+                                body: pretty_fix(&raw_msg),
+                                tag: "feed".into(),
+                                recipient: Some(username.clone()),
+                            });
+                        }
                     }
                     Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => {
                         continue;
@@ -445,6 +449,70 @@ fn classify_fix_msg(raw: &[u8]) -> String {
         "5" => "◀ LOGOUT (5)".into(),
         t   => format!("◀ MSG ({t})"),
     }
+}
+
+fn extract_fix_messages(stream_buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+
+    loop {
+        let Some(start) = find_subslice(stream_buf, b"8=FIX.") else {
+            // Keep a tiny tail in case begin-string marker spans reads.
+            if stream_buf.len() > 6 {
+                let keep_from = stream_buf.len() - 6;
+                stream_buf.drain(..keep_from);
+            }
+            break;
+        };
+
+        if start > 0 {
+            stream_buf.drain(..start);
+        }
+
+        let Some(checksum_start) = find_checksum_field(stream_buf) else {
+            // Need more bytes for a complete FIX frame.
+            break;
+        };
+
+        let frame_end = checksum_start + 7; // "10=" + 3 digits + SOH
+        if stream_buf.len() < frame_end {
+            break;
+        }
+
+        out.push(stream_buf[..frame_end].to_vec());
+        stream_buf.drain(..frame_end);
+    }
+
+    out
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn find_checksum_field(data: &[u8]) -> Option<usize> {
+    if data.len() < 7 {
+        return None;
+    }
+
+    for i in 0..=data.len() - 7 {
+        if (i == 0 || data[i - 1] == b'\x01')
+            && data[i] == b'1'
+            && data[i + 1] == b'0'
+            && data[i + 2] == b'='
+            && data[i + 3].is_ascii_digit()
+            && data[i + 4].is_ascii_digit()
+            && data[i + 5].is_ascii_digit()
+            && data[i + 6] == b'\x01'
+        {
+            return Some(i);
+        }
+    }
+
+    None
 }
 
 // ── FIX message builders ──────────────────────────────────────────────────────

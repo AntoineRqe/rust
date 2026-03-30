@@ -3,13 +3,25 @@ use std::io::{Read, Write};
 use fix::engine::{FixRawMsg};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crossbeam_channel::{unbounded};
+use crossbeam_channel::{bounded};
+use std::time::Duration;
 
 fn market_name() -> &'static str {
     static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MARKET_NAME
         .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
         .as_str()
+}
+
+fn response_queue_capacity() -> usize {
+    static CAPACITY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAPACITY.get_or_init(|| {
+        std::env::var("TCP_RESPONSE_QUEUE_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1024)
+    })
 }
 
 
@@ -75,49 +87,85 @@ impl <'a, const N: usize> FixServer<N> {
     }
 
     fn handle_client(
-        mut stream: TcpStream,
+        stream: TcpStream,
         queue:   Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
         shutdown: Arc<AtomicBool>,
     ) {
+        let (response_tx, response_rx) = bounded::<FixRawMsg<N>>(response_queue_capacity());
 
-        let (response_tx, response_rx) = unbounded();
+        let mut read_stream = stream;
+        let mut write_stream = match read_stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("[{}] Failed to clone client stream: {e}", market_name());
+                return;
+            }
+        };
+
+        let client_alive = Arc::new(AtomicBool::new(true));
+        let writer_alive = Arc::clone(&client_alive);
+        let writer_shutdown = Arc::clone(&shutdown);
+
+        let writer_thread = std::thread::spawn(move || {
+            while writer_alive.load(Ordering::Relaxed) && !writer_shutdown.load(Ordering::Relaxed) {
+                match response_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(response) => {
+                        if let Err(e) = write_stream.write_all(&response.data[..response.len as usize]) {
+                            tracing::error!("[{}] Failed to send response to client: {}", market_name(), e);
+                            writer_alive.store(false, Ordering::Relaxed);
+                            break;
+                        }
+                        tracing::debug!("[{}] Response from FIX engine sent back to client", market_name());
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        continue;
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        if let Err(e) = read_stream.set_read_timeout(Some(Duration::from_millis(100))) {
+            tracing::warn!("[{}] Failed to set read timeout on client stream: {e}", market_name());
+        }
+
         let mut buf = [0u8; 4096];
-
-        while !shutdown.load(Ordering::Relaxed) {
-            match stream.read(&mut buf) {
+        while client_alive.load(Ordering::Relaxed) && !shutdown.load(Ordering::Relaxed) {
+            match read_stream.read(&mut buf) {
                 Ok(0) => {
                     tracing::info!("[{}] Client disconnected", market_name());
-                    break
-                }, // no message, client closed connection
+                    client_alive.store(false, Ordering::Relaxed);
+                    break;
+                }
                 Ok(n) => {
-                    // ── forward inbound FIX message to FIX engine ──────────
                     let mut msg = FixRawMsg::<N>::default();
                     msg.len = n as u16;
                     msg.data[..n].copy_from_slice(&buf[..n]);
                     msg.resp_queue = Some(response_tx.clone());
 
-                    queue.send(msg).expect("Failed to send message to FIX engine");
-                    tracing::debug!("[{}] Message from client forwarded to FIX engine, waiting for response...", market_name());
-
-                    loop {
-                        if let Ok(response) = response_rx.recv() {
-                            if let Err(e) = stream.write_all(&response.data[..response.len as usize]) {
-                                tracing::error!("[{}] Failed to send response to client: {}", market_name(), e);
-                                break;
-                            }
-                            tracing::debug!("[{}] Response from FIX engine sent back to client", market_name());
-                            break; // response sent, go back to reading from the client
-                        } else {
-                            continue; // no more responses, go back to reading from the client
-                        }
+                    if let Err(e) = queue.send(msg) {
+                        tracing::error!("[{}] Failed to send message to FIX engine: {e}", market_name());
+                        client_alive.store(false, Ordering::Relaxed);
+                        break;
                     }
+
+                    tracing::debug!("[{}] Message from client forwarded to FIX engine", market_name());
                 }
-                Err(_) => {
-                    tracing::error!("[{}] Error reading from client", market_name());
-                    break
-                },
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("[{}] Error reading from client: {e}", market_name());
+                    client_alive.store(false, Ordering::Relaxed);
+                    break;
+                }
             }
         }
+
+        drop(response_tx);
+        let _ = writer_thread.join();
     }
 }
 

@@ -100,6 +100,15 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                     self.shutdown.store(true, Ordering::Relaxed);
 
                     if self.fifo_in.is_empty() {
+                        for producer in &self.fifo_out {
+                            if let Some(producer) = producer {
+                                let mut shutdown_msg = (OrderEvent::default(), OrderResult::default());
+                                while let Err(msg) = producer.push(shutdown_msg) {
+                                    shutdown_msg = msg;
+                                    std::hint::spin_loop();
+                                }
+                            }
+                        }
                         break;
                     }
 
@@ -120,6 +129,15 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 
             // Break only when shutdown is signaled AND fifo is empty
             if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
+                for producer in &self.fifo_out {
+                    if let Some(producer) = producer {
+                        let mut shutdown_msg = (OrderEvent::default(), OrderResult::default());
+                        while let Err(msg) = producer.push(shutdown_msg) {
+                            shutdown_msg = msg;
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
                 break;
             }
         }

@@ -2,6 +2,7 @@ use crossbeam_channel::Sender;
 use order_book::OrderBookControl;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tonic::{transport::Server, Request, Response, Status};
 
 // Include the generated protobuf/gRPC bindings.
@@ -78,10 +79,16 @@ impl MarketControl for MarketControlService {
 pub async fn serve(
     addr: std::net::SocketAddr,
     service: MarketControlService,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), tonic::transport::Error> {
     tracing::info!("gRPC MarketControl server listening on {addr}");
     Server::builder()
         .add_service(MarketControlServer::new(service))
-        .serve(addr)
+        .serve_with_shutdown(addr, async move {
+            while !shutdown.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            tracing::info!("gRPC shutdown signal received");
+        })
         .await
 }

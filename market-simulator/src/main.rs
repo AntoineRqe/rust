@@ -50,6 +50,8 @@ struct MarketSimulator {
     tcp_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Shared flag to stop the web server gracefully.
     web_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Shared flag to stop the gRPC server gracefully.
+    grpc_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 struct QueueHandle {
@@ -229,6 +231,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     // gRPC MarketControl server — handles ResetMarket (order book + DB).
     let grpc_ip   = config.grpc.ip.clone();
     let grpc_port = config.grpc.port;
+    let grpc_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    market_simulator.grpc_shutdown = Some(Arc::clone(&grpc_shutdown));
     let grpc_service = grpc::MarketControlService::new(ob_control_tx, db_pool);
     let _grpc_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -239,7 +243,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         let addr: std::net::SocketAddr = format!("{grpc_ip}:{grpc_port}")
             .parse()
             .expect("invalid gRPC address");
-        if let Err(e) = rt.block_on(grpc::serve(addr, grpc_service)) {
+        if let Err(e) = rt.block_on(grpc::serve(addr, grpc_service, grpc_shutdown)) {
             tracing::error!("gRPC server error: {e:#}");
         }
     });
@@ -256,11 +260,12 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 }
 
 fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
-    let (tcp_shutdown, web_shutdown, entry_point, thread_handles) = {
+    let (tcp_shutdown, web_shutdown, grpc_shutdown, entry_point, thread_handles) = {
         let market_simulator = market_simulator.lock().unwrap();
         (
             market_simulator.tcp_shutdown.clone(),
             market_simulator.web_shutdown.clone(),
+            market_simulator.grpc_shutdown.clone(),
             market_simulator.entry_point.clone(),
             Arc::clone(&market_simulator.thread_handles),
         )
@@ -273,6 +278,11 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 
     // Signal the web server to stop.
     if let Some(flag) = web_shutdown {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Signal the gRPC server to stop.
+    if let Some(flag) = grpc_shutdown {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -304,9 +314,7 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     if let Some(handle) = thread_handles.tcp_thread.take() {
         handle.join().expect("Failed to join TCP Server thread");
     }
-    // The gRPC server thread runs a single-threaded tokio runtime; dropping
-    // all senders/channels will eventually cause it to stop on its own, but
-    // we join it here for a clean shutdown.
+    // Join gRPC server thread after signaling grpc_shutdown.
     if let Some(handle) = thread_handles.grpc_thread.take() {
         handle.join().expect("Failed to join gRPC Server thread");
     }
@@ -351,6 +359,7 @@ fn main() {
             entry_point: None,
             tcp_shutdown: None,
             web_shutdown: None,
+            grpc_shutdown: None,
         }));
 
         if let Err(e) = start_market(Arc::clone(&simulator)) {
