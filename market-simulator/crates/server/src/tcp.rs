@@ -4,10 +4,6 @@ use fix::engine::{FixRawMsg};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{unbounded};
-use web::state::{
-    EventBus,
-    WsEvent,
-};
 
 fn market_name() -> &'static str {
     static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -20,18 +16,15 @@ fn market_name() -> &'static str {
 pub struct FixServer<const N: usize> {
     fifo_in: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
     shutdown: Arc<AtomicBool>,
-    bus: EventBus,
 }
 
 impl <'a, const N: usize> FixServer<N> {
     pub fn new(
         fifo_in: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
-        bus: EventBus,
     ) -> Self {
         Self { 
             fifo_in,
             shutdown: Arc::new(AtomicBool::new(false)),
-            bus,
         }
     }
 
@@ -61,11 +54,10 @@ impl <'a, const N: usize> FixServer<N> {
 
                     let queue    = Arc::clone(&self.fifo_in);
                     let shutdown = Arc::clone(&self.shutdown);
-                    let bus      = self.bus.clone();
 
                     tracing::info!("[{}] New client connected from {}", market_name(), addr);
                     std::thread::spawn(move || {
-                        Self::handle_client(stream, queue, shutdown, bus);
+                        Self::handle_client(stream, queue, shutdown);
                     });
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -86,22 +78,10 @@ impl <'a, const N: usize> FixServer<N> {
         mut stream: TcpStream,
         queue:   Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
         shutdown: Arc<AtomicBool>,
-        bus: EventBus,
     ) {
-
-        let peer = stream.peer_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| "unknown".into());
 
         let (response_tx, response_rx) = unbounded();
         let mut buf = [0u8; 4096];
-
-        // Notify the web layer that a new client has connected
-        bus.publish(WsEvent::FixMessage {
-            label: "INFO".into(),
-            body:  format!("FIX client connected: {peer}"),
-            tag:   "info".into(),
-        });
 
         while !shutdown.load(Ordering::Relaxed) {
             match stream.read(&mut buf) {
@@ -110,17 +90,6 @@ impl <'a, const N: usize> FixServer<N> {
                     break
                 }, // no message, client closed connection
                 Ok(n) => {
-
-                    // ── forward inbound FIX message to browsers ──────────
-                    // (this is what the Python client sent — the order)
-                    let sent_body = pretty_fix(&buf[..n]);
-                    let sent_label = classify_fix_msg(&buf[..n]);
-                    bus.publish(WsEvent::FixMessage {
-                        label: format!("SENT ▶  {sent_label}"),
-                        body:  sent_body,
-                        tag:   "send".into(),
-                    });
-        
                     // ── forward inbound FIX message to FIX engine ──────────
                     let mut msg = FixRawMsg::<N>::default();
                     msg.len = n as u16;
@@ -136,15 +105,6 @@ impl <'a, const N: usize> FixServer<N> {
                                 tracing::error!("[{}] Failed to send response to client: {}", market_name(), e);
                                 break;
                             }
-
-                            let body = pretty_fix(&response.data[..response.len as usize]);
-                            let label = classify_fix_msg(&response.data[..response.len as usize]);
-                            // Notify the web layer of the raw FIX message sent back to the client
-                            bus.publish(WsEvent::FixMessage {
-                                label,
-                                body,
-                                tag: "feed".into(),
-                            });
                             tracing::debug!("[{}] Response from FIX engine sent back to client", market_name());
                             break; // response sent, go back to reading from the client
                         } else {

@@ -4,8 +4,6 @@ use clap::Parser;
 use order_book::order_book::{OrderBookEngine};
 use server::tcp::{
     FixServer,
-    pretty_fix,
-    classify_fix_msg,
 };
 use std::sync::{Arc, Mutex};
 use crossbeam::{channel};
@@ -15,7 +13,6 @@ use execution_report::{ExecutionReportEngine};
 use std::net::TcpListener;
 use web::state::{
     EventBus,
-    WsEvent,
 };
 use web::server::run_web_server;
 use config::{MarketConfig, MarketsConfig};
@@ -181,53 +178,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     }
 
     
-    let net_to_fix_tx_web = Arc::clone(&net_to_fix_tx);
-    let market_name_for_web = config.name.clone();
-    let bus_for_sender = bus.clone();
-    // Build the closure that converts raw bytes into a FixRawMsg
-    // and injects it into the engine — same path as tcp.rs
-    let fix_sender: web::server::FixSender = Arc::new(move |bytes: Vec<u8>| {
-        let (response_tx, response_rx) = crossbeam_channel::unbounded();
-
-        let n = bytes.len().min(RB_SIZE);
-        let mut msg = FixRawMsg::default();
-        msg.len = n as u16;
-        msg.data[..n].copy_from_slice(&bytes[..n]);
-        msg.resp_queue = Some(response_tx);
-        
-        if let Err(e) = net_to_fix_tx_web.send(msg) {
-            tracing::warn!("[{}] Browser order injection failed: {e}", market_name_for_web);
-        }
-
-        // Spawn a thread to collect the response and publish to browser
-        let bus = bus_for_sender.clone();
-        std::thread::spawn(move || {
-            // collect all responses for this order
-            // (could be multiple exec reports for partial fills)
-            loop {
-                match response_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                    Ok(response) => {
-                        let body  = pretty_fix(&response.data[..response.len as usize]);
-                        let label = classify_fix_msg(&response.data[..response.len as usize]);
-                        bus.publish(WsEvent::FixMessage {
-                            label,
-                            body,
-                            tag: "feed".into(),
-                        });
-                        // keep listening for more responses (partial fills)
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        // no more responses — done
-                        break;
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-        });
-    });
-
     let web_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     market_simulator.web_shutdown = Some(Arc::clone(&web_shutdown));
 
@@ -235,11 +185,12 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let _web_thread = std::thread::spawn({
         core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.web_core });
         let bus = bus.clone();
+        let fix_tcp_addr = format!("{}:{}", config.tcp.ip, config.tcp.port);
         let web_ip = config.web.ip.clone();
         let web_port = config.web.port;
         let web_shutdown = Arc::clone(&web_shutdown);
         move || {
-            run_web_server(bus, fix_sender, &web_ip, web_port, std::path::PathBuf::from("players.json"), web_shutdown);
+            run_web_server(bus, fix_tcp_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), web_shutdown);
         }
     });
 
@@ -248,7 +199,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     }
 
     // tcp server — each client pushes directly into fifo_in
-    let server: FixServer<RB_SIZE> = FixServer::new(Arc::clone(&net_to_fix_tx), bus.clone());
+    let server: FixServer<RB_SIZE> = FixServer::new(Arc::clone(&net_to_fix_tx));
     let listener = TcpListener::bind(format!("{}:{}", config.tcp.ip, config.tcp.port)).unwrap();
 
     // Grab the shutdown flag before releasing the lock so the Ctrl-C handler

@@ -4,6 +4,10 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use futures::{sink::SinkExt, stream::StreamExt};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::server::AppState;
 use crate::server::authenticate;
 use crate::state::{WsEvent, BrowserCommand, PendingOrder};
@@ -38,6 +42,79 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.bus.subscribe();
 
+    let tcp_stream = match TcpStream::connect(&state.fix_tcp_addr) {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::warn!("[{}] Browser FIX TCP connect failed: {e}", market_name());
+            let err = serde_json::to_string(&WsEvent::FixMessage {
+                label: "ERROR".into(),
+                body: format!("Unable to connect to FIX TCP server: {e}"),
+                tag: "err".into(),
+                recipient: Some(username.clone()),
+            }).unwrap();
+            let _ = sender.send(Message::Text(err.into())).await;
+            return;
+        }
+    };
+
+    let _ = tcp_stream.set_nodelay(true);
+    let _ = tcp_stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+    let _ = tcp_stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+
+    let tcp_reader = match tcp_stream.try_clone() {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::warn!("[{}] Browser FIX TCP clone failed: {e}", market_name());
+            let err = serde_json::to_string(&WsEvent::FixMessage {
+                label: "ERROR".into(),
+                body: format!("Unable to initialize FIX TCP session: {e}"),
+                tag: "err".into(),
+                recipient: Some(username.clone()),
+            }).unwrap();
+            let _ = sender.send(Message::Text(err.into())).await;
+            return;
+        }
+    };
+
+    let tcp_writer = Arc::new(Mutex::new(tcp_stream));
+    let tcp_stop = Arc::new(AtomicBool::new(false));
+
+    {
+        let bus = state.bus.clone();
+        let username = username.clone();
+        let tcp_stop = Arc::clone(&tcp_stop);
+        std::thread::spawn(move || {
+            let mut stream = tcp_reader;
+            let mut buf = [0u8; 4096];
+
+            while !tcp_stop.load(Ordering::Relaxed) {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        bus.publish(WsEvent::FixMessage {
+                            label: classify_fix_msg(&buf[..n]),
+                            body: pretty_fix(&buf[..n]),
+                            tag: "feed".into(),
+                            recipient: Some(username.clone()),
+                        });
+                    }
+                    Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => {
+                        continue;
+                    }
+                    Err(e) => {
+                        bus.publish(WsEvent::FixMessage {
+                            label: "ERROR".into(),
+                            body: format!("FIX TCP read error: {e}"),
+                            tag: "err".into(),
+                            recipient: Some(username.clone()),
+                        });
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     // Browser connected — tell it the FIX engine is ready
     // The web server IS the FIX gateway now, no separate TCP client needed
     state.bus.publish(WsEvent::Status { connected: true });
@@ -68,6 +145,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
+                        let allow_event = match &event {
+                            WsEvent::FixMessage { recipient: Some(recipient), .. } => recipient == &username,
+                            _ => true,
+                        };
+
+                        if !allow_event {
+                            continue;
+                        }
+
                         if let WsEvent::FixMessage { tag, body, .. } = &event {
                             if tag == "feed" {
                                 // Apply once globally (deduped inside PlayerStore), then
@@ -103,7 +189,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_browser_message(&text, &state, &username).await;
+                        handle_browser_message(&text, &state, &username, &tcp_writer).await;
                         // After every command, push the updated player state to this client.
                         if let Some(player) = state.player_store.get_player(&username) {
                             let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
@@ -130,10 +216,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
         }
     }
 
+    tcp_stop.store(true, Ordering::Relaxed);
+    if let Ok(stream) = tcp_writer.lock() {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+
     state.bus.publish(WsEvent::Status { connected: false });
 }
 
-async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
+async fn handle_browser_message(text: &str, state: &AppState, username: &str, tcp_writer: &Arc<Mutex<TcpStream>>) {
     tracing::debug!("[{}] Received message from browser: {text}", market_name());
     let cmd: BrowserCommand = match serde_json::from_str(text) {
         Ok(c)  => c,
@@ -177,10 +268,17 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
                     qty as u32, symbol, price),
                 body: pretty_fix(&fix_bytes),
                 tag:  "send".into(),
+                recipient: Some(username.to_string()),
             });
 
-            // Inject into the FIX engine
-            (state.fix_sender)(fix_bytes);
+            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes) {
+                state.bus.publish(WsEvent::FixMessage {
+                    label: "ERROR".into(),
+                    body: format!("Unable to send FIX order over TCP: {e}"),
+                    tag: "err".into(),
+                    recipient: Some(username.to_string()),
+                });
+            }
 
             tracing::debug!("[{}] Browser order injected into FIX engine", market_name());
         }
@@ -202,9 +300,17 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
                 label: format!("CANCEL ✕ ({})", clord_id),
                 body: pretty_fix(&fix_bytes),
                 tag:  "send".into(),
+                recipient: Some(username.to_string()),
             });
 
-            (state.fix_sender)(fix_bytes);
+            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes) {
+                state.bus.publish(WsEvent::FixMessage {
+                    label: "ERROR".into(),
+                    body: format!("Unable to send FIX cancel over TCP: {e}"),
+                    tag: "err".into(),
+                    recipient: Some(username.to_string()),
+                });
+            }
         }
 
         BrowserCommand::ResetSeq => {
@@ -214,6 +320,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
                 label: "INFO".into(),
                 body:  "Sequence number reset.".into(),
                 tag:   "info".into(),
+                recipient: Some(username.to_string()),
             });
         }
 
@@ -223,12 +330,14 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
                     label: "INFO".into(),
                     body: "Player token balance reset to initial value.".into(),
                     tag: "info".into(),
+                    recipient: Some(username.to_string()),
                 });
             } else {
                 state.bus.publish(WsEvent::FixMessage {
                     label: "ERROR".into(),
                     body: "Unable to reset tokens: player not found.".into(),
                     tag: "err".into(),
+                    recipient: Some(username.to_string()),
                 });
             }
         }
@@ -240,13 +349,45 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str) {
         BrowserCommand::MdRequest { symbol, depth } => {
             let fix_bytes = build_md_request("BROWSER", "SERVER1",
                                              &symbol, depth.unwrap_or(1));
-            (state.fix_sender)(fix_bytes);
+            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes) {
+                state.bus.publish(WsEvent::FixMessage {
+                    label: "ERROR".into(),
+                    body: format!("Unable to send market data request over TCP: {e}"),
+                    tag: "err".into(),
+                    recipient: Some(username.to_string()),
+                });
+            }
         }
     }
 }
 
+fn send_fix_over_tcp(tcp_writer: &Arc<Mutex<TcpStream>>, bytes: &[u8]) -> std::io::Result<()> {
+    let mut stream = tcp_writer.lock().unwrap();
+    stream.write_all(bytes)
+}
+
 fn pretty_fix(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).replace('\x01', " │ ")
+}
+
+fn classify_fix_msg(raw: &[u8]) -> String {
+    let s = String::from_utf8_lossy(raw);
+    let msg_type = s
+        .split('\x01')
+        .find(|f| f.starts_with("35="))
+        .and_then(|f| f.strip_prefix("35="))
+        .unwrap_or("?");
+
+    match msg_type {
+        "8" => "◀ EXEC REPORT (8)".into(),
+        "W" => "◀ MD SNAPSHOT (W)".into(),
+        "X" => "◀ MD INCREMENTAL (X)".into(),
+        "Y" => "◀ MD REJECT (Y)".into(),
+        "0" => "◀ HEARTBEAT (0)".into(),
+        "A" => "◀ LOGON (A)".into(),
+        "5" => "◀ LOGOUT (5)".into(),
+        t   => format!("◀ MSG ({t})"),
+    }
 }
 
 // ── FIX message builders ──────────────────────────────────────────────────────

@@ -24,21 +24,19 @@ fn market_name() -> &'static str {
         .as_str()
 }
 
-pub type FixSender = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
-
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
 #[derive(Clone)]
 pub struct AppState {
     pub bus: EventBus,
-    /// Injects a raw FIX message into the engine, bypassing TCP.
-    pub fix_sender: FixSender,
+    /// Address of the FIX TCP gateway for this market instance.
+    pub fix_tcp_addr: String,
     /// Per-player state registry (tokens, pending orders, credentials).
     pub player_store: PlayerStore,
 }
 
 pub fn run_web_server(
     bus: EventBus,
-    fix_sender: FixSender,
+    fix_tcp_addr: String,
     ip: &str,
     port: u16,
     players_file: PathBuf,
@@ -49,19 +47,19 @@ pub fn run_web_server(
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_sender, ip, port, players_file, shutdown))
+        .block_on(serve(bus, fix_tcp_addr, ip, port, players_file, shutdown))
 }
 
 async fn serve(
     bus: EventBus,
-    fix_sender: FixSender,
+    fix_tcp_addr: String,
     ip: &str,
     port: u16,
     players_file: PathBuf,
     shutdown: Arc<AtomicBool>,
 ) {
     let player_store = PlayerStore::load(players_file);
-    let state = AppState { bus, fix_sender, player_store };
+    let state = AppState { bus, fix_tcp_addr, player_store };
 
     let app = Router::new()
         .route("/",   get(index_handler))
@@ -109,7 +107,11 @@ async fn index_handler(
             .into_response();
     }
 
-    Html(include_str!("../frontend/index.html")).into_response()
+    let market = market_name();
+    let html = include_str!("../frontend/index.html")
+        .replace("{{MARKET_NAME}}", market);
+
+    Html(html).into_response()
 }
 
 /// Extract `(username, password)` from an HTTP Basic-Auth header.

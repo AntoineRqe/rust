@@ -23,6 +23,8 @@ pub enum WsEvent {
         label: String, // e.g. "EXEC_REPORT", "MARKET_DATA_SNAPSHOT"
         body:  String, // e.g. "8=FIX.4.2 | 9=123 | 35=8 | ..."
         tag:   String, // e.g. "exec_report", "market_data" — useful for CSS styling in the browser
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipient: Option<String>, // targeted browser username; None means broadcast to all
     },
 
     /// Connection status changed
