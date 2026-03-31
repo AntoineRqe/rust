@@ -412,9 +412,12 @@ function handleServerEvent(msg) {
       schedulePlayerState(msg);
       break;
     case 'fix_message':
-      appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
-      if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
-        resetClientMarketView();
+      // md events are high-frequency market data — only update the book, never log them
+      if (msg.tag !== 'md') {
+        appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
+        if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
+          resetClientMarketView();
+        }
       }
       // parse the FIX message to update order book
       updateBookFromFix(msg.body, msg.tag);
@@ -766,28 +769,45 @@ function addQty(side, price, qty) {
 }
 
 function applyOrderLeaves(clordId, side, price, newLeaves) {
-  if (!clordId || !side || !(price > 0)) return;
+  if (!clordId) return;
 
   const prev = book.orderState[clordId];
+  const effSide = side || (prev ? prev.side : '');
+  const effPrice = (price > 0) ? price : (prev ? prev.price : 0);
+
+  if (!effSide || !(effPrice > 0)) return;
+
   const prevLeaves = prev ? prev.leaves : 0;
   const delta = newLeaves - prevLeaves;
 
-  if (delta > 0) addQty(side, price, delta);
-  else if (delta < 0) rmQty(side, price, -delta);
+  if (delta > 0) addQty(effSide, effPrice, delta);
+  else if (delta < 0) rmQty(effSide, effPrice, -delta);
 
   if (newLeaves > 0) {
-    book.orderState[clordId] = { side, price, leaves: newLeaves };
+    book.orderState[clordId] = { side: effSide, price: effPrice, leaves: newLeaves };
   } else {
     delete book.orderState[clordId];
   }
 }
 
 function updateBookFromFix(body, tag) {
-  // only parse inbound exec reports (tag = 'feed')
-  if (tag !== 'feed') return;
+  // Order book widget is driven exclusively by the multicast MD feed.
+  // FIX execution reports ('feed') are handled server-side for token/player state only.
+  if (tag !== 'md') return;
 
   const f = parseFix(body);
-  if (f['35'] !== '8') return;   // only ExecutionReport
+
+  // ── debug: log every MD packet received ──────────────────────────────────
+  console.log('[MD]', body, f);
+  appendLog({
+    ts: now(),
+    label: 'MD',
+    body: `39=${f['39']||'?'} 11=${f['11']||'?'} 55=${f['55']||'?'} 44=${f['44']||'?'} 38=${f['38']||'?'} 151=${f['151']||'?'} 9001=${f['9001']||'?'}`,
+    tag: 'md',
+  });
+  // ─────────────────────────────────────────────────────────────────────────
+
+  if (f['35'] !== '8') return;   // only ExecutionReport-like payloads
 
   const status    = f['39'] || '';
   const side      = f['54'] || '';
@@ -814,7 +834,7 @@ function updateBookFromFix(body, tag) {
     applyOrderLeaves(clordId, side, price, newLeaves);
 
   } else if (status === '1') {
-    // PartiallyFilled: record trade and update leaves
+    // PartiallyFilled / Modify-like updates
     if (lastPx > 0 && lastQty > 0) {
       book.last = lastPx;
       book.trades.unshift([lastPx, lastQty, side === '1' ? 'B' : 'S',
@@ -825,18 +845,38 @@ function updateBookFromFix(body, tag) {
     renderOrders();
 
   } else if (status === '2') {
-    // Filled: record trade, remove from book
+    // Filled / Trade-like updates
     const fillPx  = lastPx  > 0 ? lastPx  : price;
     const fillQty = lastQty > 0 ? lastQty : qty;
+    const isSyntheticMdTrade = clordId.startsWith('T');
     if (fillPx > 0 && fillQty > 0) {
       book.last = fillPx;
       book.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
                            new Date().toTimeString().slice(0,8)]);
       book.trades = book.trades.slice(0, 20);
+
+      if (isSyntheticMdTrade) {
+        // MD trade packets do not carry original maker/taker order IDs.
+        // Apply the executed quantity to both sides at trade price so
+        // the displayed aggregate book stays consistent after a match.
+        rmQty('1', fillPx, fillQty);
+        rmQty('2', fillPx, fillQty);
+      }
     }
-    applyOrderLeaves(clordId, side, price, 0);
-    cleanupOrderState(clordId);
+    if (!isSyntheticMdTrade) {
+      applyOrderLeaves(clordId, side, price, 0);
+      cleanupOrderState(clordId);
+    }
     renderOrders();
+
+  } else if (status === '3' && f['9000'] === 'SNAPSHOT') {
+    // Market-data snapshot refresh marker: reset local displayed book and wait
+    // for subsequent incremental/add events.
+    book.bids = {};
+    book.asks = {};
+    book.trades = [];
+    book.last = null;
+    book.orderState = {};
 
   } else if (status === '3' || status === '4' || status === 'C' || status === '8') {
     // Cancelled/Expired

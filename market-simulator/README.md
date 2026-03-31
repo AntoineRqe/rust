@@ -42,6 +42,29 @@ Technical choices and discussion about the architecture and design of the simula
 ─
 ## Running the Simulator
 
+### Database configuration (per market)
+
+Each market process now uses its own PostgreSQL database URL from config.
+
+In `crates/config/default.json`, each market declares:
+
+- `database_url_env` (preferred): name of the environment variable to read
+- `database_url` (optional fallback): direct connection string
+
+Default config uses:
+
+- `DATABASE_URL_NASDAQ`
+- `DATABASE_URL_NYSE`
+
+Set both before starting:
+
+```bash
+export DATABASE_URL_NASDAQ=postgres://<user>:<password>@localhost:5432/market_nasdaq
+export DATABASE_URL_NYSE=postgres://<user>:<password>@localhost:5432/market_nyse
+```
+
+Then run:
+
 To run the simulator, you can use the following command:
 
 ```bash

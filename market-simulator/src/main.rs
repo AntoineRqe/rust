@@ -6,6 +6,7 @@ use order_book::OrderBookControl;
 use server::tcp::{
     FixServer,
 };
+use server::multicast::{MulticastSource, spawn_market_feed_receiver};
 use std::sync::{Arc, Mutex};
 use crossbeam::{channel};
 use fix::engine::{FixEngine, FixRawMsg};
@@ -38,6 +39,7 @@ struct ThreadHandles {
     ob_thread: Option<std::thread::JoinHandle<()>>,
     er_thread: Option<std::thread::JoinHandle<()>>,
     market_feed_thread: Option<std::thread::JoinHandle<()>>,
+    multicast_receiver_thread: Option<std::thread::JoinHandle<()>>,
     db_thread: Option<std::thread::JoinHandle<()>>,
     web_thread: Option<std::thread::JoinHandle<()>>,
     tcp_thread: Option<std::thread::JoinHandle<()>>,
@@ -54,6 +56,10 @@ struct MarketSimulator {
     web_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Shared flag to stop the gRPC server gracefully.
     grpc_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Shared flag to stop the multicast market-feed receiver thread.
+    multicast_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Multicast endpoints (potentially multiple markets) to forward to GUI websockets.
+    market_feed_sources: Vec<MulticastSource>,
 }
 
 struct QueueHandle {
@@ -95,7 +101,21 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let mut market_simulator = market_simulator.lock().unwrap();
 
     let config = market_simulator.config.clone();
+    let market_feed_sources = market_simulator.market_feed_sources.clone();
     let bus = EventBus::new();
+
+    let multicast_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    market_simulator.multicast_shutdown = Some(Arc::clone(&multicast_shutdown));
+
+    let _multicast_receiver_thread = spawn_market_feed_receiver(
+        bus.clone(),
+        market_feed_sources,
+        Arc::clone(&multicast_shutdown),
+    );
+
+    {
+        market_simulator.thread_handles.lock().unwrap().multicast_receiver_thread = Some(_multicast_receiver_thread);
+    }
 
     let mut queues = QueueHandle::new(&mut market_simulator, &config.name);
 
@@ -118,8 +138,12 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         market_simulator.thread_handles.lock().unwrap().er_thread = Some(_er_thread);
     }
 
+    let database_url = config.resolve_database_url().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+    })?;
+
     // DB engine thread
-    let db_engine = match db::DatabaseEngine::new(ob_db_rx) {
+    let db_engine = match db::DatabaseEngine::new(ob_db_rx, &database_url) {
         Ok(engine) => engine,
         Err(e) => {
             return Err(Box::new(e));
@@ -285,12 +309,13 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 }
 
 fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
-    let (tcp_shutdown, web_shutdown, grpc_shutdown, entry_point, thread_handles) = {
+    let (tcp_shutdown, web_shutdown, grpc_shutdown, multicast_shutdown, entry_point, thread_handles) = {
         let market_simulator = market_simulator.lock().unwrap();
         (
             market_simulator.tcp_shutdown.clone(),
             market_simulator.web_shutdown.clone(),
             market_simulator.grpc_shutdown.clone(),
+            market_simulator.multicast_shutdown.clone(),
             market_simulator.entry_point.clone(),
             Arc::clone(&market_simulator.thread_handles),
         )
@@ -308,6 +333,11 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 
     // Signal the gRPC server to stop.
     if let Some(flag) = grpc_shutdown {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Signal multicast receiver thread to stop.
+    if let Some(flag) = multicast_shutdown {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -332,6 +362,9 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     }
     if let Some(handle) = thread_handles.market_feed_thread.take() {
         handle.join().expect("Failed to join Market Feed thread");
+    }
+    if let Some(handle) = thread_handles.multicast_receiver_thread.take() {
+        handle.join().expect("Failed to join Multicast Receiver thread");
     }
     if let Some(handle) = thread_handles.db_thread.take() {
         handle.join().expect("Failed to join Database thread");
@@ -363,6 +396,12 @@ fn main() {
 
     // ── Single-market mode (child process) ──────────────────────────────────
     if let Some(index) = cli.market_index {
+        let market_feed_sources = config.markets.iter().map(|market| MulticastSource {
+            market: market.name.clone(),
+            address: market.multicast.address.clone(),
+            port: market.multicast.port,
+        }).collect::<Vec<_>>();
+
         let market_config = config
             .markets
             .into_iter()
@@ -380,6 +419,7 @@ fn main() {
                 ob_thread: None,
                 er_thread: None,
                 market_feed_thread: None,
+                multicast_receiver_thread: None,
                 db_thread: None,
                 web_thread: None,
                 tcp_thread: None,
@@ -389,6 +429,8 @@ fn main() {
             tcp_shutdown: None,
             web_shutdown: None,
             grpc_shutdown: None,
+            multicast_shutdown: None,
+            market_feed_sources,
         }));
 
         if let Err(e) = start_market(Arc::clone(&simulator)) {

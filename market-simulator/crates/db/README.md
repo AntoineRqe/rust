@@ -6,7 +6,9 @@ This crate persists order lifecycle data from the matching pipeline and provides
 
 ## Environment
 
-- Requires `DATABASE_URL` (PostgreSQL connection string)
+- Uses a market-specific PostgreSQL URL passed from app config
+- Preferred config path per market: `database_url_env` (e.g. `DATABASE_URL_NASDAQ`)
+- Optional fallback per market: `database_url`
 - Loads `.env` automatically via `dotenvy`
 
 ## What it stores
@@ -26,7 +28,7 @@ This crate persists order lifecycle data from the matching pipeline and provides
 
 Exposed methods:
 
-- `new(fifo_in) -> Result<Self, sqlx::Error>`
+- `new(fifo_in, database_url) -> Result<Self, sqlx::Error>`
 - `init() -> Result<(), sqlx::Error>`
 - `run()`
 - `persist_order_update(&self, &OrderEvent, &OrderResult) -> Result<(), sqlx::Error>`
@@ -39,6 +41,7 @@ Notes:
 
 - The engine API is blocking; async DB helpers are bridged internally with a Tokio runtime helper.
 - `run()` drains the FIFO and persists records synchronously, then closes the pool when shutdown completes.
+- Helper `connect_from_env()` still exists, but simulator startup now resolves per-market URLs via config and passes them into `DatabaseEngine::new`.
 
 ## Schema
 

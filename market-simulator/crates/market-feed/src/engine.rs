@@ -97,7 +97,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         self.seq_num += 1;
         header.timestamp_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
         header.msg_type = msg_type as u8;
-        header.instrument_id = order_event.symbol.to_numeric() as u32;
+        header.instrument_id = (order_event.symbol.to_numeric() >> 32) as u32;
 
         header
     }
@@ -316,7 +316,16 @@ mod tests {
         assert_eq!(version, 1);
         assert_eq!(seq_num, expected_seq_num);
         assert!(timestamp_ns > 0);
-        assert_eq!(instrument_id, order_event.symbol.to_numeric() as u32);
+        assert_eq!(instrument_id, (order_event.symbol.to_numeric() >> 32) as u32);
+    }
+
+    fn stable_u64_from_fixed_20(bytes: &[u8; 20]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
     }
 
     #[test]
@@ -350,7 +359,7 @@ mod tests {
                 let new_price = modify_order.new_price;
                 let new_quantity = modify_order.new_quantity;
 
-                assert_eq!(order_id, order_event.order_id.to_numeric());
+                assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
                 assert_eq!(new_price, order_event.price);
                 assert_eq!(new_quantity, order_event.quantity);
             }
@@ -378,7 +387,7 @@ mod tests {
             MarketEvent::Delete(header, delete_order) => {
                 assert_header_fields(&header, &order_event, MessageType::DeleteOrder, 8, 0);
                 let order_id = delete_order.order_id;
-                assert_eq!(order_id, OrderId::from_ascii("orig1234").to_numeric());
+                assert_eq!(order_id, stable_u64_from_fixed_20(&OrderId::from_ascii("orig1234").0));
             }
             _ => panic!("Expected DeleteOrder event"),
         }
@@ -498,7 +507,7 @@ mod tests {
                 let price = add_order.price;
                 let quantity = add_order.quantity;
 
-                assert_eq!(order_id, order_event.order_id.to_numeric());
+                assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
                 assert_eq!(side, 1);
                 assert_eq!(price, order_event.price);
                 assert_eq!(quantity, order_event.quantity);
@@ -533,7 +542,7 @@ mod tests {
                 let new_price = modify_order.new_price;
                 let new_quantity = modify_order.new_quantity;
 
-                assert_eq!(order_id, order_event.order_id.to_numeric());
+                assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
                 assert_eq!(new_price, order_event.price);
                 assert_eq!(new_quantity, order_event.quantity);
             }
@@ -557,7 +566,7 @@ mod tests {
         match event {
             MarketEvent::Delete(_, delete_order) => {
                 let order_id = delete_order.order_id;
-                assert_eq!(order_id, OrderId::from_ascii("orig1234").to_numeric());
+                assert_eq!(order_id, stable_u64_from_fixed_20(&OrderId::from_ascii("orig1234").0));
             }
             _ => panic!("Expected DeleteOrder event"),
         }

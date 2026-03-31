@@ -73,6 +73,15 @@ pub enum MarketEvent {
     Snapshot(MarketFeedHeader, OrderBookSnapshot),
 }
 
+fn stable_u64_from_fixed_20(bytes: &[u8; 20]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 impl MarketEvent {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
@@ -199,7 +208,7 @@ impl AddOrder {
 
     pub fn from_order_event(order_event: &types::OrderEvent) -> Self {
         Self {
-            order_id: order_event.order_id.to_numeric().into(),
+            order_id: stable_u64_from_fixed_20(&order_event.cl_ord_id.0),
             side: match order_event.side {
                 types::Side::Buy => 1,
                 types::Side::Sell => 2,
@@ -240,7 +249,7 @@ impl ModifyOrder {
 
     pub fn from_order_event(order_event: &types::OrderEvent) -> Self {
         Self {
-            order_id: order_event.order_id.to_numeric(),
+            order_id: stable_u64_from_fixed_20(&order_event.cl_ord_id.0),
             new_price: order_event.price,
             new_quantity: order_event.quantity,
         }
@@ -266,8 +275,8 @@ impl DeleteOrder {
     pub fn from_order_event(order_event: &types::OrderEvent) -> Self {
         let order_id = order_event
             .orig_cl_ord_id
-            .map(|id| id.to_numeric())
-            .unwrap_or_else(|| order_event.order_id.to_numeric());
+            .map(|id| stable_u64_from_fixed_20(&id.0))
+            .unwrap_or_else(|| stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
 
         Self { order_id }
     }
@@ -437,7 +446,7 @@ mod tests {
     fn test_add_order_from_order_event() {
 
         let order_event = types::OrderEvent {
-            order_id: OrderId::from_ascii("order123"),
+            cl_ord_id: OrderId::from_ascii("order123"), // market-feed uses cl_ord_id as the order identifier
             side: types::Side::Buy,
             price: FixedPointArithmetic::from_f64(123.45),
             quantity: FixedPointArithmetic::from_f64(1000.0),
@@ -452,7 +461,7 @@ mod tests {
         let quantity = add_order.quantity;
 
 
-        assert_eq!(order_id, 0x6f72646572313233); // "order123" in hex
+        assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
         assert_eq!(side, 1);
         assert_eq!(price.to_f64(), 123.45);
         assert_eq!(quantity.to_f64(), 1000.0);

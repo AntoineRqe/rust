@@ -34,8 +34,11 @@ pub struct DatabaseEngine<'a, const N: usize> {
 }
 
 impl <'a, const N: usize> DatabaseEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>) -> Result<Self, sqlx::Error> {
-        let pool = Arc::new(block_on_db(connect_from_env())?);
+    pub fn new(
+        fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
+        database_url: &str,
+    ) -> Result<Self, sqlx::Error> {
+        let pool = Arc::new(block_on_db(connect(database_url))?);
 
         Ok(Self {
             fifo_in,
@@ -120,6 +123,10 @@ where
 pub async fn connect_from_env() -> Result<PgPool, sqlx::Error> {
     dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    connect(&database_url).await
+}
+
+pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     tracing::debug!("[{}] Connecting to database at {}", market_name(), database_url);
     let max_connections = env::var("DB_MAX_CONNECTIONS")
         .ok()
@@ -133,7 +140,7 @@ pub async fn connect_from_env() -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
-        .connect(&database_url)
+        .connect(database_url)
         .await
 }
 

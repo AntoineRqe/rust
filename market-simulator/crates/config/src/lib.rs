@@ -1,4 +1,5 @@
 use std::fs;
+use std::env;
 
 use serde::Deserialize;
 
@@ -17,11 +18,31 @@ pub struct MulticastConfig {
 #[derive(Clone, Deserialize)]
 pub struct MarketConfig {
     pub name: String,
+    pub database_url: Option<String>,
+    pub database_url_env: Option<String>,
     pub web: Connection,
     pub tcp: Connection,
     pub grpc: Connection,
     pub multicast: MulticastConfig,
     pub core_mapping: EngineCoreMapping,
+}
+
+impl MarketConfig {
+    pub fn resolve_database_url(&self) -> Result<String, String> {
+        if let Some(env_key) = &self.database_url_env {
+            return env::var(env_key).map_err(|_| {
+                format!(
+                    "missing env var '{}' for market '{}'",
+                    env_key,
+                    self.name
+                )
+            });
+        }
+
+        self.database_url
+            .clone()
+            .ok_or_else(|| format!("missing database_url for market '{}'", self.name))
+    }
 }
 
 #[derive(Clone, Deserialize)]

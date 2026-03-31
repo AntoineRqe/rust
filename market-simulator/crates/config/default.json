@@ -3,6 +3,7 @@
     "markets": [
         {
             "name" : "NASDAQ",
+            "database_url_env": "DATABASE_URL_NASDAQ",
             "web": {
                 "ip": "127.0.0.1",
                 "port": 9876
@@ -33,6 +34,7 @@
         },
         {
             "name" : "NYSE",
+            "database_url_env": "DATABASE_URL_NYSE",
             "web": {
                 "ip": "127.0.0.1",
                 "port": 9878
