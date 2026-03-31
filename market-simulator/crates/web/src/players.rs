@@ -16,7 +16,7 @@ fn market_name() -> &'static str {
 }
 
 /// Tokens each new player receives on registration.
-pub const INITIAL_TOKENS: f64 = 100_000.0;
+pub const INITIAL_TOKENS: f64 = 10_000.0;
 
 // ── Stored player record ──────────────────────────────────────────────────────
 

@@ -64,6 +64,15 @@ macro_rules! define_id {
                 $name(bytes)
             }
 
+            pub fn to_numeric(&self) -> u64 {
+                let mut num = 0u64;
+                for i in 0..8 {
+                    num <<= 8;
+                    num |= self.0[i] as u64;
+                }
+                num
+            }
+
             pub fn increment(&mut self) {
                 for i in (0..self.0.len()).rev() {
                     if self.0[i] < 255 {

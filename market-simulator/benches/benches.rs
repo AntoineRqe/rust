@@ -210,7 +210,9 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let er_inbound_tx = Arc::new(er_inbound_tx);
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
 
-        let mut engine = OrderBookEngine::new(er_rx, [Some(er_tx), None]);
+        let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
+
+        let mut engine = OrderBookEngine::new(er_rx, [Some(er_tx), None], control_rx.1);
 
         let handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
@@ -443,6 +445,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         let (er_tx, fix_resp_rx) = er_to_fix.split();
         let (ts_tx, ts_rx) = ts_rb.split();
 
+        let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
 
         // execution report engine thread
         let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
@@ -452,7 +455,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         });
 
         // Book engine thread
-        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, [Some(ob_tx), None]);
+        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, [Some(ob_tx), None], control_rx.1);
         let ob_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 6 });
             order_book_engine.run();

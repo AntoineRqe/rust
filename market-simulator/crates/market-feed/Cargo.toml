@@ -1,0 +1,16 @@
+[package]
+name = "market-feed"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracing.workspace = true
+spsc.workspace = true
+logging = { path = "../logging" }
+types = { path = "../types" }
+utils = { path = "../utils" }
+crossbeam-channel.workspace = true
+bytemuck = "1.12.1"
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

@@ -40,7 +40,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
     // Split into sender and receiver so we can use both concurrently
     // in the select! loop without borrow issues.
     let (mut sender, mut receiver) = socket.split();
-    let mut rx = state.bus.subscribe();
+    let mut rx: tokio::sync::broadcast::Receiver<WsEvent> = state.bus.subscribe();
 
     let tcp_stream = match TcpStream::connect(&state.fix_tcp_addr) {
         Ok(stream) => stream,
