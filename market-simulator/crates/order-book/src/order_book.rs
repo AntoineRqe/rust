@@ -44,7 +44,7 @@ pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent
 
 pub struct OrderBookEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, OrderEvent, N>,
-    fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2],
+    fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
     control_rx: crossbeam_channel::Receiver<OrderBookControl>,
     order_book: OrderBook,
     shutdown: Arc<AtomicBool>,
@@ -53,7 +53,7 @@ pub struct OrderBookEngine<'a, const N: usize> {
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
     pub fn new(
         fifo_in: Consumer<'a, OrderEvent, N>,
-        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2],
+        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
     ) -> Self {
         Self::with_shutdown(fifo_in, fifo_out, control_rx, None)
@@ -61,7 +61,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 
     pub fn with_shutdown(
         fifo_in: Consumer<'a, OrderEvent, N>,
-        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 2],
+        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
         shutdown: Option<Arc<AtomicBool>>,
     ) -> Self {
@@ -1133,7 +1133,7 @@ mod tests {
             let (_control_tx, control_rx) = crossbeam_channel::unbounded();
             let mut engine = OrderBookEngine::new(
                 inbound_consumer,
-                [Some(outbound_producer), None],
+                [Some(outbound_producer), None, None],
                 control_rx,
             );
             

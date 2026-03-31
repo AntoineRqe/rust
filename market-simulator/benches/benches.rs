@@ -214,7 +214,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
 
-        let mut engine = OrderBookEngine::new(er_rx, [Some(er_tx), None], control_rx.1);
+        let mut engine = OrderBookEngine::new(er_rx, [Some(er_tx), None, None], control_rx.1);
 
         let handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
@@ -601,7 +601,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         });
 
         // Book engine thread
-        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, [Some(ob_tx), None], control_rx.1);
+        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, [Some(ob_tx), None, None], control_rx.1);
         let ob_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 6 });
             order_book_engine.run();

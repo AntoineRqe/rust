@@ -9,11 +9,18 @@ pub struct Connection {
 }
 
 #[derive(Clone, Deserialize)]
+pub struct MulticastConfig {
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Clone, Deserialize)]
 pub struct MarketConfig {
     pub name: String,
     pub web: Connection,
     pub tcp: Connection,
     pub grpc: Connection,
+    pub multicast: MulticastConfig,
     pub core_mapping: EngineCoreMapping,
 }
 
@@ -29,6 +36,7 @@ pub struct EngineCoreMapping {
     pub fix_outbound_core: usize,
     pub order_book_core: usize,
     pub execution_report_core: usize,
+    pub market_feed_core: usize,
     pub db_core: usize,
     pub web_core: usize,
     pub tcp_core: usize,

@@ -58,6 +58,7 @@ tracing-subscriber.workspace = true
 config = { path = "crates/config" }
 clap = { version = "=4.5.49", features = ["derive"] }
 grpc  = { path = "crates/grpc" }
+market-feed = { path = "crates/market-feed" }
 
 
 # Optimization profiles

@@ -4,6 +4,9 @@
         "/^python3 -c \"import socket; s=socket\\.socket\\(\\); s\\.bind\\(\\('0\\.0\\.0\\.0',50051\\)\\); print\\('bind ok'\\); s\\.close\\(\\)\"$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "cargo test": true,
+        "cargo bench": true,
+        "cargo check": true
     }
 }

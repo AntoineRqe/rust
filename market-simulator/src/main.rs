@@ -17,6 +17,7 @@ use web::state::{
 };
 use web::server::run_web_server;
 use config::{MarketConfig, MarketsConfig};
+use market_feed::engine::MarketDataFeedEngine;
 
 
 const RB_SIZE: usize = 1024;
@@ -36,6 +37,7 @@ struct ThreadHandles {
     fix_outbound_thread: Option<std::thread::JoinHandle<()>>,
     ob_thread: Option<std::thread::JoinHandle<()>>,
     er_thread: Option<std::thread::JoinHandle<()>>,
+    market_feed_thread: Option<std::thread::JoinHandle<()>>,
     db_thread: Option<std::thread::JoinHandle<()>>,
     web_thread: Option<std::thread::JoinHandle<()>>,
     tcp_thread: Option<std::thread::JoinHandle<()>>,
@@ -60,6 +62,7 @@ struct QueueHandle {
     fix_to_ob: Option<memory::SharedQueue<RB_SIZE, OrderEvent>>,
     ob_to_er: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     ob_to_db: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
+    ob_to_md: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>>,
 }
 
@@ -69,6 +72,7 @@ impl QueueHandle {
         let fix_to_ob    = memory::open_shared_queue::<RB_SIZE, OrderEvent>(&format!("{market_name}_fix_to_order_book"), true);
         let ob_to_er     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_execution_report"), true);
         let ob_to_db     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_db"), true);
+        let ob_to_md     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_market_feed"), true);
         let er_to_fix     = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(&format!("{market_name}_execution_report_to_fix"), true);
 
         // Bind Fix entry point to global struct so it can be accessed by the TCP server
@@ -80,6 +84,7 @@ impl QueueHandle {
             fix_to_ob: Some(fix_to_ob),
             ob_to_er: Some(ob_to_er),
             ob_to_db: Some(ob_to_db),
+            ob_to_md: Some(ob_to_md),
             er_to_fix: Some(er_to_fix),
         }
     }
@@ -99,6 +104,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let (ob_tx, er_rx) = queues.ob_to_er.take().unwrap().queue.split();
     let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
     let (ob_db_tx, ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
+    let (ob_md_tx, ob_md_rx) = queues.ob_to_md.take().unwrap().queue.split();
 
     // execution report engine thread
     let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
@@ -154,7 +160,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
 
     // Book engine thread
-    let mut order_book_engine = OrderBookEngine::new(ob_rx, [Some(ob_tx), Some(ob_db_tx)], ob_control_rx);
+    let mut order_book_engine = OrderBookEngine::new(ob_rx, [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)], ob_control_rx);
 
     order_book_engine.import_order_book(initial_orders);
 
@@ -165,6 +171,24 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 
     {
         market_simulator.thread_handles.lock().unwrap().ob_thread = Some(_ob_thread);
+    }
+
+    let market_feed_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut market_feed_engine = MarketDataFeedEngine::new(
+        ob_md_rx,
+        Arc::clone(&market_feed_shutdown),
+        &config.multicast.address,
+        config.multicast.port,
+    )?;
+
+    let market_feed_core = config.core_mapping.market_feed_core;
+    let _market_feed_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: market_feed_core });
+        market_feed_engine.run();
+    });
+
+    {
+        market_simulator.thread_handles.lock().unwrap().market_feed_thread = Some(_market_feed_thread);
     }
 
     // fix engine thread
@@ -255,6 +279,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     tracing::info!("[{}] FIX server    -> {}:{}", config.name, config.tcp.ip, config.tcp.port);
     tracing::info!("[{}] Web terminal  -> http://{}:{}", config.name, config.web.ip, config.web.port);
     tracing::info!("[{}] gRPC control  -> {}:{}", config.name, config.grpc.ip, config.grpc.port);
+    tracing::info!("[{}] Market feed   -> {}:{}", config.name, config.multicast.address, config.multicast.port);
 
     Ok(())
 }
@@ -305,6 +330,9 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     if let Some(handle) = thread_handles.er_thread.take() {
         handle.join().expect("Failed to join Execution Report thread");
     }
+    if let Some(handle) = thread_handles.market_feed_thread.take() {
+        handle.join().expect("Failed to join Market Feed thread");
+    }
     if let Some(handle) = thread_handles.db_thread.take() {
         handle.join().expect("Failed to join Database thread");
     }
@@ -351,6 +379,7 @@ fn main() {
                 fix_outbound_thread: None,
                 ob_thread: None,
                 er_thread: None,
+                market_feed_thread: None,
                 db_thread: None,
                 web_thread: None,
                 tcp_thread: None,

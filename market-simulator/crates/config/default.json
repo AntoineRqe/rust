@@ -15,15 +15,20 @@
                 "ip": "0.0.0.0",
                 "port": 50051
             },
+            "multicast": {
+                "address": "239.0.0.1",
+                "port": 9001
+            },
             "core_mapping": {
                 "order_book_core": 0,
                 "fix_inbound_core": 1,
                 "fix_outbound_core": 2,
                 "execution_report_core": 3,
-                "db_core": 4,
-                "web_core": 5,
-                "tcp_core": 6,
-                "global_core": 7
+                "market_feed_core": 4,
+                "db_core": 5,
+                "web_core": 6,
+                "tcp_core": 7,
+                "global_core": 8
             }
         },
         {
@@ -40,15 +45,20 @@
                 "ip": "0.0.0.0",
                 "port": 50052
             },
+            "multicast": {
+                "address": "239.0.0.2",
+                "port": 9002
+            },
             "core_mapping": {
                 "order_book_core": 0,
                 "fix_inbound_core": 1,
                 "fix_outbound_core": 2,
                 "execution_report_core": 3,
-                "db_core": 4,
-                "web_core": 5,
-                "tcp_core": 6,
-                "global_core": 7
+                "market_feed_core": 4,
+                "db_core": 5,
+                "web_core": 6,
+                "tcp_core": 7,
+                "global_core": 8
             }
         }
     ]
