@@ -95,3 +95,4 @@ execution-report = { path = "crates/execution-report" }
 types = { path = "crates/types" }
 fix = { path = "crates/protocol/FIX" }
 db = { path = "crates/db" }
+market-feed = { path = "crates/market-feed" }

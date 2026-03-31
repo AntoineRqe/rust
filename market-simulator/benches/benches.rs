@@ -1,6 +1,8 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use crossbeam::channel;
 use order_book::order_book::OrderBookEngine;
+use market_feed::engine::MarketDataFeedEngine;
+use std::net::{UdpSocket, Ipv4Addr};
 use std::sync::atomic::AtomicBool;
 use std::{thread};
 use std::time::Instant;
@@ -307,6 +309,150 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
     start.elapsed()
 }
 
+fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
+    let ready = Arc::new(AtomicBool::new(false));
+    let producer_core = get_cores()[(PRODUCER_CORE_OFFSET) % get_cores().len()];
+    let consumer_core = get_cores()[(CONSUMER_CORE_OFFSET) % get_cores().len()];
+    let engine_core   = get_cores()[(ENGINE_CORE_OFFSET)   % get_cores().len()];
+
+    if get_cores().len() < 2 {
+        panic!("Need at least 2 cores available.");
+    }
+
+    let iters = iters / 100; // Reduce iterations for market feed benchmark since it's more expensive
+
+    const MULTICAST_IP: &str = "239.0.0.2";
+    const PORT: u16 = 18200;
+
+    let start = Instant::now();
+
+    let mut rb_in = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
+    let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
+
+    thread::scope(|s| {
+        let (inbound_tx, inbound_rx) = rb_in.split();
+        let (ts_tx, ts_rx) = ts_rb.split();
+
+        let inbound_tx = Arc::new(inbound_tx);
+        let inbound_tx_clone = Arc::clone(&inbound_tx);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut engine = MarketDataFeedEngine::new(
+            inbound_rx,
+            Arc::clone(&shutdown),
+            MULTICAST_IP,
+            PORT,
+        )
+        .unwrap();
+
+        let engine_handle = s.spawn(move || {
+            core_affinity::set_for_current(engine_core);
+            engine.run();
+        });
+
+        let ready_prod = Arc::clone(&ready);
+
+        s.spawn(move || {
+            core_affinity::set_for_current(producer_core);
+
+            let order_event = OrderEvent {
+                order_type: types::OrderType::LimitOrder,
+                cl_ord_id: OrderId::from_ascii("CLORD12345"),
+                order_id: OrderId::from_ascii("ORDERID01"),
+                orig_cl_ord_id: None,
+                side: types::Side::Buy,
+                price: types::FixedPointArithmetic(123_456_000),
+                quantity: types::FixedPointArithmetic(1_000_000),
+                sender_id: EntityId::from_ascii("SENDER"),
+                target_id: EntityId::from_ascii("TARGET"),
+                symbol: FixedString::from_ascii("BTCUSD"),
+                timestamp: Instant::now(),
+            };
+
+            let order_result = OrderResult {
+                trades: Trades::<4>::default(),
+                status: types::OrderStatus::New,
+                timestamp: Instant::now(),
+            };
+
+            for i in 0..iters {
+                if i > 0 {
+                    while !ready_prod.load(std::sync::atomic::Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                }
+
+                ready_prod.store(false, std::sync::atomic::Ordering::Release);
+
+                let send_ts = Instant::now();
+                loop {
+                    if ts_tx.push(send_ts).is_ok() {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
+
+                loop {
+                    if inbound_tx.push((order_event, order_result)).is_ok() {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
+            }
+        });
+
+        // Consumer: listen on the multicast UDP socket and measure latency
+        core_affinity::set_for_current(consumer_core);
+
+        let recv_socket = UdpSocket::bind(format!("0.0.0.0:{}", PORT)).unwrap();
+        recv_socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        recv_socket
+            .join_multicast_v4(
+                &MULTICAST_IP.parse::<Ipv4Addr>().unwrap(),
+                &"0.0.0.0".parse::<Ipv4Addr>().unwrap(),
+            )
+            .unwrap();
+
+        let mut buf = [0u8; 1024];
+
+        for _ in 0..iters {
+            let send_ts = loop {
+                if let Some(ts) = ts_rx.try_pop() {
+                    break ts;
+                }
+                std::hint::spin_loop();
+            };
+
+            recv_socket.recv_from(&mut buf).unwrap();
+
+            let latency = send_ts.elapsed().as_nanos() as u64;
+            histogram.record(latency).unwrap();
+            ready.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        // Send shutdown sentinel to unblock the engine
+        inbound_tx_clone
+            .push((
+                OrderEvent {
+                    sender_id: EntityId::from_ascii(""),
+                    ..Default::default()
+                },
+                OrderResult {
+                    trades: Trades::<4>::default(),
+                    status: types::OrderStatus::New,
+                    timestamp: Instant::now(),
+                },
+            ))
+            .unwrap();
+
+        engine_handle.join().unwrap();
+    });
+
+    start.elapsed()
+}
+
 fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
     let ready = Arc::new(AtomicBool::new(false));
     let producer_core = get_cores()[(PRODUCER_CORE_OFFSET) % get_cores().len()];
@@ -537,11 +683,12 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 }
 
 fn benchmark_latency(c: &mut Criterion) {
-    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 4] = &[
+    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 5] = &[
         ("Execution Report", benchmark_latency_execution_report),
         ("Order Book", benchmark_latency_order_book),
         ("FIX Engine", benchmark_latency_fix),
-        ("Overall", benchmark_latency_all), // Placeholder for SIMD version, replace with actual SIMD benchmark function when implemented
+        ("Market Feed", benchmark_latency_market_feed),
+        ("Overall", benchmark_latency_all),
     ];
 
     for (name, func) in functions {
