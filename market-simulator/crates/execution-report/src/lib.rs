@@ -305,10 +305,7 @@ mod tests {
     };
 
     use types::macros::{
-        FixedString,
-        OrderId,
-        EntityId,
-        TradeId,
+        EntityId, OrderId, SymbolId, TradeId
     };
 
     use types::{
@@ -347,7 +344,7 @@ mod tests {
                 quantity: FixedPointArithmetic(1_000_000),
                 sender_id: EntityId::from_ascii("SENDER"),
                 target_id: EntityId::from_ascii("TARGET"),
-                symbol: FixedString::from_ascii("TEST_SYMBOL"),
+                symbol: SymbolId::from_ascii("TEST"),
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
 
@@ -403,7 +400,7 @@ mod tests {
                 quantity: FixedPointArithmetic(1_000_000),
                 sender_id: EntityId::from_ascii("SENDER2"),
                 target_id: EntityId::from_ascii("TARGET2"),
-                symbol: FixedString::from_ascii("TEST_SYMBOL"),
+                symbol: SymbolId::from_ascii("TEST"),
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
 

@@ -534,9 +534,9 @@ mod tests {
     use std::{thread, time::Instant};
 
     use super::*;
-    use types::macros::FixedString;
+    use types::macros::{SymbolId};
 
-    const SYMBOL: FixedString = FixedString::from_ascii("TEST_SYMBOL000000000");
+    const SYMBOL: SymbolId = SymbolId::from_ascii("TEST");
     const SENDER: EntityId = EntityId::from_ascii("SENDER0000000000000");
     const TARGET: EntityId = EntityId::from_ascii("TARGET0000000000000");
     const CL_ORD_ID: OrderId = OrderId::from_ascii("12345");

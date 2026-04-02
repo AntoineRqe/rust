@@ -1,10 +1,14 @@
 macro_rules! define_id {
     ($name:ident) => {
+        define_id!($name, 20);
+    };
+
+    ($name:ident, $size:expr) => {
         #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Hash)]
-        pub struct $name(pub [u8; 20]);
+        pub struct $name(pub [u8; $size]);
 
         impl std::ops::Deref for $name {
-            type Target = [u8; 20];
+            type Target = [u8; $size];
             fn deref(&self) -> &Self::Target {
                 &self.0
             }
@@ -21,8 +25,8 @@ macro_rules! define_id {
             type Output = Self;
 
             fn add(self, other: Self) -> Self {
-                let mut result = [0u8; 20];
-                for i in 0..20 {
+                let mut result = [0u8; $size];
+                for i in 0..$size {
                     result[i] = self.0[i] ^ other.0[i]; // Simple XOR for demonstration, not a real ID generation strategy
                 }
                 $name(result)
@@ -38,13 +42,13 @@ macro_rules! define_id {
         impl $name {
 
             pub fn new() -> Self {
-                $name([0u8; 20])
+                $name([0u8; $size])
             }
 
             pub const fn from_str_const(s: &str) -> Self {
                 let bytes = s.as_bytes();
-                assert!(bytes.len() <= 20, "id string must be <= 20 bytes");
-                let mut arr = [0u8; 20];
+                assert!(bytes.len() <= $size, "id string must fit in configured id size");
+                let mut arr = [0u8; $size];
                 let mut i = 0;
                 while i < bytes.len() {
                     arr[i] = bytes[i];
@@ -54,19 +58,29 @@ macro_rules! define_id {
             }
 
             pub const fn from_ascii(s: &str) -> Self {
-                let mut bytes = [0u8; 20];
+                let mut bytes = [0u8; $size];
                 let s_bytes = s.as_bytes();
                 let mut i = 0;
-                while i < s_bytes.len() && i < 20 {
+                while i < s_bytes.len() && i < $size {
                     bytes[i] = s_bytes[i];
                     i += 1;
                 }
                 $name(bytes)
             }
 
+            pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != $size {
+                    return None;
+                }
+                let mut arr = [0u8; $size];
+                arr.copy_from_slice(bytes);
+                Some($name(arr))
+            }
+    
             pub fn to_numeric(&self) -> u64 {
                 let mut num = 0u64;
-                for i in 0..8 {
+                let width = std::cmp::min($size, 8);
+                for i in 0..width {
                     num <<= 8;
                     num |= self.0[i] as u64;
                 }
@@ -93,3 +107,4 @@ define_id!(OrderId);
 define_id!(ClientId);
 define_id!(TradeId);
 define_id!(FixedString);
+define_id!(SymbolId, 4);

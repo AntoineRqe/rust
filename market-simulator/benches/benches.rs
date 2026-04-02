@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use execution_report::{ExecutionReportEngine};
 use spsc::spsc_lock_free::RingBuffer;
 use types::{OrderEvent, OrderResult, Trades};
-use types::macros::{EntityId, OrderId, FixedString};
+use types::macros::{EntityId, OrderId, SymbolId};
 use fix::engine::{FixEngine, FixRawMsg, kill_fix_inbound_engine};
 use std::sync::Arc;
 
@@ -107,7 +107,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                         quantity: types::FixedPointArithmetic(1_000_000),
                         sender_id: EntityId::from_ascii("SENDER"),
                         target_id: EntityId::from_ascii("TARGET"),
-                        symbol: FixedString::from_ascii("TEST_SYMBOL"),
+                        symbol: SymbolId::from_ascii("TEST"),
                         timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
                     };
 
@@ -236,7 +236,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
                 quantity: types::FixedPointArithmetic(1_000_000),
                 sender_id: EntityId::from_ascii("SENDER"),
                 target_id: EntityId::from_ascii("TARGET"),
-                symbol: FixedString::from_ascii("TEST_SYMBOL"),
+                symbol: SymbolId::from_ascii("TEST"),
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
             };
         
@@ -365,7 +365,7 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
                 quantity: types::FixedPointArithmetic(1_000_000),
                 sender_id: EntityId::from_ascii("SENDER"),
                 target_id: EntityId::from_ascii("TARGET"),
-                symbol: FixedString::from_ascii("BTCUSD"),
+                symbol: SymbolId::from_ascii("TEST"),
                 timestamp: Instant::now(),
             };
 

@@ -15,7 +15,7 @@ use types::{
     Side,
     Trade,
 };
-use types::macros::{EntityId, FixedString, OrderId, TradeId};
+use types::macros::{EntityId, SymbolId, OrderId, TradeId};
 use spsc::spsc_lock_free::{Consumer};
 use std::sync::{Arc, atomic::{AtomicBool}};
 use std::sync::atomic::Ordering;
@@ -386,7 +386,7 @@ pub async fn collect_all_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::
             price: FixedPointArithmetic::from_option_f64(row.get("price")),
             quantity: FixedPointArithmetic::from_option_f64(row.get("quantity")),
             side: parse_side(row.get("side")),
-            symbol: fixed_string_from_option(row.get("symbol")),
+            symbol: symbol_id_from_option(row.get("symbol")),
             order_type: parse_order_type(row.get("order_type")),
             cl_ord_id: order_id_from_option(row.get("cl_ord_id")),
             orig_cl_ord_id: row
@@ -494,7 +494,7 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
             price: FixedPointArithmetic::from_option_f64(row.get("price")),
             quantity: FixedPointArithmetic::from_option_f64(row.get("quantity")),
             side: parse_side(row.get("side")),
-            symbol: fixed_string_from_option(row.get("symbol")),
+            symbol: symbol_id_from_option(row.get("symbol")),
             order_type: parse_order_type(row.get("order_type")),
             cl_ord_id: order_id_from_option(row.get("cl_ord_id")),
             orig_cl_ord_id: row
@@ -766,9 +766,9 @@ fn parse_order_type(value: Option<String>) -> OrderType {
     }
 }
 
-fn fixed_string_from_option(value: Option<String>) -> FixedString {
+fn symbol_id_from_option(value: Option<String>) -> SymbolId {
     value
-        .map(|value| FixedString::from_ascii(&value))
+        .map(|value| SymbolId::from_ascii(&value))
         .unwrap_or_default()
 }
 
@@ -797,7 +797,7 @@ mod tests {
     use std::time::Instant;
     use tokio::sync::Mutex;
     use types::{OrderType, Trade, Trades};
-    use types::macros::{EntityId, FixedString, OrderId, TradeId};
+    use types::macros::{EntityId, OrderId, TradeId};
 
     static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -833,7 +833,7 @@ mod tests {
             price: FixedPointArithmetic::from_f64(10.0),
             quantity: FixedPointArithmetic::from_f64(100.0),
             side: Side::Buy,
-            symbol: FixedString::from_ascii("TEST"),
+            symbol: SymbolId::from_ascii("TEST"),
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("test123"),
             orig_cl_ord_id: Some(OrderId::from_ascii("orig123")),
@@ -900,7 +900,7 @@ mod tests {
             price: FixedPointArithmetic::from_f64(10.5),
             quantity: FixedPointArithmetic::from_f64(100.0),
             side: Side::Buy,
-            symbol: FixedString::from_ascii("TEST"),
+            symbol: SymbolId::from_ascii("TEST"),
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("partial1"),
             orig_cl_ord_id: None,
@@ -962,7 +962,7 @@ mod tests {
             price: FixedPointArithmetic::from_f64(12.0),
             quantity: FixedPointArithmetic::from_f64(100.0),
             side: Side::Buy,
-            symbol: FixedString::from_ascii("TEST"),
+            symbol: SymbolId::from_ascii("TEST"),
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("pend001"),
             orig_cl_ord_id: None,
@@ -1047,7 +1047,7 @@ mod tests {
             price: FixedPointArithmetic::from_f64(9.5),
             quantity: FixedPointArithmetic::from_f64(25.0),
             side: Side::Sell,
-            symbol: FixedString::from_ascii("TEST"),
+            symbol: SymbolId::from_ascii("TEST"),
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("live001"),
             orig_cl_ord_id: None,
@@ -1071,7 +1071,7 @@ mod tests {
             price: FixedPointArithmetic::from_f64(9.5),
             quantity: FixedPointArithmetic::ZERO,
             side: Side::Sell,
-            symbol: FixedString::from_ascii("TEST"),
+            symbol: SymbolId::from_ascii("TEST"),
             order_type: OrderType::CancelOrder,
             cl_ord_id: OrderId::from_ascii("cancel01"),
             orig_cl_ord_id: Some(OrderId::from_ascii("live001")),

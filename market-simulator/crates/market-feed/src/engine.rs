@@ -12,7 +12,7 @@ use crate::types::{
     AddOrder,
     DeleteOrder,
     ModifyOrder,
-    MarketFeedHeader,
+    MarketDataHeader,
     MessageType,
     MarketEvent,
     OrderBookSnapshot,
@@ -90,14 +90,14 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         order_event: &OrderEvent,
         msg_type: MessageType,
         payload_len: u16,
-    ) -> MarketFeedHeader {
-        let mut header = crate::types::MarketFeedHeader::default();
+    ) -> MarketDataHeader {
+        let mut header = crate::types::MarketDataHeader::default();
         header.length = 24 + payload_len;
         header.seq_num = self.seq_num;
         self.seq_num += 1;
         header.timestamp_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
         header.msg_type = msg_type as u8;
-        header.instrument_id = (order_event.symbol.to_numeric() >> 32) as u32;
+        header.symbol = order_event.symbol;
 
         header
     }
@@ -162,10 +162,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
 #[cfg(test)]
 mod tests {
     use types::macros::{
-        OrderId,
-        EntityId,
-        FixedString,
-        TradeId,
+        EntityId, OrderId, SymbolId, TradeId
     };
 
     use super::*;
@@ -201,8 +198,7 @@ mod tests {
         fix_to_ob_tx.push((order_event, OrderResult::default())).unwrap();  
     } 
 
-        
-    fn retrieve_market_data_feed_events(port: u16, multicast_ip: &str) -> Result<(MarketFeedHeader, MarketEvent), Box<dyn std::error::Error>> {
+    fn retrieve_market_data_feed_events(port: u16, multicast_ip: &str) -> Result<(MarketDataHeader, MarketEvent), Box<dyn std::error::Error>> {
         // 0.0.0.0 is used to listen on all interfaces
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
         socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
@@ -217,10 +213,10 @@ mod tests {
 
         let mut buf = [0u8; 1024];
 
-        let market_data_feed_event: (MarketFeedHeader, MarketEvent) = loop {
+        let market_data_feed_event: (MarketDataHeader, MarketEvent) = loop {
             let (_, _) = socket.recv_from(&mut buf)?;
 
-            let header = MarketFeedHeader::from_bytes(&buf[0..24]).ok_or("Failed to deserialize MarketFeedHeader")?;
+            let header = MarketDataHeader::from_bytes(&buf[0..24]).ok_or("Failed to deserialize MarketDataHeader")?;
 
             let header_size = 24;
             let body_bytes = &buf[header_size..];
@@ -262,7 +258,7 @@ mod tests {
         Ok(market_data_feed_event)
     }
 
-    fn run_engine_once_and_receive(order_event: OrderEvent, order_result: OrderResult) -> (MarketFeedHeader, MarketEvent) {
+    fn run_engine_once_and_receive(order_event: OrderEvent, order_result: OrderResult) -> (MarketDataHeader, MarketEvent) {
         let mut rb_in = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 16>::new();
 
         thread::scope(|s| {
@@ -298,7 +294,7 @@ mod tests {
     }
 
     fn assert_header_fields(
-        header: &MarketFeedHeader,
+        header: &MarketDataHeader,
         order_event: &OrderEvent,
         msg_type: MessageType,
         payload_len: u16,
@@ -309,14 +305,14 @@ mod tests {
         let version = header.version;
         let seq_num = header.seq_num;
         let timestamp_ns = header.timestamp_ns;
-        let instrument_id = header.instrument_id;
+        let symbol = header.symbol;
 
         assert_eq!(length, 24 + payload_len);
         assert_eq!(header_msg_type, msg_type as u8);
         assert_eq!(version, 1);
         assert_eq!(seq_num, expected_seq_num);
         assert!(timestamp_ns > 0);
-        assert_eq!(instrument_id, (order_event.symbol.to_numeric() >> 32) as u32);
+        assert_eq!(symbol, order_event.symbol);
     }
 
     fn stable_u64_from_fixed_20(bytes: &[u8; 20]) -> u64 {
@@ -341,7 +337,7 @@ mod tests {
             order_type: types::OrderType::LimitOrder,
             price: types::FixedPointArithmetic(100),
             quantity: types::FixedPointArithmetic(10),
-            symbol: FixedString::from_ascii("BTCUSD"),
+            symbol: SymbolId::from_ascii("BTCUSD"),
             ..Default::default()
         };
 
@@ -378,7 +374,7 @@ mod tests {
             order_id: OrderId::from_ascii("cancel01"),
             orig_cl_ord_id: Some(OrderId::from_ascii("orig1234")),
             order_type: types::OrderType::CancelOrder,
-            symbol: FixedString::from_ascii("ETHUSD"),
+            symbol: SymbolId::from_ascii("ETHUSD"),
             ..Default::default()
         };
 
@@ -404,7 +400,7 @@ mod tests {
             order_id: OrderId::from_ascii("order123"),
             side: types::Side::Sell,
             order_type: types::OrderType::LimitOrder,
-            symbol: FixedString::from_ascii("AAPL"),
+            symbol: SymbolId::from_ascii("AAPL"),
             ..Default::default()
         };
 
@@ -457,7 +453,7 @@ mod tests {
             order_id: OrderId::from_ascii("order123"),
             side: types::Side::Buy,
             order_type: types::OrderType::LimitOrder,
-            symbol: FixedString::from_ascii("MSFT"),
+            symbol: SymbolId::from_ascii("MSFT"),
             ..Default::default()
         };
 
@@ -487,7 +483,7 @@ mod tests {
             side: types::Side::Buy,
             price: types::FixedPointArithmetic(100),
             quantity: types::FixedPointArithmetic(10),
-            symbol: FixedString::from_ascii("EURUSD"),
+            symbol: SymbolId::from_ascii("EURUSD"),
             ..Default::default()
         };
 
@@ -525,7 +521,7 @@ mod tests {
             order_type: types::OrderType::LimitOrder,
             price: types::FixedPointArithmetic(250),
             quantity: types::FixedPointArithmetic(7),
-            symbol: FixedString::from_ascii("XAUUSD"),
+            symbol: SymbolId::from_ascii("XAUUSD"),
             ..Default::default()
         };
 
@@ -557,7 +553,7 @@ mod tests {
             order_id: OrderId::from_ascii("cancel01"),
             orig_cl_ord_id: Some(OrderId::from_ascii("orig1234")),
             order_type: types::OrderType::CancelOrder,
-            symbol: FixedString::from_ascii("TSLA"),
+            symbol: SymbolId::from_ascii("TSLA"),
             ..Default::default()
         };
 
@@ -579,7 +575,7 @@ mod tests {
             order_id: OrderId::from_ascii("tradeord1"),
             side: types::Side::Buy,
             order_type: types::OrderType::LimitOrder,
-            symbol: FixedString::from_ascii("NFLX"),
+            symbol: SymbolId::from_ascii("NFLX"),
             ..Default::default()
         };
 
@@ -627,7 +623,7 @@ mod tests {
             order_id: OrderId::from_ascii("snap0001"),
             side: types::Side::Sell,
             order_type: types::OrderType::LimitOrder,
-            symbol: FixedString::from_ascii("AMZN"),
+            symbol: SymbolId::from_ascii("AMZN"),
             ..Default::default()
         };
 

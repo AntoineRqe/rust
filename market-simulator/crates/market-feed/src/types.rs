@@ -1,17 +1,17 @@
-use types::FixedPointArithmetic;
+use types::{FixedPointArithmetic, macros::SymbolId};
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
-pub struct MarketFeedHeader {
-    pub length: u16,         // total message length
+pub struct MarketDataHeader {
     pub msg_type: u8,        // MessageType
     pub version: u8,
     pub seq_num: u64,
     pub timestamp_ns: u64,
-    pub instrument_id: u32,
+    pub symbol: SymbolId,     // null-terminated ASCII symbol
+    pub length: u16,         // total message length
 }
 
-impl Default for MarketFeedHeader {
+impl Default for MarketDataHeader {
     fn default() -> Self {
         Self {
             length: 0,
@@ -19,12 +19,12 @@ impl Default for MarketFeedHeader {
             version: 1,
             seq_num: 0,
             timestamp_ns: 0,
-            instrument_id: 0,
+            symbol: SymbolId::default(),
         }
     }
 }
 
-impl MarketFeedHeader {
+impl MarketDataHeader {
     pub fn to_bytes(&self) -> [u8; 24] {
         let mut buf = [0u8; 24];
 
@@ -33,7 +33,7 @@ impl MarketFeedHeader {
         buf[3] = self.version;
         buf[4..12].copy_from_slice(&self.seq_num.to_be_bytes());
         buf[12..20].copy_from_slice(&self.timestamp_ns.to_be_bytes());
-        buf[20..24].copy_from_slice(&self.instrument_id.to_be_bytes());
+        buf[20..24].copy_from_slice(&self.symbol.0);
 
         buf
     }
@@ -49,7 +49,7 @@ impl MarketFeedHeader {
             version: bytes[3],
             seq_num: u64::from_be_bytes(bytes[4..12].try_into().ok()?),
             timestamp_ns: u64::from_be_bytes(bytes[12..20].try_into().ok()?),
-            instrument_id: u32::from_be_bytes(bytes[20..24].try_into().ok()?),
+            symbol: SymbolId::from_bytes(&bytes[20..24])?,
         })
     }
 }
@@ -66,11 +66,11 @@ pub enum MessageType {
 
 #[derive(Debug)]
 pub enum MarketEvent {
-    Add(MarketFeedHeader, AddOrder),
-    Modify(MarketFeedHeader, ModifyOrder),
-    Delete(MarketFeedHeader, DeleteOrder),
-    Trade(MarketFeedHeader, Trade),
-    Snapshot(MarketFeedHeader, OrderBookSnapshot),
+    Add(MarketDataHeader, AddOrder),
+    Modify(MarketDataHeader, ModifyOrder),
+    Delete(MarketDataHeader, DeleteOrder),
+    Trade(MarketDataHeader, Trade),
+    Snapshot(MarketDataHeader, OrderBookSnapshot),
 }
 
 fn stable_u64_from_fixed_20(bytes: &[u8; 20]) -> u64 {

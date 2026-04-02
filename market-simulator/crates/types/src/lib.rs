@@ -5,7 +5,9 @@ use std::iter::Sum;
 
 pub mod macros;
 
-use macros::{EntityId, OrderId, TradeId, FixedString};
+use macros::{EntityId, OrderId, TradeId};
+
+use crate::macros::SymbolId;
 
 /// Represents an order in the order book.
 /// Orders are compared based on price for sorting in the order book.
@@ -23,7 +25,7 @@ pub struct OrderEvent {
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic, // In FIX, qty is a float but we will use integer for simplicity (e.g. 100.0 -> 100)
     pub side: Side,
-    pub symbol: FixedString, // FIX Symbol can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub symbol: SymbolId, // FIX Symbol can be up to 20 characters, we will use a fixed-size array for simplicity
     pub order_type: OrderType,
     pub cl_ord_id: OrderId, // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub orig_cl_ord_id: Option<OrderId>, // FIX OrigClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
@@ -45,7 +47,7 @@ impl Default for OrderEvent {
             order_id: OrderId::default(),
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
-            symbol: FixedString::default(),
+            symbol: SymbolId::default(),
             timestamp: Instant::now(),
         }
     }
@@ -62,7 +64,7 @@ impl OrderEvent {
         order_id: OrderId,
         sender_id: EntityId,
         target_id: EntityId,
-        symbol: FixedString,
+        symbol: SymbolId,
         timestamp: Instant,
     ) -> Self {
         Self {

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use market_feed::types::{
-    AddOrder, DeleteOrder, MarketFeedHeader, MessageType, ModifyOrder, OrderBookSnapshot,
+    AddOrder, DeleteOrder, MarketDataHeader, MessageType, ModifyOrder, OrderBookSnapshot,
     SNAPSHOT_BYTES, Trade,
 };
 use socket2::{Domain, Protocol, Socket, Type};
@@ -34,21 +34,21 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<(String, Str
         return None;
     }
 
-    let header = MarketFeedHeader::from_bytes(&packet[0..24])?;
+    let header = MarketDataHeader::from_bytes(&packet[0..24])?;
     let body = &packet[24..];
 
     let header_seq_num = header.seq_num;
     let header_timestamp_ns = header.timestamp_ns;
-    let header_instrument_id = header.instrument_id;
+    let header_symbol_id = header.symbol.to_numeric() as u32; // Assuming symbol_id is in the high 32 bits of a u64
     let header_version = header.version;
     let header_length = header.length;
-    // instrument_id is the first 4 ASCII bytes of the symbol, packed into the high 32 bits
+    // symbol_id is the first 4 ASCII bytes of the symbol, packed into the high 32 bits
     // of a u64 then cast to u32 — decode back to a string here.
     let symbol = {
-        let bytes = header_instrument_id.to_be_bytes();
+        let bytes = header_symbol_id.to_be_bytes();
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(4);
         String::from_utf8(bytes[..end].to_vec())
-            .unwrap_or_else(|_| header_instrument_id.to_string())
+            .unwrap_or_else(|_| header_symbol_id.to_string())
     };
 
     let label = match header.msg_type {
