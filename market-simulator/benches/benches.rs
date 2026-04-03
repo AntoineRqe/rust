@@ -101,7 +101,6 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                         order_type: types::OrderType::LimitOrder,
                         cl_ord_id: OrderId::from_ascii("CLORD12345"),
                         orig_cl_ord_id: None,
-                        order_id: OrderId::from_ascii("ORDERID"),
                         side: types::Side::Buy,
                         price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
                         quantity: types::FixedPointArithmetic(1_000_000),
@@ -112,6 +111,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                     };
 
             let order_result = types::OrderResult {
+                    internal_order_id: 0,
                     trades: Trades::<4>::default(),
                     status: types::OrderStatus::New,
                     timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
@@ -174,6 +174,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
             ..Default::default()
         },
         OrderResult {
+            internal_order_id: 0,
             trades: Trades::<4>::default(),
             status: types::OrderStatus::New,
             timestamp: Instant::now(),
@@ -229,7 +230,6 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
             let mut order_event = types::OrderEvent {
                 order_type: types::OrderType::LimitOrder,
                 cl_ord_id: OrderId::from_ascii("CLORD12345"),
-                order_id: OrderId::from_ascii("ORDERID"),
                 orig_cl_ord_id: None,
                 side: types::Side::Buy,
                 price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
@@ -358,7 +358,6 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
             let order_event = OrderEvent {
                 order_type: types::OrderType::LimitOrder,
                 cl_ord_id: OrderId::from_ascii("CLORD12345"),
-                order_id: OrderId::from_ascii("ORDERID01"),
                 orig_cl_ord_id: None,
                 side: types::Side::Buy,
                 price: types::FixedPointArithmetic(123_456_000),
@@ -370,6 +369,7 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
             };
 
             let order_result = OrderResult {
+                internal_order_id: 0,
                 trades: Trades::<4>::default(),
                 status: types::OrderStatus::New,
                 timestamp: Instant::now(),
@@ -440,6 +440,7 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
                     ..Default::default()
                 },
                 OrderResult {
+                    internal_order_id: 0,
                     trades: Trades::<4>::default(),
                     status: types::OrderStatus::New,
                     timestamp: Instant::now(),

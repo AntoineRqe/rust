@@ -231,9 +231,6 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                         return Err("Invalid price format"); // Invalid price format
                     }
                 },
-                tags::ORDER_ID => {
-                    utils::copy_array(&mut order_event.order_id.0, field.value);
-                },
                 tags::CL_ORD_ID => {
                     utils::copy_array(&mut order_event.cl_ord_id.0, field.value);
                 },
@@ -363,14 +360,10 @@ mod tests {
     use super::*;
     use utils::field_str;
     use spsc::spsc_lock_free::RingBuffer;
-    use tracing_subscriber;
 
 
     #[test]
     fn test_fix_engine() {
-        tracing_subscriber::fmt()
-        .with_env_filter("debug")
-        .init();
 
         // Inbound : net -> FIX -> order book
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);

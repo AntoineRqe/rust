@@ -10,7 +10,6 @@ use types::{
     Trade,
     Trades,
     macros::{
-        TradeId,
         EntityId,
         OrderId,
     }
@@ -169,7 +168,8 @@ impl OrderRef {
 pub struct OrderBook {
     pub bids: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     pub asks: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
-    id_counter: TradeId, // Counter for generating unique trade IDs, using a fixed-size array for simplicity
+    internal_id_counter: u64, // Counter for generating unique internal order IDs
+    id_counter: u64, // Counter for generating unique trade IDs
     order_map: HashMap<OrderId, OrderRef>, // Map to track orders by their ID for efficient cancellation
 }
 
@@ -192,9 +192,22 @@ impl OrderBook {
             // Arbitrary initial capacity for the heaps to avoid frequent resizing; can be adjusted based on expected order volume.
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
-            id_counter: TradeId::new(), // Initialize the trade ID counter to zero
+            internal_id_counter: 0, // Initialize the internal order ID counter to zero
+            id_counter: 0, // Initialize the trade ID counter to zero
             order_map: HashMap::new(), // Initialize the order map
         }
+    }
+
+    fn generate_internal_order_id(&mut self) -> u64 {
+        let id = self.internal_id_counter;
+        self.internal_id_counter += 1;
+        id
+    }
+
+    fn generate_trade_id(&mut self) -> u64 {
+        let id = self.id_counter;
+        self.id_counter += 1;
+        id
     }
 
     /// Processes an incoming order by determining its type (limit or market) and side (buy or sell), and then calling the appropriate processing function. The function is instrumented with tracing to provide detailed logs of the order processing steps, including the order ID, side, price, and quantity.
@@ -239,8 +252,9 @@ impl OrderBook {
 
     fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         if order.orig_cl_ord_id.is_none() {
-            tracing::error!("[{}] Cancel order with ID: {} is missing original client order ID, cannot process cancellation", market_name(), order.order_id);
+            tracing::error!("[{}] Cancel order with ID: {} is missing original client order ID, cannot process cancellation", market_name(), order.cl_ord_id);
             return (order, OrderResult {
+                internal_order_id: 0, // No internal order ID since the cancellation cannot be processed
                 trades: Trades::default(),
                 status: OrderStatus::CancelRejected,
                 timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
@@ -286,20 +300,22 @@ impl OrderBook {
                             self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
 
                             return (cancel_ack, OrderResult {
+                                internal_order_id: self.generate_internal_order_id(),
                                 trades: Trades::default(),
                                 status: OrderStatus::Cancelled,
                                 timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                             });
                         }
-                        None => tracing::error!("[{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", market_name(), order.order_id, order_ref.side, order_ref.price, index),
+                        None => tracing::error!("[{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", market_name(), orig_cl_ord_id, order_ref.side, order_ref.price, index),
                     }
                 }
             }
         }
 
-        tracing::error!("[{}] Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", market_name(), order.order_id, orig_cl_ord_id);
+        tracing::error!("[{}] Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", market_name(), order.cl_ord_id, orig_cl_ord_id);
         // If we reach this point, it means the order was not found or could not be cancelled
         (order, OrderResult {
+            internal_order_id: self.generate_internal_order_id(),
             trades: Trades::default(),
             status: OrderStatus::CancelRejected,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
@@ -312,6 +328,7 @@ impl OrderBook {
         let order_result = OrderResult {
             trades,
             status:  OrderStatus::New,
+            internal_order_id: self.generate_internal_order_id(),
             timestamp: Instant::now(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
         };
         (order, order_result)
@@ -351,7 +368,7 @@ impl OrderBook {
                         price: best_bid.price,
                         cl_ord_id: best_bid.cl_ord_id, // Include the client order ID of the matched order in the trade record
                         quantity: trade_quantity,
-                        id: self.id_counter, // Example trade ID
+                        id: self.generate_trade_id(), // Generate a unique trade ID
                         order_qty: maker_qty_before,
                         leaves_qty: best_bid.quantity,
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
@@ -359,8 +376,6 @@ impl OrderBook {
                         // Maximum Trades reached
                         tracing::error!("[{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name());
                     }
-
-                    self.id_counter.increment(); // Increment the trade ID counter
             
                     if best_bid.quantity > FixedPointArithmetic::ZERO {
                         best_bid_queue.push_front(best_bid);
@@ -426,7 +441,7 @@ impl OrderBook {
                         price: best_ask.price,
                         cl_ord_id: best_ask.cl_ord_id,
                         quantity: trade_quantity,
-                        id: self.id_counter, // Example trade ID
+                        id: self.generate_trade_id(), // Generate a unique trade ID
                         order_qty: maker_qty_before,
                         leaves_qty: best_ask.quantity,
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
@@ -435,7 +450,6 @@ impl OrderBook {
                         tracing::error!("[{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name());
                     }
 
-                    self.id_counter.increment(); // Increment the trade ID counter
 
                     // If the best ask still has quantity remaining after the trade, push it back onto the asks
                     if best_ask.quantity > FixedPointArithmetic::ZERO {
@@ -540,7 +554,6 @@ mod tests {
     const SENDER: EntityId = EntityId::from_ascii("SENDER0000000000000");
     const TARGET: EntityId = EntityId::from_ascii("TARGET0000000000000");
     const CL_ORD_ID: OrderId = OrderId::from_ascii("12345");
-    const ORDER_ID: OrderId = OrderId::from_ascii("54321");
 
     #[test]
     fn test_order_book_initialization() {
@@ -558,7 +571,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             orig_cl_ord_id: None,
             cl_ord_id: CL_ORD_ID,
             sender_id: SENDER,
@@ -577,8 +589,7 @@ mod tests {
             quantity: FixedPointArithmetic::ZERO, // Quantity is not relevant for cancel orders
             side: Side::Buy, // Side is not relevant for cancel orders, but we can set it to match the original order
             order_type: OrderType::CancelOrder,
-            order_id: ORDER_ID, // Use the same order ID to identify which order to cancel
-            cl_ord_id: CL_ORD_ID, // Use a different ClOrdID for the cancel order
+            cl_ord_id: CL_ORD_ID, // Use the same ClOrdID to identify which order to cancel
             orig_cl_ord_id: Some(CL_ORD_ID),
             sender_id: SENDER,
             target_id: TARGET,
@@ -600,7 +611,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -619,8 +629,7 @@ mod tests {
             quantity: FixedPointArithmetic::ZERO, // Quantity is not relevant for cancel orders
             side: Side::Sell, // Side is not relevant for cancel orders, but we can set it to match the original order
             order_type: OrderType::CancelOrder,
-            order_id: ORDER_ID, // Use the same order ID to identify which order to cancel
-            cl_ord_id: CL_ORD_ID, // Use a different ClOrdID for the cancel order
+            cl_ord_id: CL_ORD_ID, // Use the same ClOrdID to identify which order to cancel
             orig_cl_ord_id: Some(CL_ORD_ID),
             sender_id: SENDER,
             target_id: TARGET,
@@ -645,7 +654,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -674,7 +682,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -687,7 +694,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(5.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -724,7 +730,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -737,7 +742,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(5.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -750,7 +754,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -775,7 +778,7 @@ mod tests {
         assert_eq!(order2.price, FixedPointArithmetic::from_f64(99.0));
         assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0));
         assert_eq!(result2.trades.len(), 1); // 5 units * 99.0 price
-        assert_eq!(result2.trades[0].id, TradeId::new()); // Trade ID should be 0 for the first trade
+        assert_eq!(result2.trades[0].id, 0); // Trade ID should be 0 for the first trade
         assert_eq!(result2.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
         assert_eq!(result2.trades[0].price, FixedPointArithmetic::from_f64(100.0)); // 100.0
         assert_eq!(result2.trades.avg_price(), FixedPointArithmetic::from_f64(100.0)); // Average price should be 100.0
@@ -800,7 +803,7 @@ mod tests {
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
         assert_eq!(order_book.asks.first_entry().unwrap().key(), &FixedPointArithmetic::from_f64(98.0)); // The remaining ask should be the one at 98.0
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().quantity, FixedPointArithmetic::from_f64(5.0)); // The remaining ask should have a quantity of 5
-        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_id, ORDER_ID); // The remaining ask should have the same order ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().cl_ord_id, CL_ORD_ID); // The remaining ask should have the same ClOrdID as the third order
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().sender_id, SENDER); // The remaining ask should have the same sender ID as the third order
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().target_id, TARGET); // The remaining ask should have the same target ID as the third order
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_type, OrderType::LimitOrder); // The remaining ask should have the same order type as the third order
@@ -822,7 +825,6 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
-            order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -835,7 +837,6 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
-            order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -848,7 +849,6 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
-            order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -861,7 +861,6 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
-            order_id: ORDER_ID,
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL,
@@ -908,7 +907,7 @@ mod tests {
         assert_eq!(order_book.asks.len(), 1); // One ask should remain in the order book
         assert_eq!(order_book.asks.first_entry().unwrap().key(), &FixedPointArithmetic::from_f64(99.0)); // The remaining ask should be the one at 99.0
         assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().quantity, FixedPointArithmetic::from_f64(1.0)); // The remaining ask should have a quantity of 1
-        assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().order_id, ORDER_ID); // The remaining ask should have the same order ID as the first order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().cl_ord_id, CL_ORD_ID); // The remaining ask should have the same ClOrdID as the first order
         assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().sender_id, SENDER); // The remaining ask should have the same sender ID as the first order
         assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().target_id, TARGET); // The remaining ask should have the same target ID as the first order
         assert_eq!(order_book.asks.first_entry().unwrap().get().front().unwrap().order_type, OrderType::LimitOrder);
@@ -931,7 +930,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(5.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -944,7 +942,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(5.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -957,7 +954,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -970,7 +966,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(12.0),
             side: Side::Buy,
             order_type: OrderType::MarketOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -1004,10 +999,10 @@ mod tests {
         assert_eq!(order4.price, FixedPointArithmetic::from_f64(f64::MAX)); // Price is ignored for market orders
         assert_eq!(order4.quantity, FixedPointArithmetic::from_f64(12.0));
         assert_eq!(result4.trades.len(), 2); // 2 trades executed
-        assert_eq!(result4.trades[0].id, TradeId::default()); // Trade ID should be 1 for the first two trades
+        assert_eq!(result4.trades[0].id, 0); // Trade ID should be 0 for the first trade
         assert_eq!(result4.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
         assert_eq!(result4.trades[0].price, FixedPointArithmetic::from_f64(98.0)); // 5 units * 98.0 price
-        assert_eq!(result4.trades[1].id.0[19], 1); // Trade ID should be 2 for the second trade
+        assert_eq!(result4.trades[1].id, 1); // Trade ID should be 1 for the second trade
         assert_eq!(result4.trades[1].quantity, FixedPointArithmetic::from_f64(7.0)); // 7 units filled
         assert_eq!(result4.trades[1].price, FixedPointArithmetic::from_f64(98.0)); // 7 units * 98.0 price
         assert_eq!(result4.status, OrderStatus::New);
@@ -1016,13 +1011,13 @@ mod tests {
         assert_eq!(order_book.asks.len(), 2); // Two asks should remain in the order book
         assert_eq!(order_book.asks.first_entry().unwrap().key(), &FixedPointArithmetic::from_f64(98.0)); // The remaining ask should be the one at 98.0
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().quantity, FixedPointArithmetic::from_f64(3.0)); // The remaining ask should have a quantity of 3.0
-        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_id, ORDER_ID); // The remaining ask should have the same order ID as the third order
+        assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().cl_ord_id, CL_ORD_ID); // The remaining ask should have the same ClOrdID as the third order
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().sender_id, SENDER); // The remaining ask should have the same sender ID as the third order
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().target_id, TARGET); // The remaining ask should have the same target ID as the third order
         assert_eq!(order_book.asks.first_entry().unwrap().get().get(0).unwrap().order_type, OrderType::LimitOrder); // The remaining ask should have the same order type as the third order
         assert_eq!(order_book.asks.iter().nth(1).unwrap().0, &FixedPointArithmetic::from_f64(99.0)); // The second remaining ask should be the one at 99.0
         assert_eq!(order_book.asks.iter().nth(1).unwrap().1.get(0).unwrap().quantity, FixedPointArithmetic::from_f64(5.0)); // The second remaining ask should have a quantity of 5.0
-
+        assert_eq!(order_book.asks.iter().nth(1).unwrap().1.get(0).unwrap().cl_ord_id, CL_ORD_ID); // The second remaining ask should have the same ClOrdID as the first order
     }
 
     #[test]
@@ -1034,7 +1029,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0),
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -1047,7 +1041,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(5.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -1075,7 +1068,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(10.0),
             side: Side::Buy,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -1088,7 +1080,6 @@ mod tests {
             quantity: FixedPointArithmetic::from_f64(5.0),
             side: Side::Sell,
             order_type: OrderType::LimitOrder,
-            order_id: ORDER_ID,
             cl_ord_id: CL_ORD_ID,
             orig_cl_ord_id: None,
             sender_id: SENDER,
@@ -1106,7 +1097,6 @@ mod tests {
         assert_eq!(bids.len(), 1); // One bid should be in the order book
         assert_eq!(bids[0].price, FixedPointArithmetic::from_f64(100.0)); // The bid should have the correct price
         assert_eq!(bids[0].quantity, FixedPointArithmetic::from_f64(10.0)); // The bid should have the correct quantity
-        assert_eq!(bids[0].order_id, ORDER_ID); // The bid should have the correct order ID
         assert_eq!(bids[0].cl_ord_id, CL_ORD_ID); // The bid should have the correct client order ID
         assert_eq!(bids[0].target_id, TARGET); // The bid should have the correct target ID
         assert_eq!(bids[0].order_type, OrderType::LimitOrder); // The bid should have the correct order type
@@ -1114,7 +1104,6 @@ mod tests {
         assert_eq!(asks.len(), 1); // One ask should be in the order book
         assert_eq!(asks[0].price, FixedPointArithmetic::from_f64(102.0)); // The ask should have the correct price
         assert_eq!(asks[0].quantity, FixedPointArithmetic::from_f64(5.0)); // The ask should have the correct quantity
-        assert_eq!(asks[0].order_id, ORDER_ID); // The ask should have the correct order ID
         assert_eq!(asks[0].cl_ord_id, CL_ORD_ID); // The ask should have the correct client order ID
         assert_eq!(asks[0].sender_id, SENDER); // The ask should have the correct sender ID
         assert_eq!(asks[0].target_id, TARGET); // The ask should have the correct target ID
@@ -1147,7 +1136,6 @@ mod tests {
                 quantity: FixedPointArithmetic::from_f64(10.0),
                 side: Side::Buy,
                 order_type: OrderType::LimitOrder,
-                order_id: ORDER_ID,
                 cl_ord_id: CL_ORD_ID,
                 orig_cl_ord_id: None,
                 sender_id: SENDER,
@@ -1172,7 +1160,6 @@ mod tests {
                 quantity: FixedPointArithmetic::from_f64(10.0),
                 side: Side::Sell,
                 order_type: OrderType::LimitOrder,
-                order_id: ORDER_ID,
                 cl_ord_id: CL_ORD_ID,
                 orig_cl_ord_id: None,
                 sender_id: SENDER,

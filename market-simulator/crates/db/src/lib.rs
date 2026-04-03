@@ -15,7 +15,7 @@ use types::{
     Side,
     Trade,
 };
-use types::macros::{EntityId, SymbolId, OrderId, TradeId};
+use types::macros::{EntityId, SymbolId, OrderId};
 use spsc::spsc_lock_free::{Consumer};
 use std::sync::{Arc, atomic::{AtomicBool}};
 use std::sync::atomic::Ordering;
@@ -233,6 +233,7 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
             CREATE TABLE IF NOT EXISTS order_result (
                 id BIGSERIAL PRIMARY KEY,
                 cl_ord_id TEXT,
+                internal_order_id BIGINT,
                 result_type TEXT NOT NULL,
                 status TEXT,
                 reason TEXT,
@@ -245,6 +246,10 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
     }
 
+    query("ALTER TABLE order_result ADD COLUMN IF NOT EXISTS internal_order_id BIGINT")
+        .execute(&mut *tx)
+        .await?;
+
     let trades_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
         .bind("public.trades")
         .fetch_one(&mut *tx)
@@ -254,6 +259,7 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
             r#"
             CREATE TABLE IF NOT EXISTS trades (
                 id BIGSERIAL PRIMARY KEY,
+                trade_id BIGINT,
                 exec_id TEXT UNIQUE,
                 symbol TEXT,
                 buy_cl_ord_id TEXT,
@@ -268,6 +274,10 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(&mut *tx)
         .await?;
     }
+
+    query("ALTER TABLE trades ADD COLUMN IF NOT EXISTS trade_id BIGINT")
+        .execute(&mut *tx)
+        .await?;
 
     let pending_orders_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
         .bind("public.pending_orders")
@@ -392,7 +402,6 @@ pub async fn collect_all_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::
             orig_cl_ord_id: row
                 .get::<Option<String>, _>("orig_cl_ord_id")
                 .map(|value| OrderId::from_ascii(&value)),
-            order_id: order_id_from_option(row.get("order_id")),
             sender_id: entity_id_from_option(row.get("sender_id")),
             target_id: entity_id_from_option(row.get("target_id")),
             // `Instant` cannot be faithfully reconstructed from SQL text, so we
@@ -406,6 +415,7 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
     let rows = query(
         r#"
         SELECT
+            trade_id,
             exec_id,
             buy_cl_ord_id,
             sell_cl_ord_id,
@@ -425,7 +435,11 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
         .map(|row| Trade {
             price: FixedPointArithmetic::from_option_f64(row.get("price")),
             quantity: FixedPointArithmetic::from_option_f64(row.get("qty")),
-            id: trade_id_from_option(row.get("exec_id")),
+            id: row
+                .get::<Option<i64>, _>("trade_id")
+                .map(|value| value as u64)
+                .or_else(|| trade_id_from_option(row.get("exec_id")))
+                .unwrap_or_default(),
             cl_ord_id: row
                 .get::<Option<String>, _>("sell_cl_ord_id")
                 .map(|value| OrderId::from_ascii(&value))
@@ -447,6 +461,7 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
     let rows = query(
         r#"
         SELECT
+            internal_order_id,
             status
         FROM order_result
         ORDER BY id ASC
@@ -458,6 +473,9 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
     Ok(rows
         .into_iter()
         .map(|row| OrderResult {
+            internal_order_id: row
+                .get::<Option<i64>, _>("internal_order_id")
+                .unwrap_or_default() as u64,
             trades: types::Trades::<4>::new(),
             status: parse_order_status(row.get("status")),
             // `Instant` cannot be faithfully reconstructed from SQL text, so we
@@ -500,7 +518,6 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
             orig_cl_ord_id: row
                 .get::<Option<String>, _>("orig_cl_ord_id")
                 .map(|value| OrderId::from_ascii(&value)),
-            order_id: order_id_from_option(row.get("order_id")),
             sender_id: entity_id_from_option(row.get("sender_id")),
             target_id: entity_id_from_option(row.get("target_id")),
             timestamp: Instant::now(),
@@ -533,13 +550,12 @@ pub async fn persist_order_update(
             order_type,
             cl_ord_id,
             orig_cl_ord_id,
-            order_id,
             sender_id,
             target_id,
             event_timestamp,
             payload
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, to_jsonb($12::text))
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_jsonb($11::text))
         "#,
     )
     .bind(order_event.price.to_f64())
@@ -549,7 +565,6 @@ pub async fn persist_order_update(
     .bind(format!("{:?}", order_event.order_type))
     .bind(order_event.cl_ord_id.to_string())
     .bind(order_event.orig_cl_ord_id.map(|id| id.to_string()))
-    .bind(order_event.order_id.to_string())
     .bind(order_event.sender_id.to_string())
     .bind(order_event.target_id.to_string())
     .bind(format!("{:?}", order_event.timestamp))
@@ -561,15 +576,17 @@ pub async fn persist_order_update(
         r#"
         INSERT INTO order_result (
             cl_ord_id,
+            internal_order_id,
             result_type,
             status,
             reason,
             payload
         )
-        VALUES ($1, $2, $3, $4, to_jsonb($5::text))
+        VALUES ($1, $2, $3, $4, $5, to_jsonb($6::text))
         "#,
     )
     .bind(order_event.cl_ord_id.to_string())
+    .bind(order_result.internal_order_id as i64)
     .bind(result_type)
     .bind(status)
     .bind(reason)
@@ -593,6 +610,7 @@ pub async fn persist_order_update(
             query(
                 r#"
                 INSERT INTO trades (
+                    trade_id,
                     exec_id,
                     symbol,
                     buy_cl_ord_id,
@@ -601,10 +619,11 @@ pub async fn persist_order_update(
                     price,
                     payload
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, jsonb_build_object('order_qty', $7, 'leaves_qty', $8))
+                VALUES ($1, $2, $3, $4, $5, $6, $7, jsonb_build_object('order_qty', $8, 'leaves_qty', $9))
                 ON CONFLICT (exec_id) DO NOTHING
                 "#,
             )
+            .bind(trade.id as i64)
             .bind(trade.id.to_string())
             .bind(order_event.symbol.to_string())
             .bind(buy_cl_ord_id)
@@ -664,14 +683,13 @@ async fn sync_pending_orders(
                     symbol,
                     order_type,
                     orig_cl_ord_id,
-                    order_id,
                     sender_id,
                     target_id,
                     event_timestamp,
                     payload,
                     updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, to_jsonb($12::text), NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_jsonb($11::text), NOW())
                 ON CONFLICT (cl_ord_id) DO UPDATE SET
                     price = EXCLUDED.price,
                     quantity = EXCLUDED.quantity,
@@ -679,7 +697,6 @@ async fn sync_pending_orders(
                     symbol = EXCLUDED.symbol,
                     order_type = EXCLUDED.order_type,
                     orig_cl_ord_id = EXCLUDED.orig_cl_ord_id,
-                    order_id = EXCLUDED.order_id,
                     sender_id = EXCLUDED.sender_id,
                     target_id = EXCLUDED.target_id,
                     event_timestamp = EXCLUDED.event_timestamp,
@@ -694,7 +711,6 @@ async fn sync_pending_orders(
             .bind(order_event.symbol.to_string())
             .bind(format!("{:?}", order_event.order_type))
             .bind(order_event.orig_cl_ord_id.map(|id| id.to_string()))
-            .bind(order_event.order_id.to_string())
             .bind(order_event.sender_id.to_string())
             .bind(order_event.target_id.to_string())
             .bind(format!("{:?}", order_event.timestamp))
@@ -784,10 +800,9 @@ fn entity_id_from_option(value: Option<String>) -> EntityId {
         .unwrap_or_default()
 }
 
-fn trade_id_from_option(value: Option<String>) -> TradeId {
+fn trade_id_from_option(value: Option<String>) -> Option<u64> {
     value
-        .map(|value| TradeId::from_ascii(&value))
-        .unwrap_or_default()
+    .and_then(|raw| raw.parse::<u64>().ok())
 }
 
 #[cfg(test)]
@@ -797,7 +812,7 @@ mod tests {
     use std::time::Instant;
     use tokio::sync::Mutex;
     use types::{OrderType, Trade, Trades};
-    use types::macros::{EntityId, OrderId, TradeId};
+    use types::macros::{EntityId, OrderId};
 
     static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -837,7 +852,6 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("test123"),
             orig_cl_ord_id: Some(OrderId::from_ascii("orig123")),
-            order_id: OrderId::from_ascii("ord123"),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
             timestamp: Instant::now(),
@@ -847,7 +861,7 @@ mod tests {
         trades.add_trade(Trade {
             price: FixedPointArithmetic::from_f64(10.0),
             quantity: FixedPointArithmetic::from_f64(100.0),
-            id: TradeId::from_ascii("exec123"),
+            id: 123,
             cl_ord_id: OrderId::from_ascii("maker123"),
             order_qty: FixedPointArithmetic::from_f64(100.0),
             leaves_qty: FixedPointArithmetic::ZERO,
@@ -855,6 +869,7 @@ mod tests {
         }).unwrap();
 
         let order_result = OrderResult {
+            internal_order_id: 101,
             status: OrderStatus::Filled,
             trades,
             timestamp: Instant::now(),
@@ -868,14 +883,13 @@ mod tests {
         assert_eq!(trades.len(), 1);
         assert_eq!(orders[0].cl_ord_id.to_string(), "test123");
         assert_eq!(orders[0].orig_cl_ord_id.map(|id| id.to_string()).as_deref(), Some("orig123"));
-        assert_eq!(orders[0].order_id.to_string(), "ord123");
         assert_eq!(orders[0].sender_id.to_string(), "broker-a");
         assert_eq!(orders[0].target_id.to_string(), "broker-b");
         assert_eq!(orders[0].symbol.to_string(), "TEST");
         assert_eq!(orders[0].order_type, OrderType::LimitOrder);
         assert_eq!(orders[0].side, Side::Buy);
 
-        assert_eq!(trades[0].id.to_string(), "exec123");
+        assert_eq!(trades[0].id, 123);
         assert_eq!(trades[0].cl_ord_id.to_string(), "maker123");
         assert_eq!(trades[0].price.to_f64(), 10.0);
         assert_eq!(trades[0].quantity.to_f64(), 100.0);
@@ -904,7 +918,6 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("partial1"),
             orig_cl_ord_id: None,
-            order_id: OrderId::from_ascii("ordp1"),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
             timestamp: Instant::now(),
@@ -914,7 +927,7 @@ mod tests {
         trades.add_trade(Trade {
             price: FixedPointArithmetic::from_f64(10.5),
             quantity: FixedPointArithmetic::from_f64(40.0),
-            id: TradeId::from_ascii("pexec123"),
+            id: 456,
             cl_ord_id: OrderId::from_ascii("maker456"),
             order_qty: FixedPointArithmetic::from_f64(75.0),
             leaves_qty: FixedPointArithmetic::from_f64(35.0),
@@ -922,6 +935,7 @@ mod tests {
         }).unwrap();
 
         let order_result = OrderResult {
+            internal_order_id: 102,
             status: OrderStatus::PartiallyFilled,
             trades,
             timestamp: Instant::now(),
@@ -936,9 +950,10 @@ mod tests {
         assert_eq!(stored_results.len(), 1);
 
         assert_eq!(stored_results[0].status, OrderStatus::PartiallyFilled);
+        assert_eq!(stored_results[0].internal_order_id, 102);
 
         let trade = &stored_trades[0];
-        assert_eq!(trade.id.to_string(), "pexec123");
+        assert_eq!(trade.id, 456);
         assert_eq!(trade.cl_ord_id.to_string(), "maker456");
         assert_eq!(trade.price.to_f64(), 10.5);
         assert_eq!(trade.quantity.to_f64(), 40.0);
@@ -966,13 +981,13 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("pend001"),
             orig_cl_ord_id: None,
-            order_id: OrderId::from_ascii("ord-pend"),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
             timestamp: Instant::now(),
         };
 
         let new_result = OrderResult {
+            internal_order_id: 201,
             status: OrderStatus::New,
             trades: Trades::<4>::new(),
             timestamp: Instant::now(),
@@ -989,7 +1004,7 @@ mod tests {
         partial_trades.add_trade(Trade {
             price: FixedPointArithmetic::from_f64(12.0),
             quantity: FixedPointArithmetic::from_f64(40.0),
-            id: TradeId::from_ascii("pend-ex1"),
+            id: 1001,
             cl_ord_id: OrderId::from_ascii("maker-aa"),
             order_qty: FixedPointArithmetic::from_f64(50.0),
             leaves_qty: FixedPointArithmetic::from_f64(10.0),
@@ -997,6 +1012,7 @@ mod tests {
         }).unwrap();
 
         let partial_result = OrderResult {
+            internal_order_id: 202,
             status: OrderStatus::PartiallyFilled,
             trades: partial_trades,
             timestamp: Instant::now(),
@@ -1013,7 +1029,7 @@ mod tests {
         fill_trades.add_trade(Trade {
             price: FixedPointArithmetic::from_f64(12.0),
             quantity: FixedPointArithmetic::from_f64(100.0),
-            id: TradeId::from_ascii("pend-ex2"),
+            id: 1002,
             cl_ord_id: OrderId::from_ascii("maker-bb"),
             order_qty: FixedPointArithmetic::from_f64(60.0),
             leaves_qty: FixedPointArithmetic::ZERO,
@@ -1021,6 +1037,7 @@ mod tests {
         }).unwrap();
 
         let filled_result = OrderResult {
+            internal_order_id: 203,
             status: OrderStatus::Filled,
             trades: fill_trades,
             timestamp: Instant::now(),
@@ -1051,7 +1068,6 @@ mod tests {
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::from_ascii("live001"),
             orig_cl_ord_id: None,
-            order_id: OrderId::from_ascii("live-ord"),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
             timestamp: Instant::now(),
@@ -1061,6 +1077,7 @@ mod tests {
             &pool,
             &live_order,
             &OrderResult {
+                internal_order_id: 301,
                 status: OrderStatus::New,
                 trades: Trades::<4>::new(),
                 timestamp: Instant::now(),
@@ -1075,7 +1092,6 @@ mod tests {
             order_type: OrderType::CancelOrder,
             cl_ord_id: OrderId::from_ascii("cancel01"),
             orig_cl_ord_id: Some(OrderId::from_ascii("live001")),
-            order_id: OrderId::from_ascii("cancel-ord"),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
             timestamp: Instant::now(),
@@ -1085,6 +1101,7 @@ mod tests {
             &pool,
             &cancel_event,
             &OrderResult {
+                internal_order_id: 302,
                 status: OrderStatus::Cancelled,
                 trades: Trades::<4>::new(),
                 timestamp: Instant::now(),

@@ -105,6 +105,5 @@ macro_rules! define_id {
 define_id!(EntityId);
 define_id!(OrderId);
 define_id!(ClientId);
-define_id!(TradeId);
 define_id!(FixedString);
 define_id!(SymbolId, 4);

@@ -313,7 +313,7 @@ impl Trade {
 
     pub fn from_trade(side: types::Side, trade: &types::Trade) -> Self {
         Self {
-            trade_id: trade.id.to_numeric(),
+            trade_id: trade.id,
             side: match side {
                 types::Side::Buy => 1,
                 types::Side::Sell => 2,
@@ -411,7 +411,7 @@ impl OrderBookSnapshot {
 mod tests {
     use super::*;
     use crate::types::FixedPointArithmetic;
-    use types::macros::{OrderId, TradeId};
+    use types::macros::{OrderId};
 
     #[test]
     fn test_add_order_serialization() {
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn test_trade_serialization() {
         let trade = Trade {
-            trade_id: TradeId::from_ascii("trade123").to_numeric(),
+            trade_id: 0,
             side: 1,
             price: FixedPointArithmetic::from_f64(123.45),
             quantity: FixedPointArithmetic::from_f64(10.0),

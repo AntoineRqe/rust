@@ -118,7 +118,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         // At this point, we know there is a trade
         self.build_field(tags::EXEC_TYPE, exec_type_code_set::TRADE, &mut report, &mut cursor); // ExecType=PartiallyFilled
 
-        self.build_field(tags::ORDER_ID, &order.order_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_ID, &order_result.internal_order_id.to_be_bytes(), &mut report, &mut cursor);
         self.build_field(tags::CL_ORD_ID, &order.cl_ord_id.as_ref(), &mut report, &mut cursor);
 
         match order.side {
@@ -168,7 +168,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             self.build_field(tags::ORD_STATUS, ord_status_code_set::FILL, &mut report, &mut cursor);
         }
         self.build_field(tags::EXEC_TYPE, exec_type_code_set::TRADE, &mut report, &mut cursor);
-        self.build_field(tags::ORDER_ID, &order.order_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_ID, &trade.id.to_be_bytes(), &mut report, &mut cursor);
         self.build_field(tags::CL_ORD_ID, &trade.cl_ord_id.as_ref(), &mut report, &mut cursor);
 
         match side {
@@ -239,6 +239,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         let mut report = FixRawMsg::<N>::default();
         let mut cursor = 0;
         let order = &exec_report.0;
+        let order_result = &exec_report.1;
 
         // Build FIX message header
         self.build_field(tags::BEGIN_STRING, b"FIX.4.2", &mut report, &mut cursor);
@@ -250,7 +251,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         self.build_field(tags::ORD_STATUS, ord_status_code_set::NEW, &mut report, &mut cursor); // OrdStatus=New
         self.build_field(tags::EXEC_TYPE, exec_type_code_set::NEW, &mut report, &mut cursor); // ExecType=New
 
-        self.build_field(tags::ORDER_ID, &order.order_id.as_ref(), &mut report, &mut cursor);
+        self.build_field(tags::ORDER_ID, &order_result.internal_order_id.to_be_bytes(), &mut report, &mut cursor);
         self.build_field(tags::CL_ORD_ID, &order.cl_ord_id.as_ref(), &mut report, &mut cursor);
 
         match order.side {
@@ -305,7 +306,7 @@ mod tests {
     };
 
     use types::macros::{
-        EntityId, OrderId, SymbolId, TradeId
+        EntityId, OrderId, SymbolId
     };
 
     use types::{
@@ -338,7 +339,6 @@ mod tests {
                 order_type: types::OrderType::LimitOrder,
                 cl_ord_id: OrderId::from_ascii("CLORD12345"),
                 orig_cl_ord_id: None,
-                order_id: OrderId::from_ascii("ORDERID"),
                 side: types::Side::Buy,
                 price: FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
                 quantity: FixedPointArithmetic(1_000_000),
@@ -349,6 +349,7 @@ mod tests {
             };
 
             let order_result = OrderResult {
+                internal_order_id: 100,
                 trades: Trades::default(),
                 status: types::OrderStatus::New,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
@@ -375,7 +376,7 @@ mod tests {
             let cl_ord_id_field = parsed_report.fields.iter().find(|f| f.tag == tags::CL_ORD_ID).expect("CL_ORD_ID field missing");
             assert_eq!(cl_ord_id_field.value, field_str(&order_event.cl_ord_id.as_ref()));
             let order_id_field = parsed_report.fields.iter().find(|f| f.tag == tags::ORDER_ID).expect("ORDER_ID field missing");
-            assert_eq!(order_id_field.value, field_str(&order_event.order_id.as_ref()));
+            assert_eq!(order_id_field.value, field_str(&order_result.internal_order_id.to_be_bytes()));
             let side_field = parsed_report.fields.iter().find(|f| f.tag == tags::SIDE).expect("SIDE field missing");
             assert_eq!(side_field.value, side_code_set::BUY);
             let symbol_field = parsed_report.fields.iter().find(|f| f.tag == tags::SYMBOL).expect("SYMBOL field missing");
@@ -394,7 +395,6 @@ mod tests {
                 order_type: OrderType::LimitOrder,
                 cl_ord_id: OrderId::from_ascii("CLORD54321"),
                 orig_cl_ord_id: None,
-                order_id: OrderId::from_ascii("ORDERID2"),
                 side: Side::Sell,
                 price: FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
                 quantity: FixedPointArithmetic(1_000_000),
@@ -405,6 +405,7 @@ mod tests {
             };
 
             let mut sell_order_result = OrderResult {
+                internal_order_id: 101,
                 trades: Trades::default(),
                 status: OrderStatus::New,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
@@ -413,7 +414,7 @@ mod tests {
             sell_order_result.trades.add_trade(Trade {
                 price: FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
                 quantity: FixedPointArithmetic(5_000_000_000), // 50 units in FIX quantity format (6 decimal places)
-                id: TradeId::default()   ,
+                id: 0,
                 cl_ord_id: OrderId::from_ascii("CLORD12345"),
                 order_qty: FixedPointArithmetic(5_000_000_000),
                 leaves_qty: FixedPointArithmetic::ZERO,
@@ -436,7 +437,7 @@ mod tests {
             assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::ORD_STATUS).expect("ORD_STATUS field missing").value, ord_status_code_set::NEW);
             assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::EXEC_TYPE).expect("EXEC_TYPE field missing").value, exec_type_code_set::NEW);
             assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::CL_ORD_ID).expect("CL_ORD_ID field missing").value, field_str(&sell_order_event.cl_ord_id.as_ref()));
-            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::ORDER_ID).expect("ORDER_ID field missing").value, field_str(&sell_order_event.order_id.as_ref()));
+            assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::ORDER_ID).expect("ORDER_ID field missing").value, field_str(&sell_order_result.internal_order_id.to_be_bytes()));
             assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::SIDE).expect("SIDE field missing").value, side_code_set::SELL);
             assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::SYMBOL).expect("SYMBOL field missing").value, field_str(&sell_order_event.symbol.as_ref()));
             assert_eq!(parsed_report.fields.iter().find(|f| f.tag == tags::ORDER_QTY).expect("ORDER_QTY field missing").value, field_str(&sell_order_event.quantity.to_fix_bytes()));
@@ -470,6 +471,7 @@ mod tests {
 
             // Testing the Cancel scenario
             let cancel_order_result = types::OrderResult {
+                internal_order_id: 103,
                 trades: Trades::default(),
                 status: types::OrderStatus::Cancelled,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
@@ -499,6 +501,7 @@ mod tests {
 
             // testing the cancel rejection scenario
             let cancel_reject_order_result = types::OrderResult {
+                internal_order_id: 104,
                 trades: Trades::default(),
                 status: types::OrderStatus::CancelRejected,
                 timestamp: Instant::now(), // Current timestamp in milliseconds since epoch

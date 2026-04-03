@@ -5,7 +5,7 @@ use std::iter::Sum;
 
 pub mod macros;
 
-use macros::{EntityId, OrderId, TradeId};
+use macros::{EntityId, OrderId};
 
 use crate::macros::SymbolId;
 
@@ -29,7 +29,6 @@ pub struct OrderEvent {
     pub order_type: OrderType,
     pub cl_ord_id: OrderId, // FIX ClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub orig_cl_ord_id: Option<OrderId>, // FIX OrigClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
-    pub order_id: OrderId, // FIX OrderID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub sender_id: EntityId, // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub target_id: EntityId, // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
@@ -44,7 +43,6 @@ impl Default for OrderEvent {
             order_type: OrderType::LimitOrder,
             cl_ord_id: OrderId::default(),
             orig_cl_ord_id: None,
-            order_id: OrderId::default(),
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
             symbol: SymbolId::default(),
@@ -61,7 +59,6 @@ impl OrderEvent {
         order_type: OrderType,
         cl_ord_id: OrderId,
         orig_cl_ord_id: Option<OrderId>,
-        order_id: OrderId,
         sender_id: EntityId,
         target_id: EntityId,
         symbol: SymbolId,
@@ -74,7 +71,6 @@ impl OrderEvent {
             order_type,
             cl_ord_id,
             orig_cl_ord_id,
-            order_id,
             sender_id,
             target_id,
             symbol,
@@ -139,8 +135,8 @@ impl std::fmt::Display for OrderEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, orig_cl_ord_id: {:?}, order_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {:?} }}",
-            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.orig_cl_ord_id, self.order_id, self.sender_id, self.target_id, self.symbol, self.timestamp
+            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, orig_cl_ord_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {:?} }}",
+            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.orig_cl_ord_id, self.sender_id, self.target_id, self.symbol, self.timestamp
         )
     }
 }
@@ -178,7 +174,7 @@ impl Ord for OrderEvent {
 pub struct Trade {
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic,
-    pub id: TradeId, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
+    pub id: u64, // Trade ID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub cl_ord_id: OrderId,
     pub order_qty: FixedPointArithmetic,
     pub leaves_qty: FixedPointArithmetic,
@@ -198,7 +194,7 @@ impl<const N: usize> Default for Trades<N> {
             trades: [Trade {
                 price: FixedPointArithmetic::ZERO,
                 quantity: FixedPointArithmetic::ZERO,
-                id: TradeId::new(),
+                id: 0,
                 cl_ord_id: OrderId::default(),
                 order_qty: FixedPointArithmetic::ZERO,
                 leaves_qty: FixedPointArithmetic::ZERO,
@@ -262,6 +258,7 @@ impl<const N: usize> Index<usize> for Trades<N> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderResult {
+    pub internal_order_id: u64, // Internal order ID assigned by the engine, can be used for tracking and debugging
     pub trades: Trades<4>, // Fixed-size array for trades, adjust size as needed
     pub status: OrderStatus,
     pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
@@ -270,6 +267,7 @@ pub struct OrderResult {
 impl Default for OrderResult {
     fn default() -> Self {
         Self {
+            internal_order_id: 0,
             trades: Trades::new(),
             status: OrderStatus::New,
             timestamp: Instant::now(),

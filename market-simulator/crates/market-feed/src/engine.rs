@@ -59,16 +59,26 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         ModifyOrder::from_order_event(order_event)
     }
 
+    fn build_add_order_event_with_quantity(
+        &self,
+        order_event: &OrderEvent,
+        quantity: types::FixedPointArithmetic,
+    ) -> AddOrder {
+        let mut add_order = AddOrder::from_order_event(order_event);
+        add_order.quantity = quantity;
+        add_order
+    }
+
     fn build_delete_order_event(&self, order_event: &OrderEvent) -> DeleteOrder {
         DeleteOrder::from_order_event(order_event)
     }
 
-    fn build_trade_event(&self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<Trade> {
+    fn build_trade_events(&self, order_event: &OrderEvent, order_result: &OrderResult) -> Vec<Trade> {
         order_result
             .trades
             .iter()
-            .next()
             .map(|trade| Trade::from_trade(order_event.side, trade))
+            .collect()
     }
 
     fn build_snapshot_event(&self) -> OrderBookSnapshot {
@@ -102,33 +112,64 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         header
     }
 
-    fn build_market_data_feed_from_order(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> MarketEvent {
+    fn build_market_data_feed_events(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Vec<MarketEvent> {
         if order_event.order_type == types::OrderType::CancelOrder {
             let delete_order = self.build_delete_order_event(order_event);
             let header = self.build_header(order_event, MessageType::DeleteOrder, 8);
-            return MarketEvent::Delete(header, delete_order);
-        }
-
-        if let Some(trade) = self.build_trade_event(order_event, order_result) {
-            let header = self.build_header(order_event, MessageType::Trade, 49);
-            return MarketEvent::Trade(header, trade);
-        }
-
-        if order_result.status == types::OrderStatus::PartiallyFilled {
-            let modify_order = self.build_modify_order_event(order_event);
-            let header = self.build_header(order_event, MessageType::ModifyOrder, 48);
-            return MarketEvent::Modify(header, modify_order);
+            return vec![MarketEvent::Delete(header, delete_order)];
         }
 
         if order_result.status == types::OrderStatus::CancelRejected {
             let snapshot = self.build_snapshot_event();
             let header = self.build_header(order_event, MessageType::Snapshot, SNAPSHOT_BYTES as u16);
-            return MarketEvent::Snapshot(header, snapshot);
+            return vec![MarketEvent::Snapshot(header, snapshot)];
         }
 
-        let add_order = self.build_add_order_event(order_event);
-        let header = self.build_header(order_event, MessageType::AddOrder, 49);
-        MarketEvent::Add(header, add_order)
+        if order_result.status == types::OrderStatus::PartiallyFilled && order_result.trades.len() == 0 {
+            let modify_order = self.build_modify_order_event(order_event);
+            let header = self.build_header(order_event, MessageType::ModifyOrder, 48);
+            return vec![MarketEvent::Modify(header, modify_order)];
+        }
+
+        let mut events = Vec::new();
+        for trade in self.build_trade_events(order_event, order_result) {
+            let header = self.build_header(order_event, MessageType::Trade, 49);
+            events.push(MarketEvent::Trade(header, trade));
+        }
+
+        let traded_qty = order_result.trades.quantity_sum();
+        let remaining_qty = if traded_qty >= order_event.quantity {
+            types::FixedPointArithmetic::ZERO
+        } else {
+            order_event.quantity - traded_qty
+        };
+
+        if order_event.order_type == types::OrderType::LimitOrder
+            && remaining_qty > types::FixedPointArithmetic::ZERO
+        {
+            let add_order = self.build_add_order_event_with_quantity(order_event, remaining_qty);
+            let header = self.build_header(order_event, MessageType::AddOrder, 49);
+            events.push(MarketEvent::Add(header, add_order));
+        }
+
+        if events.is_empty() {
+            let add_order = self.build_add_order_event(order_event);
+            let header = self.build_header(order_event, MessageType::AddOrder, 49);
+            events.push(MarketEvent::Add(header, add_order));
+        }
+
+        events
+    }
+
+    pub fn build_market_data_feed_from_order(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> MarketEvent {
+        self.build_market_data_feed_events(order_event, order_result)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                let add_order = self.build_add_order_event(order_event);
+                let header = self.build_header(order_event, MessageType::AddOrder, 49);
+                MarketEvent::Add(header, add_order)
+            })
     }
 
 
@@ -144,11 +185,13 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
                     // Process incoming order events and results from the order book engine
                     // Transform the order event and result into a market data feed event
                     tracing::debug!("[{}] Received order event: {:?}, result: {:?}", market_name(), order_event, order_result);
-                    let market_data_feed_event = self.build_market_data_feed_from_order(&order_event, &order_result);
-                    let bytes = market_data_feed_event.to_bytes();
+                    let market_data_feed_events = self.build_market_data_feed_events(&order_event, &order_result);
                     if let Some(socket) = &self.socket {
-                        tracing::info!("[{}] Broadcasting market data feed event: header={:?}, event={:?}", market_name(), market_data_feed_event, market_data_feed_event);
-                        let _ = socket.send_to(&bytes, format!("{}:{}", self.multicast_ip, self.port));
+                        for market_data_feed_event in market_data_feed_events {
+                            let bytes = market_data_feed_event.to_bytes();
+                            tracing::info!("[{}] Broadcasting market data feed event: header={:?}, event={:?}", market_name(), market_data_feed_event, market_data_feed_event);
+                            let _ = socket.send_to(&bytes, format!("{}:{}", self.multicast_ip, self.port));
+                        }
                     }
                 }
             }
@@ -162,7 +205,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
 #[cfg(test)]
 mod tests {
     use types::macros::{
-        EntityId, OrderId, SymbolId, TradeId
+        EntityId, OrderId, SymbolId
     };
 
     use super::*;
@@ -332,7 +375,7 @@ mod tests {
 
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("order123"),
+            cl_ord_id: OrderId::from_ascii("order123"),
             side: types::Side::Buy,
             order_type: types::OrderType::LimitOrder,
             price: types::FixedPointArithmetic(100),
@@ -371,7 +414,7 @@ mod tests {
 
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("cancel01"),
+            cl_ord_id: OrderId::from_ascii("cancel01"),
             orig_cl_ord_id: Some(OrderId::from_ascii("orig1234")),
             order_type: types::OrderType::CancelOrder,
             symbol: SymbolId::from_ascii("ETHUSD"),
@@ -397,7 +440,7 @@ mod tests {
 
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("order123"),
+            cl_ord_id: OrderId::from_ascii("order123"),
             side: types::Side::Sell,
             order_type: types::OrderType::LimitOrder,
             symbol: SymbolId::from_ascii("AAPL"),
@@ -409,7 +452,7 @@ mod tests {
             .add_trade(types::Trade {
                 price: types::FixedPointArithmetic(101),
                 quantity: types::FixedPointArithmetic(3),
-                id: TradeId::from_ascii("trade001"),
+                id: 0,
                 cl_ord_id: OrderId::from_ascii("maker001"),
                 order_qty: types::FixedPointArithmetic(5),
                 leaves_qty: types::FixedPointArithmetic(2),
@@ -418,6 +461,7 @@ mod tests {
             .unwrap();
 
         let order_result = OrderResult {
+            internal_order_id: 0,
             trades,
             status: types::OrderStatus::PartiallyFilled,
             timestamp: std::time::Instant::now(),
@@ -434,7 +478,7 @@ mod tests {
                 let quantity = trade.quantity;
 
                 assert_eq!(side, 2);
-                assert_eq!(trade_id, TradeId::from_ascii("trade001").to_numeric());
+                assert_eq!(trade_id, 0);
                 assert_eq!(price, types::FixedPointArithmetic(101));
                 assert_eq!(quantity, types::FixedPointArithmetic(3));
             }
@@ -450,7 +494,7 @@ mod tests {
 
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("order123"),
+            cl_ord_id: OrderId::from_ascii("order123"),
             side: types::Side::Buy,
             order_type: types::OrderType::LimitOrder,
             symbol: SymbolId::from_ascii("MSFT"),
@@ -479,7 +523,7 @@ mod tests {
     fn test_market_data_feed_engine() {
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("order123"),
+            cl_ord_id: OrderId::from_ascii("order123"),
             side: types::Side::Buy,
             price: types::FixedPointArithmetic(100),
             quantity: types::FixedPointArithmetic(10),
@@ -488,6 +532,7 @@ mod tests {
         };
 
         let order_result = OrderResult {
+            internal_order_id: 0,
             trades: types::Trades::default(),
             status: types::OrderStatus::Filled,
             timestamp: std::time::Instant::now(),
@@ -516,7 +561,7 @@ mod tests {
     fn test_market_data_feed_engine_modify_event_udp() {
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("modify01"),
+            cl_ord_id: OrderId::from_ascii("modify01"),
             side: types::Side::Sell,
             order_type: types::OrderType::LimitOrder,
             price: types::FixedPointArithmetic(250),
@@ -550,7 +595,7 @@ mod tests {
     fn test_market_data_feed_engine_delete_event_udp() {
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("cancel01"),
+            cl_ord_id: OrderId::from_ascii("cancel01"),
             orig_cl_ord_id: Some(OrderId::from_ascii("orig1234")),
             order_type: types::OrderType::CancelOrder,
             symbol: SymbolId::from_ascii("TSLA"),
@@ -572,7 +617,7 @@ mod tests {
     fn test_market_data_feed_engine_trade_event_udp() {
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("tradeord1"),
+            cl_ord_id: OrderId::from_ascii("tradeord1"),
             side: types::Side::Buy,
             order_type: types::OrderType::LimitOrder,
             symbol: SymbolId::from_ascii("NFLX"),
@@ -584,7 +629,7 @@ mod tests {
             .add_trade(types::Trade {
                 price: types::FixedPointArithmetic(333),
                 quantity: types::FixedPointArithmetic(9),
-                id: TradeId::from_ascii("trade001"),
+                id: 0,
                 cl_ord_id: OrderId::from_ascii("maker001"),
                 order_qty: types::FixedPointArithmetic(10),
                 leaves_qty: types::FixedPointArithmetic(1),
@@ -593,6 +638,7 @@ mod tests {
             .unwrap();
 
         let order_result = OrderResult {
+            internal_order_id: 0,
             trades,
             status: types::OrderStatus::Filled,
             timestamp: std::time::Instant::now(),
@@ -608,7 +654,7 @@ mod tests {
                 let quantity = trade.quantity;
 
                 assert_eq!(side, 1);
-                assert_eq!(trade_id, TradeId::from_ascii("trade001").to_numeric());
+                assert_eq!(trade_id, 0);
                 assert_eq!(price, types::FixedPointArithmetic(333));
                 assert_eq!(quantity, types::FixedPointArithmetic(9));
             }
@@ -620,7 +666,7 @@ mod tests {
     fn test_market_data_feed_engine_snapshot_event_udp() {
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
-            order_id: OrderId::from_ascii("snap0001"),
+            cl_ord_id: OrderId::from_ascii("snap0001"),
             side: types::Side::Sell,
             order_type: types::OrderType::LimitOrder,
             symbol: SymbolId::from_ascii("AMZN"),
