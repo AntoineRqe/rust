@@ -101,3 +101,11 @@ All tests are located in the `tests` directory. To run the tests, use the follow
 ```bash
 cargo test
 ```
+
+### Design choices
+
+- **IP Address Management**: The decision to pre-compute all available IP addresses in a subnet and store them in a `VecDeque` allows for efficient allocation and release of IP addresses. This approach ensures that IP addresses are reused in a predictable order. Maybe IPAM should handle the IP address pool instead of the VPC mock to centralize IP management and avoid potential inconsistencies between the VPC and IPAM mocks. In my implementation, DHCP is responsible for the synchronization between the VPC and IPAM mocks, but this could lead to issues if not handled carefully.
+
+- **Resource Management**: I decided to use a `HashMap` to store resources in the IPAM mock, with the resource name as the key. This allows for efficient lookups when allocating and releasing resources. Based on the resource name, we can easily retrieve the associated IP address and other information.
+
+- **Multi threading**: The use of `Rc<RefCell<T>>` for shared ownership of the VPC and IPAM mocks allows for mutable access to these components across different parts of the code. However, this approach is not thread-safe and may lead to issues in a multi-threaded environment. If we need to support multi-threading in the future, we may need to consider using `Arc<Mutex<T>>` instead to ensure thread safety. But `Mutex` is not ideal for performance, so we may need to consider other synchronization mechanisms or design patterns to manage concurrent access to shared resources effectively.
