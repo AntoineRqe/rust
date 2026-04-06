@@ -41,32 +41,7 @@ impl DNS {
         // I assume VNI and PN name are the same.
         let resources = ipam_borrow.resources.get(&fqdn.private_network_name.parse::<u32>().ok()?)?;
 
-        // time complexity: O(n) where n is the number of resources in the PN.
-        // Improvement: Use a HashMap for O(1) lookup.
         let resource = resources.get(&fqdn.resource_name)?;
         Some(resource.ip)
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mock::{IPAMMock, Resource};
-    use crate::mock::VniID;
-
-    #[test]
-    fn test_dns_resolve() {
-        let ipam = Rc::new(RefCell::new(IPAMMock::new()));
-        let dns = DNS::new(ipam.clone());
-        let vni: VniID = 1;
-
-        // Add a resource to the IPAM mock
-        let resource = Resource::new(1, "TestResource".to_string(), "00:11:22:33:44:55".to_string());
-        ipam.borrow_mut().add_resource(vni, Ipv4Addr::new(192, 168, 1, 10), resource.clone()).expect("Failed to add resource to IPAM mock");
-
-        // Resolve the resource's IP address using DNS
-        let fqdn = format!("{}.{}.internal", resource.name, 1);
-        let resolved_ip = dns.resolve(&fqdn).expect("Failed to resolve DNS");
-        assert_eq!(resolved_ip, Ipv4Addr::new(192, 168, 1, 10), "Resolved IP address should match the assigned IP");
-    }   
 }

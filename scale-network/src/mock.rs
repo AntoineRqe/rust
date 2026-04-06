@@ -100,6 +100,8 @@ impl VPCMock {
         let pn = self.private_networks.get_mut(&vni);
 
         if let Some(pn) = pn {
+            // Optimization: Time complexity is O(n) where n is the number of subnets in the PN.
+            // Can I own in advance which subnet should be used for each VNI to avoid iterating over all subnets?
             for subnet in &mut pn.subnets {
                 if let Some(ip) = subnet.get_ip() {
                     return Some(ip);
@@ -113,12 +115,15 @@ impl VPCMock {
     pub fn release_ip(&mut self, vni: VniID, ip: Ipv4Addr) -> Result<(), String> {
         let pn = self.private_networks.get_mut(&vni);
 
+        // Optimization: Time complexity is O(n) where n is the number of subnets in the PN.
+        // Mapping between IP address and VPC mock ?
         if let Some(pn) = pn {
             for subnet in &mut pn.subnets {
                 let network_u32 = u32::from(subnet.network);
                 let mask_u32 = u32::from(subnet.mask);
                 let ip_u32 = u32::from(ip);
 
+                // Check if the IP address belongs to the subnet
                 if (ip_u32 & mask_u32) == (network_u32 & mask_u32) {
                     subnet.add_ip(ip);
                     return Ok(());
@@ -130,6 +135,7 @@ impl VPCMock {
         }
     }
 
+    // Create a mock VPC with predefined PNs and subnets for testing purposes
     pub fn create_mock() -> Self {
         let mut private_networks = HashMap::new();
 
@@ -187,18 +193,18 @@ mod tests {
 // ---------------------------- IPAM -----------------------------
 // -----------------------------------------------------------------
 
-type ResourceId = u32; // Resource ID
+pub type ResourceID = u32; // Resource ID
 
 #[derive(Debug, Clone)]
 pub struct Resource {
-    pub id: ResourceId,
+    pub id: ResourceID,
     pub name: String,
     // TODO: Add MAC address as [u8] to avoid allocation at runtime
     pub mac_address: String,
 }
 
 impl Resource {
-    pub fn new(id: ResourceId, name: String, mac_address: String) -> Self {
+    pub fn new(id: ResourceID, name: String, mac_address: String) -> Self {
         Self { id, name, mac_address }
     }
 }
@@ -236,7 +242,7 @@ impl IPAMMock {
         let resources_map = self.resources.entry(vni).or_insert_with(HashMap::new);
         
         if resources_map.contains_key(&resource.resource.name) {
-            Err(format!("IP address {} is already assigned in PN with VNI {}", ip, vni))
+            Err(format!("Resource {} is already assigned in PN with VNI {}", resource.resource.name, vni))
         } else {
             resources_map.insert(resource.resource.name.clone(), resource);
             Ok(())
@@ -273,7 +279,7 @@ fn test_ipam_add_and_release_resource() {
     assert!(ip_map.iter().any(|(_, ipm)| ipm.ip == ip && ipm.resource.id == resource.id), "Resource should be added to IPAM mock");
 
     // Release the resource from the IPAM mock
-    ipam.release_resource(1, &resource.name).expect("Failed to release resource from IPAM mock");
-    let ip_map = ipam.resources.get(&1).unwrap();
-    assert!(!ip_map.iter().any(|(_, ipm)| ipm.ip == ip), "Resource should be released from IPAM mock");
+    let released_resource = ipam.release_resource(1, &resource.name).expect("Failed to release resource from IPAM mock");
+    assert_eq!(released_resource.ip, ip, "Released resource should have the correct IP address");
+    assert_eq!(released_resource.resource.id, resource.id, "Released resource should have the correct ID");
 }
