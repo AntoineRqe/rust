@@ -14,11 +14,13 @@ use types::{
         OrderId,
     }
 };
- 
+
+use snapshot::types::{Snapshot};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
+use std::sync::RwLock;
 
 pub enum OrderBookControl {
     Reset,
@@ -41,11 +43,82 @@ pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent
     fix_to_ob_tx.push(order_event).unwrap();  
 } 
 
+pub struct SnapshotGenerationEngine<'a, const N: usize> {
+    producer: Producer<'a, Snapshot, N>,
+    shutdown: Arc<AtomicBool>,
+    order_book: Arc<RwLock<OrderBook>>,
+    interval_ms: u64,
+    depth: usize,
+}
+
+impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
+    pub fn new(
+        producer: Producer<'a, Snapshot, N>,
+        shutdown: Arc<AtomicBool>,
+        order_book: Arc<RwLock<OrderBook>>, 
+        interval_ms: u64,
+        depth: usize)
+        -> Self {
+        Self { producer, shutdown, order_book, interval_ms, depth }
+    }
+
+    fn generate_snapshot(&self) -> Snapshot {
+        let order_book = self.order_book.read().unwrap();
+
+        let mut bids = order_book.dump_order_book(Side::Buy);
+        let mut asks = order_book.dump_order_book(Side::Sell);
+
+        // Warning : is the order of truncation and sorting correct here ? We want to make sure we are sending the top of the book for both sides, so we need to sort before truncating. This is fine for now since we are using BTreeMap which is already sorted, but if we switch to a different data structure in the future we need to make sure to sort before truncating.
+        bids.truncate(self.depth);
+        asks.truncate(self.depth);
+        
+        let id = order_book.internal_id_counter; // Use the internal order ID counter as a simple way to track the snapshot ID, it will increment with each new order processed and can serve as a unique identifier for the snapshot. In a more advanced implementation, you might want to use a separate counter or timestamp-based ID for snapshots.
+        let order_book_snapshot = snapshot::types::OrderBookSnapshot { bids, asks };
+
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        Snapshot {
+            timestamp: timestamp as u64, // Use the elapsed time since the order book engine started as the timestamp for the snapshot
+            symbol: order_book.symbol.clone(),
+            id: id, // The ID can be set to a unique value if needed, for now we can set it to 0 or use a counter if we want to track multiple snapshots
+            order_book: order_book_snapshot,
+        }
+    }
+
+    pub fn run(&self) {
+        while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(self.interval_ms)); // Sleep for the configured interval before generating the next snapshot
+            let mut snapshot = self.generate_snapshot();
+            tracing::debug!("[{}] Snapshot sent with ID: {}, timestamp: {}", market_name(), snapshot.id, snapshot.timestamp);
+            
+            while let Err(s) = self.producer.push(snapshot) {
+                snapshot = s;
+                std::hint::spin_loop(); // If the output queue is full, spin until there is space
+            }
+        }
+
+        // Send a final snapshot with the shutdown flag set to true to signal the snapshot consumer to stop processing snapshots and exit gracefully.
+        let mut snapshot = Snapshot::default();
+    
+        while let Err(s) = self.producer.push(snapshot) {
+            snapshot = s;
+            std::hint::spin_loop(); // If the output queue is full, spin until there is space
+        }
+
+        tracing::info!("[{}] Snapshot generation engine shutting down gracefully", market_name());
+    }
+}
+
 pub struct OrderBookEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, OrderEvent, N>,
     fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
     control_rx: crossbeam_channel::Receiver<OrderBookControl>,
-    order_book: OrderBook,
+    order_book: Arc<RwLock<OrderBook>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -54,14 +127,16 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
         fifo_in: Consumer<'a, OrderEvent, N>,
         fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
+        order_book: Arc<RwLock<OrderBook>>,
     ) -> Self {
-        Self::with_shutdown(fifo_in, fifo_out, control_rx, None)
+        Self::with_shutdown(fifo_in, fifo_out, control_rx, order_book, None)
     }
 
     pub fn with_shutdown(
         fifo_in: Consumer<'a, OrderEvent, N>,
         fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
+        order_book: Arc<RwLock<OrderBook>>,
         shutdown: Option<Arc<AtomicBool>>,
     ) -> Self {
         let shutdown = shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
@@ -69,14 +144,14 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             fifo_in,
             fifo_out,
             control_rx,
-            order_book: OrderBook::new(),
+            order_book,
             shutdown,
         }
     }
 
     pub fn import_order_book(&mut self, orders: Vec<OrderEvent>) {
         for order in orders {
-            self.order_book.process_order(order);
+            self.order_book.write().unwrap().process_order(order);
         }
     }
 
@@ -86,8 +161,8 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             while let Ok(control) = self.control_rx.try_recv() {
                 match control {
                     OrderBookControl::Reset => {
-                        self.order_book = OrderBook::new();
-                        tracing::info!("[{}] Order book reset completed", market_name());
+                        *self.order_book.write().unwrap() = OrderBook::new(self.order_book.read().unwrap().symbol.as_str()); // Reset the order book by creating a new instance
+                        tracing::info!("[{}][{}] Order book reset completed", market_name(), self.order_book.read().unwrap().symbol);
                     }
                 }
             }
@@ -95,6 +170,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             // Blocking pop: shutdown should be triggered by a kill message
             // to unblock this receive path.
             if let Some(event) = self.fifo_in.pop() {
+                // Kill signal: if the sender_id is empty, we treat it as a signal to shut down the order book engine. This allows us to unblock the pop() call and exit the loop gracefully.
                 if event.sender_id == EntityId::from_ascii("") {
                     self.shutdown.store(true, Ordering::Relaxed);
 
@@ -114,7 +190,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                     continue;
                 }
 
-                let (event, result) = self.order_book.process_order(event);
+                let (event, result) = self.order_book.write().unwrap().process_order(event);
                 let mut execution_report_input = (event, result);
                 for producer in &self.fifo_out {
                     if let Some(producer) = producer {
@@ -141,7 +217,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             }
         }
 
-        tracing::info!("[{}] Order book engine shutting down gracefully", market_name());
+        tracing::info!("[{}][{}] Order book engine shutting down gracefully", market_name(), self.order_book.read().unwrap().symbol);
     }
 }
 
@@ -163,14 +239,15 @@ impl OrderRef {
 /// The order book processes incoming orders, matches them against existing orders, and updates the order book accordingly.
 /// - `bids`: A binary heap containing buy orders, sorted by price in descending order.
 /// - `asks`: A binary heap containing sell orders, sorted by price in ascending order (using `Reverse` to achieve min-heap behavior).
-/// - `id_counter`: A counter used to generate unique trade IDs for matched orders.
+/// - `trade_id_counter`: A counter used to generate unique trade IDs for matched orders.
 #[derive(Debug)]
 pub struct OrderBook {
     pub bids: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     pub asks: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     internal_id_counter: u64, // Counter for generating unique internal order IDs
-    id_counter: u64, // Counter for generating unique trade IDs
+    trade_id_counter: u64, // Counter for generating unique trade IDs
     order_map: HashMap<OrderId, OrderRef>, // Map to track orders by their ID for efficient cancellation
+    symbol: String, // The symbol for this order book, can be set from environment variable or constructor parameter if needed
 }
 
 impl std::fmt::Display for OrderBook {
@@ -187,14 +264,15 @@ impl std::fmt::Display for OrderBook {
     }
 }
 impl OrderBook {
-    pub fn new() -> Self {
+    pub fn new(symbol: &str) -> Self {
         OrderBook {
             // Arbitrary initial capacity for the heaps to avoid frequent resizing; can be adjusted based on expected order volume.
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             internal_id_counter: 0, // Initialize the internal order ID counter to zero
-            id_counter: 0, // Initialize the trade ID counter to zero
+            trade_id_counter: 0, // Initialize the trade ID counter to zero
             order_map: HashMap::new(), // Initialize the order map
+            symbol: symbol.to_string(), // Set the symbol for this order book
         }
     }
 
@@ -205,8 +283,8 @@ impl OrderBook {
     }
 
     fn generate_trade_id(&mut self) -> u64 {
-        let id = self.id_counter;
-        self.id_counter += 1;
+        let id = self.trade_id_counter;
+        self.trade_id_counter += 1;
         id
     }
 
@@ -252,7 +330,7 @@ impl OrderBook {
 
     fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         if order.orig_cl_ord_id.is_none() {
-            tracing::error!("[{}] Cancel order with ID: {} is missing original client order ID, cannot process cancellation", market_name(), order.cl_ord_id);
+            tracing::error!("[{}][{}][{}] Cancel order with ID: {} is missing original client order ID, cannot process cancellation", market_name(), order.symbol, order.cl_ord_id, order.cl_ord_id);
             return (order, OrderResult {
                 internal_order_id: 0, // No internal order ID since the cancellation cannot be processed
                 trades: Trades::default(),
@@ -306,13 +384,13 @@ impl OrderBook {
                                 timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                             });
                         }
-                        None => tracing::error!("[{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", market_name(), orig_cl_ord_id, order_ref.side, order_ref.price, index),
+                        None => tracing::error!("[{}][{}][{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id, order_ref.side, order_ref.price, index),
                     }
                 }
             }
         }
 
-        tracing::error!("[{}] Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", market_name(), order.cl_ord_id, orig_cl_ord_id);
+        tracing::error!("[{}][{}][{}] Failed to cancel order with ID: {}, original client order ID: {}, order not found in order book", market_name(), order.symbol, order.cl_ord_id, order.cl_ord_id, orig_cl_ord_id);
         // If we reach this point, it means the order was not found or could not be cancelled
         (order, OrderResult {
             internal_order_id: self.generate_internal_order_id(),
@@ -340,7 +418,7 @@ impl OrderBook {
             Side::Sell => self.asks.get(&order.price).map_or(0, |queue| queue.len()),
         };
         self.order_map.insert(order.cl_ord_id, OrderRef::new(order.side, order.price, position));
-        tracing::debug!("[{}] Added order with ID: {}, side: {:?}, price: {}, position: {} to order map", market_name(), order.cl_ord_id, order.side, order.price, position);
+        tracing::debug!("[{}][{}][{}] Added order with ID: {}, side: {:?}, price: {}, position: {} to order map", market_name(), order.symbol, order.cl_ord_id, order.cl_ord_id, order.side, order.price, position);
     }
 
     /// Processes a sell limit order by matching it against the best available bids in the order book. If the order is not fully filled, it is added to the asks heap.
@@ -374,7 +452,7 @@ impl OrderBook {
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
-                        tracing::error!("[{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name());
+                        tracing::error!("[{}][{}][{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name(), order.symbol, order.cl_ord_id);
                     }
             
                     if best_bid.quantity > FixedPointArithmetic::ZERO {
@@ -447,7 +525,7 @@ impl OrderBook {
                         timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
-                        tracing::error!("[{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name());
+                        tracing::error!("[{}][{}][{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name(), order.symbol, order.cl_ord_id);
                     }
 
 
@@ -544,20 +622,20 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
-    use core::f64;
     use std::{thread, time::Instant};
 
     use super::*;
     use types::macros::{SymbolId};
 
-    const SYMBOL: SymbolId = SymbolId::from_ascii("TEST");
+    const SYMBOL_STR: &str = "TEST";
+    const SYMBOL_ID: SymbolId = SymbolId::from_ascii(SYMBOL_STR);
     const SENDER: EntityId = EntityId::from_ascii("SENDER0000000000000");
     const TARGET: EntityId = EntityId::from_ascii("TARGET0000000000000");
     const CL_ORD_ID: OrderId = OrderId::from_ascii("12345");
 
     #[test]
     fn test_order_book_initialization() {
-        let order_book = OrderBook::new();
+        let order_book = OrderBook::new(SYMBOL_STR);
         assert!(order_book.get_best_bid().is_none());
         assert!(order_book.get_best_ask().is_none());
         assert!(order_book.get_spread().is_none());
@@ -565,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_cancel_order() {
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
         let order = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
@@ -575,7 +653,7 @@ mod tests {
             cl_ord_id: CL_ORD_ID,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -593,7 +671,7 @@ mod tests {
             orig_cl_ord_id: Some(CL_ORD_ID),
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the cancel order
+            symbol: SYMBOL_ID, // Set the symbol for the cancel order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -615,7 +693,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -633,7 +711,7 @@ mod tests {
             orig_cl_ord_id: Some(CL_ORD_ID),
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the cancel order
+            symbol: SYMBOL_ID, // Set the symbol for the cancel order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -648,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_single_limit_order() {
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
         let order = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
@@ -658,7 +736,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -676,7 +754,7 @@ mod tests {
 
     #[test]
     fn test_trade_with_same_price() {
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
         let order1 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
@@ -686,7 +764,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
@@ -698,7 +776,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -724,7 +802,7 @@ mod tests {
     fn test_limit_orders_single_trade() {
         logging::init_tracing("order_book");
 
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
         let order1 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0), // 100.0 with 8 decimal places
             quantity: FixedPointArithmetic::from_f64(10.0), // 10.0 with 8 decimal places
@@ -734,7 +812,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
@@ -746,7 +824,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
@@ -758,7 +836,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL, // Set the symbol for the order
+            symbol: SYMBOL_ID, // Set the symbol for the order
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -816,7 +894,7 @@ mod tests {
     fn test_limit_orders_multiple_trades() {
         logging::init_tracing("order_book");
 
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
 
         let order1 = OrderEvent {
             price: FixedPointArithmetic::from_f64(99.0),
@@ -827,7 +905,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
@@ -839,7 +917,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
@@ -851,7 +929,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order4 = OrderEvent {
@@ -863,7 +941,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -923,7 +1001,7 @@ mod tests {
     fn test_market_orders() {
         logging::init_tracing("order_book");
 
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
 
         let order1 = OrderEvent {
             price: FixedPointArithmetic::from_f64(99.0),
@@ -934,7 +1012,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
@@ -946,7 +1024,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
@@ -958,7 +1036,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order4 = OrderEvent {
@@ -970,7 +1048,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -1023,7 +1101,7 @@ mod tests {
     #[test]
     fn test_spread_calculation() {
         logging::init_tracing("order_book");
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
         let order1 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0),
             quantity: FixedPointArithmetic::from_f64(10.0),
@@ -1033,7 +1111,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
@@ -1045,7 +1123,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -1062,7 +1140,7 @@ mod tests {
     #[test]
     fn test_dump_order_book() {
         logging::init_tracing("order_book");
-        let mut order_book = OrderBook::new();
+        let mut order_book = OrderBook::new(SYMBOL_STR);
         let order1 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0),
             quantity: FixedPointArithmetic::from_f64(10.0),
@@ -1072,7 +1150,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
@@ -1084,7 +1162,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: SENDER,
             target_id: TARGET,
-            symbol: SYMBOL,
+            symbol: SYMBOL_ID,
             timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
         };
 
@@ -1116,14 +1194,16 @@ mod tests {
         let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
 
         thread::scope(|s| {
+            let order_book = Arc::new(RwLock::new(OrderBook::new(SYMBOL_STR)));
             let(inbound_producer, inbound_consumer) = inbound_queue.split();
             let(outbound_producer, outbound_consumer) = outbound_queue.split();
 
             let (_control_tx, control_rx) = crossbeam_channel::unbounded();
             let mut engine = OrderBookEngine::new(
-                inbound_consumer,
-                [Some(outbound_producer), None, None],
+        inbound_consumer,
+        [Some(outbound_producer), None, None],
                 control_rx,
+                Arc::clone(&order_book),
             );
             
             let ob_handle = s.spawn(move || {
@@ -1140,7 +1220,7 @@ mod tests {
                 orig_cl_ord_id: None,
                 sender_id: SENDER,
                 target_id: TARGET,
-                symbol: SYMBOL,
+                symbol: SYMBOL_ID,
                 timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
             };
 
@@ -1164,7 +1244,7 @@ mod tests {
                 orig_cl_ord_id: None,
                 sender_id: SENDER,
                 target_id: TARGET,
-                symbol: SYMBOL,
+                symbol: SYMBOL_ID,
                 timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
             };
 
@@ -1180,6 +1260,83 @@ mod tests {
             // Send a dummy order to unblock the engine if it's waiting for orders
             kill_order_book_engine(&inbound_producer);
             ob_handle.join().expect("Engine thread panicked");
+        });
+    }
+
+    #[test]
+    fn test_send_snapshot() {
+        tracing_subscriber::fmt::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .init();
+
+
+        let order1 = OrderEvent {
+            price: FixedPointArithmetic::from_f64(100.0),
+            quantity: FixedPointArithmetic::from_f64(10.0),
+            side: Side::Buy,
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL_ID,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+        };
+        let order2 = OrderEvent {
+            price: FixedPointArithmetic::from_f64(102.0),
+            quantity: FixedPointArithmetic::from_f64(5.0),
+            side: Side::Sell,
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: CL_ORD_ID,
+            orig_cl_ord_id: None,
+            sender_id: SENDER,
+            target_id: TARGET,
+            symbol: SYMBOL_ID,
+            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+        };
+
+        let mut queue = spsc::spsc_lock_free::RingBuffer::<Snapshot, 1024>::new();
+        
+        std::thread::scope(|   s| {
+            let (ss_producer, ss_consumer) = queue.split();
+
+            let order_book = Arc::new(RwLock::new(OrderBook::new(SYMBOL_STR)));
+            let shutdown = Arc::new(AtomicBool::new(false));
+
+            let snapshot_engine = SnapshotGenerationEngine::new(
+                ss_producer,
+                Arc::clone(&shutdown),
+                Arc::clone(&order_book),
+                1000, // Set the snapshot interval to 1000 milliseconds (1 second)
+                10, // Set the maximum depth of the order book to include in the snapshot
+            );
+            
+
+            let _engine_handle = s.spawn(move || {
+                snapshot_engine.run();
+            });
+
+            order_book.write().unwrap().process_order(order1);
+            order_book.write().unwrap().process_order(order2);
+
+            // Give some time for the snapshot to be sent and received
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+
+            let recv_snapshot = ss_consumer.pop().unwrap();
+        
+            // Check ask side
+            assert_eq!(recv_snapshot.order_book.bids.len(), 1); // One bid should be in the snapshot
+            assert_eq!(recv_snapshot.order_book.bids[0].price, FixedPointArithmetic::from_f64(100.0));
+            assert_eq!(recv_snapshot.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(10.0));
+
+            // Check bid side
+            assert_eq!(recv_snapshot.order_book.asks.len(), 1); // One ask should be in the snapshot
+            assert_eq!(recv_snapshot.order_book.asks[0].price, FixedPointArithmetic::from_f64(102.0));
+            assert_eq!(recv_snapshot.order_book.asks[0].quantity, FixedPointArithmetic::from_f64(5.0));
+
+            shutdown.store(true, Ordering::Relaxed);
+
+            _engine_handle.join().expect("Engine thread panicked");
         });
     }
 }

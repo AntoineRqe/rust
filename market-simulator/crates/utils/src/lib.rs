@@ -1,3 +1,40 @@
+// Utility functions and traits shared across multiple crates.
+
+// Return the market name from the environment variable `MARKET_NAME`, or "unknown" if not set. The result is cached in a `OnceLock` for efficient repeated access.
+pub fn market_name() -> &'static str {
+    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKET_NAME
+        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
+        .as_str()
+}
+
+// Multicast configuration and socket management for market data feeds and snapshots.
+pub struct MultiCastInfo {
+    pub ip: String,
+    pub port: u16,
+    pub socket: std::net::UdpSocket,
+    pub addr: String,
+}
+
+impl MultiCastInfo {
+    pub fn new(ip: &str, port: u16) -> Self {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("Failed to bind UDP socket");
+        // TODO : set socket options for multicast
+        // socket.set_nonblocking(true).expect("Failed to set socket to non-blocking mode");
+        // socket.set_multicast_loop_v4(true).expect("Failed to enable multicast loopback");
+        // socket.set_multicast_ttl_v4(1).expect("Failed to set multicast TTL");
+        let addr = format!("{}:{}", ip, port);
+
+        Self {
+            ip: ip.to_string(),
+            port,
+            socket,
+            addr,
+        }
+    }
+}
+
+
 /// Shared trait for accessing byte array IDs (like `OrderId`, `EntityId`, etc.) as slices or hex strings.
 pub trait IdExt {
     fn as_slice(&self) -> &[u8];

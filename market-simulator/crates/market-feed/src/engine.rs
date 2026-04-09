@@ -15,12 +15,10 @@ use crate::types::{
     MarketDataHeader,
     MessageType,
     MarketEvent,
-    OrderBookSnapshot,
-    PriceLevel,
-    SNAPSHOT_BYTES,
     Trade,
-    MAX_LEVELS,
 };
+
+use utils::{MultiCastInfo, market_name};
 
 
 pub struct MarketDataFeedEngine<'a, const N: usize> {
@@ -28,16 +26,7 @@ pub struct MarketDataFeedEngine<'a, const N: usize> {
     shutdown: Arc<AtomicBool>,
     socket: Option<std::net::UdpSocket>, // Optional socket for broadcasting market data feed events
     seq_num: u64, // Sequence number for market data feed events
-    multicast_ip: String, // Multicast IP address for broadcasting market data feed events
-    port: u16, // Port for broadcasting market data feed events
-    // ...
-}
-
-fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
+    multicast_info: MultiCastInfo, // Multicast configuration and socket management
 }
 
 impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
@@ -48,7 +37,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
 
         let socket = UdpSocket::bind(format!("0.0.0.0:0"))?;
 
-        Ok(Self { fifo_in, shutdown, socket: Some(socket), seq_num: 0, multicast_ip: addr.to_string(), port })
+        Ok(Self { fifo_in, shutdown, socket: Some(socket), seq_num: 0, multicast_info: MultiCastInfo::new(addr, port) })
     }
 
     fn build_add_order_event(&self, order_event: &OrderEvent) -> AddOrder {
@@ -81,20 +70,6 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
             .collect()
     }
 
-    fn build_snapshot_event(&self) -> OrderBookSnapshot {
-        let empty_level = PriceLevel {
-            price: types::FixedPointArithmetic::ZERO,
-            quantity: types::FixedPointArithmetic::ZERO,
-        };
-
-        OrderBookSnapshot {
-            num_bid_levels: 0,
-            num_ask_levels: 0,
-            bids: [empty_level; MAX_LEVELS],
-            asks: [empty_level; MAX_LEVELS],
-        }
-    }
-
     fn build_header(
         &mut self,
         order_event: &OrderEvent,
@@ -117,12 +92,6 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
             let delete_order = self.build_delete_order_event(order_event);
             let header = self.build_header(order_event, MessageType::DeleteOrder, 8);
             return vec![MarketEvent::Delete(header, delete_order)];
-        }
-
-        if order_result.status == types::OrderStatus::CancelRejected {
-            let snapshot = self.build_snapshot_event();
-            let header = self.build_header(order_event, MessageType::Snapshot, SNAPSHOT_BYTES as u16);
-            return vec![MarketEvent::Snapshot(header, snapshot)];
         }
 
         if order_result.status == types::OrderStatus::PartiallyFilled && order_result.trades.len() == 0 {
@@ -190,7 +159,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
                         for market_data_feed_event in market_data_feed_events {
                             let bytes = market_data_feed_event.to_bytes();
                             tracing::info!("[{}] Broadcasting market data feed event: header={:?}, event={:?}", market_name(), market_data_feed_event, market_data_feed_event);
-                            let _ = socket.send_to(&bytes, format!("{}:{}", self.multicast_ip, self.port));
+                            let _ = socket.send_to(&bytes, &self.multicast_info.addr);
                         }
                     }
                 }
@@ -284,11 +253,6 @@ mod tests {
                     let trade = Trade::from_bytes(body_bytes)
                         .ok_or("Failed to deserialize Trade")?;
                     MarketEvent::Trade(header, trade)
-                },
-                x if x == MessageType::Snapshot as u8 => {
-                    let snapshot = OrderBookSnapshot::from_bytes(&body_bytes[..SNAPSHOT_BYTES])
-                        .ok_or("Failed to deserialize OrderBookSnapshot")?;
-                    MarketEvent::Snapshot(header, snapshot)
                 },
                 _ => {
                     return Err(format!("Unsupported message type: {}", header.msg_type).into());
@@ -487,39 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_market_data_feed_snapshot_event() {
-        let mut rb_in = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 16>::new();
-        let (_, consumer_in) = rb_in.split();
-        let mut engine = build_engine_for_test(consumer_in);
-
-        let order_event = OrderEvent {
-            sender_id: EntityId::from_ascii("test_sender"),
-            cl_ord_id: OrderId::from_ascii("order123"),
-            side: types::Side::Buy,
-            order_type: types::OrderType::LimitOrder,
-            symbol: SymbolId::from_ascii("MSFT"),
-            ..Default::default()
-        };
-
-        let order_result = OrderResult {
-            status: types::OrderStatus::CancelRejected,
-            ..OrderResult::default()
-        };
-
-        let event = engine.build_market_data_feed_from_order(&order_event, &order_result);
-        match event {
-            MarketEvent::Snapshot(header, snapshot) => {
-                assert_header_fields(&header, &order_event, MessageType::Snapshot, SNAPSHOT_BYTES as u16, 0);
-                let num_bid_levels = snapshot.num_bid_levels;
-                let num_ask_levels = snapshot.num_ask_levels;
-                assert_eq!(num_bid_levels, 0);
-                assert_eq!(num_ask_levels, 0);
-            }
-            _ => panic!("Expected Snapshot event"),
-        }
-    }
-
-    #[test]
     fn test_market_data_feed_engine() {
         let order_event = OrderEvent {
             sender_id: EntityId::from_ascii("test_sender"),
@@ -659,35 +590,6 @@ mod tests {
                 assert_eq!(quantity, types::FixedPointArithmetic(9));
             }
             _ => panic!("Expected Trade event"),
-        }
-    }
-
-    #[test]
-    fn test_market_data_feed_engine_snapshot_event_udp() {
-        let order_event = OrderEvent {
-            sender_id: EntityId::from_ascii("test_sender"),
-            cl_ord_id: OrderId::from_ascii("snap0001"),
-            side: types::Side::Sell,
-            order_type: types::OrderType::LimitOrder,
-            symbol: SymbolId::from_ascii("AMZN"),
-            ..Default::default()
-        };
-
-        let order_result = OrderResult {
-            status: types::OrderStatus::CancelRejected,
-            ..OrderResult::default()
-        };
-
-        let (header, event) = run_engine_once_and_receive(order_event, order_result);
-        assert_header_fields(&header, &order_event, MessageType::Snapshot, SNAPSHOT_BYTES as u16, 0);
-        match event {
-            MarketEvent::Snapshot(_, snapshot) => {
-                let num_bid_levels = snapshot.num_bid_levels;
-                let num_ask_levels = snapshot.num_ask_levels;
-                assert_eq!(num_bid_levels, 0);
-                assert_eq!(num_ask_levels, 0);
-            }
-            _ => panic!("Expected Snapshot event"),
         }
     }
 }

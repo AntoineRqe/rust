@@ -1,7 +1,8 @@
+use snapshot::types::Snapshot;
 use types::{OrderEvent, OrderResult};
 use types::macros::{EntityId};
 use clap::Parser;
-use order_book::order_book::{OrderBookEngine};
+use order_book::order_book::{OrderBook, OrderBookEngine, SnapshotGenerationEngine};
 use order_book::OrderBookControl;
 use server::tcp::{
     FixServer,
@@ -19,6 +20,8 @@ use web::state::{
 use web::server::run_web_server;
 use config::{MarketConfig, MarketsConfig};
 use market_feed::engine::MarketDataFeedEngine;
+
+use std::sync::RwLock;
 
 
 const RB_SIZE: usize = 1024;
@@ -44,22 +47,18 @@ struct ThreadHandles {
     web_thread: Option<std::thread::JoinHandle<()>>,
     tcp_thread: Option<std::thread::JoinHandle<()>>,
     grpc_thread: Option<std::thread::JoinHandle<()>>,
+    snapshot_thread: Option<std::thread::JoinHandle<()>>,
+    snapshot_generation_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 struct MarketSimulator {
     config: MarketConfig,
     thread_handles: Arc<Mutex<ThreadHandles>>,
     entry_point: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
-    /// Shared flag to stop the TCP accept loop gracefully.
-    tcp_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// Shared flag to stop the web server gracefully.
-    web_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// Shared flag to stop the gRPC server gracefully.
-    grpc_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// Shared flag to stop the multicast market-feed receiver thread.
-    multicast_shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// Multicast endpoints (potentially multiple markets) to forward to GUI websockets.
+    shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Multicast endpoints for order book snapshots to forward to GUI websockets.
     market_feed_sources: Vec<MulticastSource>,
+    market_snapshot_sources: Vec<MulticastSource>,
 }
 
 struct QueueHandle {
@@ -70,6 +69,7 @@ struct QueueHandle {
     ob_to_db: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     ob_to_md: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>>,
+    ob_to_ss: Option<memory::SharedQueue<RB_SIZE, Snapshot>>,
 }
 
 impl QueueHandle {
@@ -80,6 +80,7 @@ impl QueueHandle {
         let ob_to_db     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_db"), true);
         let ob_to_md     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_market_feed"), true);
         let er_to_fix     = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(&format!("{market_name}_execution_report_to_fix"), true);
+        let ob_to_ss     = memory::open_shared_queue::<RB_SIZE, Snapshot>(&format!("{market_name}_order_book_to_snapshot"), true);
 
         // Bind Fix entry point to global struct so it can be accessed by the TCP server
         market_simulator.entry_point = Some(Arc::new(net_to_fix_tx.clone()));
@@ -92,6 +93,7 @@ impl QueueHandle {
             ob_to_db: Some(ob_to_db),
             ob_to_md: Some(ob_to_md),
             er_to_fix: Some(er_to_fix),
+            ob_to_ss: Some(ob_to_ss),
         }
     }
 }
@@ -103,20 +105,22 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let config = market_simulator.config.clone();
     let market_feed_sources = market_simulator.market_feed_sources.clone();
     let bus = EventBus::new();
+    let global_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let multicast_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    market_simulator.multicast_shutdown = Some(Arc::clone(&multicast_shutdown));
+    // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
+    market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
 
     let _multicast_receiver_thread = spawn_market_feed_receiver(
         bus.clone(),
         market_feed_sources,
-        Arc::clone(&multicast_shutdown),
+        Arc::clone(&global_shutdown),
     );
 
     {
         market_simulator.thread_handles.lock().unwrap().multicast_receiver_thread = Some(_multicast_receiver_thread);
     }
 
+    // Initialization of shared queues for inter-thread communication
     let mut queues = QueueHandle::new(&mut market_simulator, &config.name);
 
     let net_to_fix_tx = queues.net_to_fix_tx.as_ref().unwrap().clone();
@@ -125,9 +129,11 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
     let (ob_db_tx, ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
     let (ob_md_tx, ob_md_rx) = queues.ob_to_md.take().unwrap().queue.split();
-
+    let (ob_ss_tx, ob_ss_rx) = queues.ob_to_ss.take().unwrap().queue.split();
+    
+    
     // execution report engine thread
-    let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx);
+    let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&global_shutdown));
 
     let _er_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.execution_report_core });
@@ -138,12 +144,13 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         market_simulator.thread_handles.lock().unwrap().er_thread = Some(_er_thread);
     }
 
+    // DB engine thread
     let database_url = config.resolve_database_url().map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
     })?;
 
-    // DB engine thread
-    let db_engine = match db::DatabaseEngine::new(ob_db_rx, &database_url) {
+
+    let db_engine = match db::DatabaseEngine::new(ob_db_rx, &database_url, Arc::clone(&global_shutdown)) {
         Ok(engine) => engine,
         Err(e) => {
             return Err(Box::new(e));
@@ -183,8 +190,12 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     // Order-book control channel (used by the gRPC reset service).
     let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
 
+    
+    // Create shared order book instance and pass it to the order book engine and snapshot generation engine so they can read/write it without going through the queues.
+    let order_book = Arc::new(RwLock::new(OrderBook::new("AAAPL")));
+
     // Book engine thread
-    let mut order_book_engine = OrderBookEngine::new(ob_rx, [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)], ob_control_rx);
+    let mut order_book_engine = OrderBookEngine::with_shutdown(ob_rx, [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)], ob_control_rx, Arc::clone(&order_book), Some(Arc::clone(&global_shutdown)));
 
     order_book_engine.import_order_book(initial_orders);
 
@@ -197,12 +208,42 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         market_simulator.thread_handles.lock().unwrap().ob_thread = Some(_ob_thread);
     }
 
-    let market_feed_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Snapshot generation thread (reads from order book and pushes to multicast engine)
+    let snapshot_generation_engine = SnapshotGenerationEngine::new(ob_ss_tx, Arc::clone(&global_shutdown), Arc::clone(&order_book), config.snapshot.update_interval_ms, config.snapshot.max_depth);
+    let snapshot_generation_core = config.core_mapping.snapshot_core;
+    let _snapshot_generation_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: snapshot_generation_core });
+        snapshot_generation_engine.run();
+    });
+
+    {
+        market_simulator.thread_handles.lock().unwrap().snapshot_generation_thread = Some(_snapshot_generation_thread);
+    }
+
+    // Snapshot multicast engine thread
+    let mut snapshot_engine = snapshot::engine::SnapshotMultiCastEngine::new(
+        ob_ss_rx,
+        Arc::clone(&global_shutdown),
+        &config.snapshot_multicast.address,
+        config.snapshot_multicast.port,
+    );
+
+    let snapshot_core = config.core_mapping.snapshot_core;
+    let _snapshot_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: snapshot_core });
+        snapshot_engine.run();
+    });
+
+    {
+        market_simulator.thread_handles.lock().unwrap().snapshot_thread = Some(_snapshot_thread);
+    }
+
+    // Market feed engine thread
     let mut market_feed_engine = MarketDataFeedEngine::new(
         ob_md_rx,
-        Arc::clone(&market_feed_shutdown),
-        &config.multicast.address,
-        config.multicast.port,
+        Arc::clone(&global_shutdown),
+        &config.market_feed_multicast.address,
+        config.market_feed_multicast.port,
     )?;
 
     let market_feed_core = config.core_mapping.market_feed_core;
@@ -216,7 +257,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     }
 
     // fix engine thread
-    let fix_engine = FixEngine ::new(Arc::clone(&queues.net_to_fix_rx.as_ref().unwrap()), fix_tx, fix_resp_rx);
+    let fix_engine = FixEngine ::new(Arc::clone(&queues.net_to_fix_rx.as_ref().unwrap()), fix_tx, fix_resp_rx, Arc::clone(&global_shutdown));
     let (mut inbound_engine, mut outbound_engine) = fix_engine.split();
 
     let _fix_inbound_thread = std::thread::spawn(move || {
@@ -235,10 +276,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         thread_handles.fix_outbound_thread = Some(_fix_outbound_thread);
     }
 
-    
-    let web_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    market_simulator.web_shutdown = Some(Arc::clone(&web_shutdown));
-
     // Start the web server in a separate thread, passing it the event bus
     let _web_thread = std::thread::spawn({
         core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.web_core });
@@ -247,7 +284,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         let grpc_addr    = format!("http://127.0.0.1:{}", config.grpc.port);
         let web_ip = config.web.ip.clone();
         let web_port = config.web.port;
-        let web_shutdown = Arc::clone(&web_shutdown);
+        let web_shutdown = Arc::clone(&global_shutdown);
         move || {
             run_web_server(bus, fix_tcp_addr, grpc_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), web_shutdown);
         }
@@ -263,8 +300,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 
     // Grab the shutdown flag before releasing the lock so the Ctrl-C handler
     // can signal the accept loop without holding any other lock.
-    let tcp_shutdown = server.shutdown_flag();
-    market_simulator.tcp_shutdown = Some(Arc::clone(&tcp_shutdown));
 
     let tcp_core = config.core_mapping.tcp_core;
     let _tcp_thread = std::thread::spawn(move || {
@@ -279,8 +314,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     // gRPC MarketControl server — handles ResetMarket (order book + DB).
     let grpc_ip   = config.grpc.ip.clone();
     let grpc_port = config.grpc.port;
-    let grpc_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    market_simulator.grpc_shutdown = Some(Arc::clone(&grpc_shutdown));
+    let grpc_shutdown = Arc::clone(&global_shutdown);
     let grpc_service = grpc::MarketControlService::new(ob_control_tx, db_pool);
     let _grpc_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -303,43 +337,24 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     tracing::info!("[{}] FIX server    -> {}:{}", config.name, config.tcp.ip, config.tcp.port);
     tracing::info!("[{}] Web terminal  -> http://{}:{}", config.name, config.web.ip, config.web.port);
     tracing::info!("[{}] gRPC control  -> {}:{}", config.name, config.grpc.ip, config.grpc.port);
-    tracing::info!("[{}] Market feed   -> {}:{}", config.name, config.multicast.address, config.multicast.port);
+    tracing::info!("[{}] Market feed   -> {}:{}", config.name, config.market_feed_multicast.address, config.market_feed_multicast.port);
+    tracing::info!("[{}] Snapshot feed -> {}:{}", config.name, config.snapshot_multicast.address, config.snapshot_multicast.port);
 
     Ok(())
 }
 
 fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
-    let (tcp_shutdown, web_shutdown, grpc_shutdown, multicast_shutdown, entry_point, thread_handles) = {
+    let (entry_point, thread_handles, shutdown) = {
         let market_simulator = market_simulator.lock().unwrap();
         (
-            market_simulator.tcp_shutdown.clone(),
-            market_simulator.web_shutdown.clone(),
-            market_simulator.grpc_shutdown.clone(),
-            market_simulator.multicast_shutdown.clone(),
             market_simulator.entry_point.clone(),
             Arc::clone(&market_simulator.thread_handles),
+            Arc::clone(&market_simulator.shutdown.as_ref().unwrap()),
         )
     };
 
-    // Signal the TCP accept loop to stop.
-    if let Some(flag) = tcp_shutdown {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // Signal the web server to stop.
-    if let Some(flag) = web_shutdown {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // Signal the gRPC server to stop.
-    if let Some(flag) = grpc_shutdown {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // Signal multicast receiver thread to stop.
-    if let Some(flag) = multicast_shutdown {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
+    // Set the global shutdown flag to signal all threads to exit.
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // Send a shutdown message to the FIX engine to unblock it if it's waiting on the queue.
     if let Some(entry_point) = entry_point {
@@ -362,6 +377,12 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     }
     if let Some(handle) = thread_handles.market_feed_thread.take() {
         handle.join().expect("Failed to join Market Feed thread");
+    }
+    if let Some(handle) = thread_handles.snapshot_thread.take() {
+        handle.join().expect("Failed to join Snapshot thread");
+    }
+    if let Some(handle) = thread_handles.snapshot_generation_thread.take() {
+        handle.join().expect("Failed to join Snapshot Generation thread");
     }
     if let Some(handle) = thread_handles.multicast_receiver_thread.take() {
         handle.join().expect("Failed to join Multicast Receiver thread");
@@ -398,8 +419,14 @@ fn main() {
     if let Some(index) = cli.market_index {
         let market_feed_sources = config.markets.iter().map(|market| MulticastSource {
             market: market.name.clone(),
-            address: market.multicast.address.clone(),
-            port: market.multicast.port,
+            address: market.market_feed_multicast.address.clone(),
+            port: market.market_feed_multicast.port,
+        }).collect::<Vec<_>>();
+
+        let market_snapshot_sources = config.markets.iter().map(|market| MulticastSource {
+            market: market.name.clone(),
+            address: market.snapshot_multicast.address.clone(),
+            port: market.snapshot_multicast.port,
         }).collect::<Vec<_>>();
 
         let market_config = config
@@ -424,13 +451,13 @@ fn main() {
                 web_thread: None,
                 tcp_thread: None,
                 grpc_thread: None,
+                snapshot_thread: None,
+                snapshot_generation_thread: None,
             })),
             entry_point: None,
-            tcp_shutdown: None,
-            web_shutdown: None,
-            grpc_shutdown: None,
-            multicast_shutdown: None,
+            shutdown: None,
             market_feed_sources,
+            market_snapshot_sources,
         }));
 
         if let Err(e) = start_market(Arc::clone(&simulator)) {

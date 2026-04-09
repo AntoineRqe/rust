@@ -16,6 +16,12 @@ pub struct MulticastConfig {
 }
 
 #[derive(Clone, Deserialize)]
+pub struct SnapshotConfig {
+    pub update_interval_ms: u64,
+    pub max_depth: usize,
+}
+
+#[derive(Clone, Deserialize)]
 pub struct MarketConfig {
     pub name: String,
     pub database_url: Option<String>,
@@ -23,8 +29,10 @@ pub struct MarketConfig {
     pub web: Connection,
     pub tcp: Connection,
     pub grpc: Connection,
-    pub multicast: MulticastConfig,
+    pub market_feed_multicast: MulticastConfig,
+    pub snapshot_multicast: MulticastConfig,
     pub core_mapping: EngineCoreMapping,
+    pub snapshot: SnapshotConfig,
 }
 
 impl MarketConfig {
@@ -62,6 +70,7 @@ pub struct EngineCoreMapping {
     pub web_core: usize,
     pub tcp_core: usize,
     pub global_core: usize,
+    pub snapshot_core: usize,
 }
 
 impl MarketsConfig {

@@ -1,5 +1,5 @@
 [package]
-name = "order-book"
+name = "snapshot"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,9 +9,7 @@ spsc.workspace = true
 logging = { path = "../logging" }
 types = { path = "../types" }
 utils = { path = "../utils" }
-snapshot = { path = "../snapshot" }
 crossbeam-channel.workspace = true
 
-# Dev dependencies for testing
 [dev-dependencies]
 tracing-subscriber.workspace = true

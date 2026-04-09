@@ -19,13 +19,8 @@ use types::macros::{EntityId, SymbolId, OrderId};
 use spsc::spsc_lock_free::{Consumer};
 use std::sync::{Arc, atomic::{AtomicBool}};
 use std::sync::atomic::Ordering;
+use utils::market_name;
 
-fn market_name() -> &'static str {
-    static MARKET_NAME: OnceLock<String> = OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
-}
 
 pub struct DatabaseEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
@@ -37,12 +32,13 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
     pub fn new(
         fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
         database_url: &str,
+        shutdown: Arc<AtomicBool>,
     ) -> Result<Self, sqlx::Error> {
         let pool = Arc::new(block_on_db(connect(database_url))?);
 
         Ok(Self {
             fifo_in,
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown,
             pool,
         })
     }

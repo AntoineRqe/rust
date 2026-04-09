@@ -85,3 +85,5 @@ Refer to the [Tools README](./tools/README.md) for instructions on how to run th
 - Add more instruments and support for multiple symbols in the order book and matching engine.
 - Implement the Market Data Feed to simulate real-time market data and allow clients to subscribe to market data updates.
 - Implement the UDP multicast for market data distribution to allow for efficient dissemination of market data to multiple clients.
+- In the database, add recovery mode by saving snapshots + incremental logs to allow for faster recovery in case of a crash.
+- 

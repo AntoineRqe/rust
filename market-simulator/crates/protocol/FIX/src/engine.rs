@@ -315,12 +315,13 @@ impl<'a, const N: usize> FixEngine<'a, N> {
         request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
         request_out: Producer<'a, OrderEvent, N>,
         response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
+        shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
             request_in: request_in,
             request_out: request_out,
             response_in: response_in,
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: shutdown,
             pending: Arc::new(FixPendingConnection {
                 locked: AtomicBool::new(false),
                 pending: UnsafeCell::new(HashMap::new()),
@@ -380,6 +381,7 @@ mod tests {
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 er_to_fix_rx,
+                Arc::new(AtomicBool::new(false)),
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
@@ -444,6 +446,7 @@ mod tests {
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 er_to_fix_rx,
+                Arc::new(AtomicBool::new(false)),
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();

@@ -32,8 +32,12 @@ pub struct ExecutionReportEngine<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>, fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>) -> Self {
-        Self { fifo_in, fifo_out, shutdown: Arc::new(AtomicBool::new(false)) }
+    pub fn new(
+        fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
+        fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>,
+        shutdown: Arc<AtomicBool>
+    ) -> Self {
+        Self { fifo_in, fifo_out, shutdown }
     }
 
     pub fn run(&self) {
@@ -325,7 +329,10 @@ mod tests {
         let mut rb_out = spsc::spsc_lock_free::RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
         let (fifo_in_tx, fifo_in_rx) = rb_in.split();
         let (fifo_out_tx, fifo_out_rx) = rb_out.split();
-        let engine = ExecutionReportEngine::new(fifo_in_rx, fifo_out_tx);
+
+        let shutdown_signal = Arc::new(AtomicBool::new(false));
+
+        let engine = ExecutionReportEngine::new(fifo_in_rx, fifo_out_tx, Arc::clone(&shutdown_signal));
         
         std::thread::scope(|s| {
 
