@@ -15,3 +15,4 @@ spsc.workspace = true
 utils = { path = "../utils" }
 types = { path = "../types" }
 tracing.workspace = true
+url = "2"

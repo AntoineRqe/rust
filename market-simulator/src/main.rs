@@ -7,7 +7,8 @@ use order_book::OrderBookControl;
 use server::tcp::{
     FixServer,
 };
-use server::multicast::{MulticastSource, spawn_market_feed_receiver};
+use server::multicast::{spawn_market_feed_receiver};
+use types::multicast::MulticastSource;
 use std::sync::{Arc, Mutex};
 use crossbeam::{channel};
 use fix::engine::{FixEngine, FixRawMsg};
@@ -20,11 +21,12 @@ use web::state::{
 use web::server::run_web_server;
 use config::{MarketConfig, MarketsConfig};
 use market_feed::engine::MarketDataFeedEngine;
-
 use std::sync::RwLock;
 
 
 const RB_SIZE: usize = 1024;
+
+
 
 #[derive(Parser, Debug)]
 #[command(name = "market-simulator")]
@@ -277,8 +279,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     }
 
     // Start the web server in a separate thread, passing it the event bus
+    let web_core = config.core_mapping.web_core;
     let _web_thread = std::thread::spawn({
-        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.web_core });
         let bus = bus.clone();
         let fix_tcp_addr = format!("{}:{}", config.tcp.ip, config.tcp.port);
         let grpc_addr    = format!("http://127.0.0.1:{}", config.grpc.port);
@@ -286,6 +288,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         let web_port = config.web.port;
         let web_shutdown = Arc::clone(&global_shutdown);
         move || {
+            core_affinity::set_for_current(core_affinity::CoreId { id: web_core });
             run_web_server(bus, fix_tcp_addr, grpc_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), web_shutdown);
         }
     });
@@ -295,7 +298,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     }
 
     // tcp server — each client pushes directly into fifo_in
-    let server: FixServer<RB_SIZE> = FixServer::new(Arc::clone(&net_to_fix_tx));
+    let server: FixServer<RB_SIZE> = FixServer::new(Arc::clone(&net_to_fix_tx), Arc::clone(&global_shutdown));
     let listener = TcpListener::bind(format!("{}:{}", config.tcp.ip, config.tcp.port)).unwrap();
 
     // Grab the shutdown flag before releasing the lock so the Ctrl-C handler
@@ -334,11 +337,11 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         market_simulator.thread_handles.lock().unwrap().grpc_thread = Some(_grpc_thread);
     }
 
-    tracing::info!("[{}] FIX server    -> {}:{}", config.name, config.tcp.ip, config.tcp.port);
-    tracing::info!("[{}] Web terminal  -> http://{}:{}", config.name, config.web.ip, config.web.port);
-    tracing::info!("[{}] gRPC control  -> {}:{}", config.name, config.grpc.ip, config.grpc.port);
-    tracing::info!("[{}] Market feed   -> {}:{}", config.name, config.market_feed_multicast.address, config.market_feed_multicast.port);
-    tracing::info!("[{}] Snapshot feed -> {}:{}", config.name, config.snapshot_multicast.address, config.snapshot_multicast.port);
+    tracing::info!("[{}] FIX server    -> {}:{}", utils::market_name(), config.tcp.ip, config.tcp.port);
+    tracing::info!("[{}] Web terminal  -> http://{}:{}", utils::market_name(), config.web.ip, config.web.port);
+    tracing::info!("[{}] gRPC control  -> {}:{}", utils::market_name(), config.grpc.ip, config.grpc.port);
+    tracing::info!("[{}] Market feed   -> {}:{}", utils::market_name(), config.market_feed_multicast.address, config.market_feed_multicast.port);
+    tracing::info!("[{}] Snapshot feed -> {}:{}", utils::market_name(), config.snapshot_multicast.address, config.snapshot_multicast.port);
 
     Ok(())
 }
@@ -407,11 +410,11 @@ fn main() {
     let config = MarketsConfig::parse_from_file(&cli.config_file);
 
     tracing_subscriber::fmt()
-        .with_env_filter("debug")
+        .with_env_filter("debug,sqlx=warn")
         .init();
 
     if config.markets.is_empty() {
-        eprintln!("No markets defined in config file '{}'", cli.config_file);
+        tracing::error!("No markets defined in config file '{}'", cli.config_file);
         std::process::exit(1);
     }
 
@@ -434,7 +437,7 @@ fn main() {
             .into_iter()
             .nth(index)
             .unwrap_or_else(|| {
-                eprintln!("Market index {index} out of range");
+                tracing::error!("Market index {index} out of range");
                 std::process::exit(1);
             });
 
@@ -461,7 +464,7 @@ fn main() {
         }));
 
         if let Err(e) = start_market(Arc::clone(&simulator)) {
-            eprintln!("Market failed to start: {e}");
+            tracing::error!("Market failed to start: {e}");
             std::process::exit(1);
         }
 

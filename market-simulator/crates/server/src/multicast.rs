@@ -2,6 +2,7 @@ use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use utils::market_name;
 
 use market_feed::types::{
     AddOrder, DeleteOrder, MarketDataHeader, MessageType, ModifyOrder, OrderBookSnapshot,
@@ -10,24 +11,8 @@ use market_feed::types::{
 use socket2::{Domain, Protocol, Socket, Type};
 use web::state::{EventBus, WsEvent};
 
-#[derive(Clone)]
-pub struct MulticastSource {
-    pub market: String,
-    pub address: String,
-    pub port: u16,
-}
+use types::multicast::{MulticastSource, SourceSocket};
 
-struct SourceSocket {
-    source: MulticastSource,
-    socket: UdpSocket,
-}
-
-fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
-}
 
 fn parse_market_data_message(packet: &[u8], market: &str) -> Option<(String, String)> {
     if packet.len() < 24 {

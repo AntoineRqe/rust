@@ -4,6 +4,7 @@ use std::ops::{Index};
 use std::iter::Sum;
 
 pub mod macros;
+pub mod multicast;
 
 use macros::{EntityId, OrderId};
 

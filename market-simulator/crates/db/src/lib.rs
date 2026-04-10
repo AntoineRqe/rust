@@ -6,6 +6,7 @@ use std::future::Future;
 use std::time::Instant;
 use std::time::Duration;
 use std::sync::OnceLock;
+use url::Url;
 use types::{
     FixedPointArithmetic,
     OrderEvent,
@@ -133,11 +134,84 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(10);
 
+    let schema = extract_search_path_from_database_url(database_url);
+    if let Some(schema) = &schema {
+        tracing::debug!("[{}] Using database schema/search_path '{}'", market_name(), schema);
+    }
+
     PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
+        .after_connect(move |conn, _meta| {
+            let schema = schema.clone();
+            Box::pin(async move {
+                if let Some(schema) = schema {
+                    query("SELECT set_config('search_path', $1, false)")
+                        .bind(schema)
+                        .execute(conn)
+                        .await?;
+                }
+
+                Ok(())
+            })
+        })
         .connect(database_url)
         .await
+}
+
+fn extract_search_path_from_database_url(database_url: &str) -> Option<String> {
+    let url = Url::parse(database_url).ok()?;
+
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "search_path" | "schema" | "currentSchema" => {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+            "options" => {
+                if let Some(schema) = extract_search_path_from_options(value.as_ref()) {
+                    return Some(schema);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn extract_search_path_from_options(options: &str) -> Option<String> {
+    for token in options.split_whitespace() {
+        if let Some(value) = token.strip_prefix("-csearch_path=") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        if let Some(value) = token.strip_prefix("--search_path=") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        if let Some(value) = token.strip_prefix("search_path=") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    if let Some((_, value)) = options.split_once("-c search_path=") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    None
 }
 
 pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -149,7 +223,7 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
 
     let order_event_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("public.order_event")
+        .bind("order_event")
         .fetch_one(&mut *tx)
         .await?;
 
@@ -219,7 +293,7 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
 
     let order_result_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("public.order_result")
+        .bind("order_result")
         .fetch_one(&mut *tx)
         .await?;
 
@@ -247,7 +321,7 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
 
     let trades_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("public.trades")
+        .bind("trades")
         .fetch_one(&mut *tx)
         .await?;
     if trades_exists.is_none() {
@@ -276,7 +350,7 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
 
     let pending_orders_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("public.pending_orders")
+        .bind("pending_orders")
         .fetch_one(&mut *tx)
         .await?;
     if pending_orders_exists.is_none() {

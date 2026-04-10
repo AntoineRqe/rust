@@ -5,13 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{bounded};
 use std::time::Duration;
-
-fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
-}
+use utils::market_name;
 
 fn response_queue_capacity() -> usize {
     static CAPACITY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -33,17 +27,12 @@ pub struct FixServer<const N: usize> {
 impl <'a, const N: usize> FixServer<N> {
     pub fn new(
         fifo_in: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
+        shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self { 
             fifo_in,
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown,
         }
-    }
-
-    /// Returns a handle to the shutdown flag so external code (e.g. the
-    /// Ctrl-C handler in main) can stop the accept loop cleanly.
-    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.shutdown)
     }
 
     pub fn accept_loop(&self, listener: TcpListener) {

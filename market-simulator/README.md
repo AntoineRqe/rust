@@ -63,6 +63,38 @@ export DATABASE_URL_NASDAQ=postgres://<user>:<password>@localhost:5432/market_na
 export DATABASE_URL_NYSE=postgres://<user>:<password>@localhost:5432/market_nyse
 ```
 
+The simulator creates its tables on startup. The PostgreSQL user in each URL must therefore be able to create and alter tables in the active schema.
+
+If your role cannot use `public`, either grant it access or point the connection at a schema you own via `search_path`, for example:
+
+```bash
+export DATABASE_URL_NASDAQ='postgres://<user>:<password>@localhost:5432/market_nasdaq?options=-csearch_path%3Dmarket_nasdaq'
+export DATABASE_URL_NYSE='postgres://<user>:<password>@localhost:5432/market_nyse?options=-csearch_path%3Dmarket_nyse'
+```
+
+Note: the schema named in `search_path` must already exist. PostgreSQL does not create a schema just because the database has the same name.
+
+Example setup:
+
+```sql
+CREATE DATABASE market_nasdaq;
+CREATE DATABASE market_nyse;
+
+-- The next commands must be run inside each target database, not in `postgres`.
+\c market_nasdaq
+CREATE SCHEMA market_nasdaq AUTHORIZATION <user>;
+
+\c market_nyse
+CREATE SCHEMA market_nyse AUTHORIZATION <user>;
+```
+
+If the schema already exists but belongs to another role, grant at least:
+
+```sql
+GRANT USAGE, CREATE ON SCHEMA market_nasdaq TO <user>;
+GRANT USAGE, CREATE ON SCHEMA market_nyse TO <user>;
+```
+
 Then run:
 
 To run the simulator, you can use the following command:

@@ -11,5 +11,6 @@ crossbeam-channel.workspace = true
 types = { path = "../types" }
 web = { path = "../web" }
 market-feed = { path = "../market-feed" }
+utils = { path = "../utils" }
 tracing.workspace = true
 socket2 = "0.6"

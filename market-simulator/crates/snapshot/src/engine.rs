@@ -1,7 +1,7 @@
 use spsc::spsc_lock_free::{Consumer};
 use std::sync::{Arc, atomic::{AtomicBool}};
 use crate::types::Snapshot;
-use utils::{MultiCastInfo};
+use types::multicast::MultiCastInfo;
 
 pub struct SnapshotMultiCastEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, Snapshot, N>,

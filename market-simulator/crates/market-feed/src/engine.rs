@@ -18,7 +18,8 @@ use crate::types::{
     Trade,
 };
 
-use utils::{MultiCastInfo, market_name};
+use utils::market_name;
+use types::multicast::MultiCastInfo;
 
 
 pub struct MarketDataFeedEngine<'a, const N: usize> {
