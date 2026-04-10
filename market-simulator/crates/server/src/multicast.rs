@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -8,7 +8,6 @@ use market_feed::types::{
     AddOrder, DeleteOrder, MarketDataHeader, MessageType, ModifyOrder, OrderBookSnapshot,
     SNAPSHOT_BYTES, Trade,
 };
-use socket2::{Domain, Protocol, Socket, Type};
 use web::state::{EventBus, WsEvent};
 
 use types::multicast::{MulticastSource, SourceSocket};
@@ -146,18 +145,6 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<(String, Str
     Some((label, details))
 }
 
-fn create_multicast_socket(port: u16) -> std::io::Result<UdpSocket> {
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-
-    #[cfg(unix)]
-    socket.set_reuse_port(true)?;
-
-    let bind_addr = std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
-    socket.bind(&bind_addr.into())?;
-    Ok(socket.into())
-}
-
 pub fn spawn_market_feed_receiver(
     bus: EventBus,
     sources: Vec<MulticastSource>,
@@ -168,7 +155,7 @@ pub fn spawn_market_feed_receiver(
 
         for source in sources {
             let bind_addr = format!("0.0.0.0:{}", source.port);
-            let socket = match create_multicast_socket(source.port) {
+            let socket = match SourceSocket::create_multicast_socket(source.port) {
                 Ok(socket) => socket,
                 Err(e) => {
                     tracing::warn!(
@@ -182,14 +169,14 @@ pub fn spawn_market_feed_receiver(
                 }
             };
 
-            let group = match source.address.parse::<Ipv4Addr>() {
+            let group = match source.ip.parse::<Ipv4Addr>() {
                 Ok(group) => group,
                 Err(e) => {
                     tracing::warn!(
                         "[{}] Invalid multicast address for {} ({}): {}",
                         market_name(),
                         source.market,
-                        source.address,
+                        source.ip,
                         e
                     );
                     continue;
@@ -200,7 +187,7 @@ pub fn spawn_market_feed_receiver(
                 tracing::warn!(
                     "[{}] Failed to join multicast group {}:{} for {}: {}",
                     market_name(),
-                    source.address,
+                    source.ip,
                     source.port,
                     source.market,
                     e
@@ -213,7 +200,7 @@ pub fn spawn_market_feed_receiver(
             tracing::info!(
                 "[{}] Subscribed to market-feed multicast {}:{} ({})",
                 market_name(),
-                source.address,
+                source.ip,
                 source.port,
                 source.market
             );

@@ -1,12 +1,13 @@
 use spsc::spsc_lock_free::{Consumer};
+use utils::market_name;
 use std::sync::{Arc, atomic::{AtomicBool}};
 use crate::types::Snapshot;
-use types::multicast::MultiCastInfo;
+use types::multicast::{SourceSocket};
 
 pub struct SnapshotMultiCastEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, Snapshot, N>,
     shutdown: Arc<AtomicBool>,
-    multicast_info: MultiCastInfo,
+    source: SourceSocket,
 }
 
 impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
@@ -14,7 +15,7 @@ impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
         Self { 
             fifo_in,
             shutdown,
-            multicast_info: MultiCastInfo::new(ip, port),
+            source: SourceSocket::new(ip, port, market_name()).expect("Failed to create multicast socket for SnapshotMultiCastEngine"),
         }
     }
 
@@ -24,20 +25,20 @@ impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
                 // Process the snapshot
                 // For example, you can update the order book snapshot based on the snapshot
                 if snapshot.timestamp == 0 {
-                    tracing::info!("[{}] Received shutdown signal, stopping SnapshotMultiCastEngine", utils::market_name());
+                    tracing::info!("[{}] Received shutdown signal, stopping SnapshotMultiCastEngine", market_name());
                     continue;
                 }
 
-                tracing::debug!("[{}] Received snapshot: {:?}", utils::market_name(), snapshot);
+                tracing::debug!("[{}] Received snapshot: {:?}", market_name(), snapshot);
 
                 // Process incoming order events and results from the order book engine
                 // Transform the order event and result into a market data feed event
                 let bytes = [0u8; 256]; // TODO: serialize the snapshot into bytes
-                let _ = self.multicast_info.socket.send_to(&bytes, &self.multicast_info.addr);
+                let _ = self.source.socket.send_to(&bytes, &self.source.source.address);
             }
         }
 
-        tracing::info!("[{}] SnapshotMultiCastEngine stopped", utils::market_name());
+        tracing::info!("[{}] SnapshotMultiCastEngine stopped", market_name());
     }
 }
 

@@ -11,7 +11,7 @@ pub struct Connection {
 
 #[derive(Clone, Deserialize)]
 pub struct MulticastConfig {
-    pub address: String,
+    pub ip: String,
     pub port: u16,
 }
 

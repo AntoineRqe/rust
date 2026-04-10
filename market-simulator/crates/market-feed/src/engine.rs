@@ -7,7 +7,6 @@ use types::{
     }
 };
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}};
-use std::net::UdpSocket;
 use crate::types::{
     AddOrder,
     DeleteOrder,
@@ -19,26 +18,23 @@ use crate::types::{
 };
 
 use utils::market_name;
-use types::multicast::MultiCastInfo;
+use types::multicast::{SourceSocket};
 
 
 pub struct MarketDataFeedEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
     shutdown: Arc<AtomicBool>,
-    socket: Option<std::net::UdpSocket>, // Optional socket for broadcasting market data feed events
     seq_num: u64, // Sequence number for market data feed events
-    multicast_info: MultiCastInfo, // Multicast configuration and socket management
+    source: SourceSocket, // Multicast configuration and socket management
 }
 
 impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
     pub fn new(fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
                shutdown: Arc<AtomicBool>,
-               addr: &str,
+               ip: &str,
                port: u16) -> Result<Self, std::io::Error> {
 
-        let socket = UdpSocket::bind(format!("0.0.0.0:0"))?;
-
-        Ok(Self { fifo_in, shutdown, socket: Some(socket), seq_num: 0, multicast_info: MultiCastInfo::new(addr, port) })
+        Ok(Self { fifo_in, shutdown, seq_num: 0, source: SourceSocket::new(ip, port, market_name())? })
     }
 
     fn build_add_order_event(&self, order_event: &OrderEvent) -> AddOrder {
@@ -156,12 +152,10 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
                     // Transform the order event and result into a market data feed event
                     tracing::debug!("[{}] Received order event: {:?}, result: {:?}", market_name(), order_event, order_result);
                     let market_data_feed_events = self.build_market_data_feed_events(&order_event, &order_result);
-                    if let Some(socket) = &self.socket {
-                        for market_data_feed_event in market_data_feed_events {
-                            let bytes = market_data_feed_event.to_bytes();
-                            tracing::info!("[{}] Broadcasting market data feed event: header={:?}, event={:?}", market_name(), market_data_feed_event, market_data_feed_event);
-                            let _ = socket.send_to(&bytes, &self.multicast_info.addr);
-                        }
+                    for market_data_feed_event in market_data_feed_events {
+                        let bytes = market_data_feed_event.to_bytes();
+                        tracing::info!("[{}] Broadcasting market data feed event: header={:?}, event={:?}", market_name(), market_data_feed_event, market_data_feed_event);
+                        let _ = self.source.socket.send_to(&bytes, &self.source.source.address);
                     }
                 }
             }
@@ -213,7 +207,7 @@ mod tests {
 
     fn retrieve_market_data_feed_events(port: u16, multicast_ip: &str) -> Result<(MarketDataHeader, MarketEvent), Box<dyn std::error::Error>> {
         // 0.0.0.0 is used to listen on all interfaces
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
+        let socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port))?;
         socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
 
         let group = multicast_ip.parse::<Ipv4Addr>()?;

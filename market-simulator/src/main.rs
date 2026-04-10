@@ -9,6 +9,7 @@ use server::tcp::{
 };
 use server::multicast::{spawn_market_feed_receiver};
 use types::multicast::MulticastSource;
+use utils::market_name;
 use std::sync::{Arc, Mutex};
 use crossbeam::{channel};
 use fix::engine::{FixEngine, FixRawMsg};
@@ -39,18 +40,25 @@ struct Cli {
 }
 
 struct ThreadHandles {
-    fix_inbound_thread: Option<std::thread::JoinHandle<()>>,
-    fix_outbound_thread: Option<std::thread::JoinHandle<()>>,
-    ob_thread: Option<std::thread::JoinHandle<()>>,
-    er_thread: Option<std::thread::JoinHandle<()>>,
-    market_feed_thread: Option<std::thread::JoinHandle<()>>,
-    multicast_receiver_thread: Option<std::thread::JoinHandle<()>>,
-    db_thread: Option<std::thread::JoinHandle<()>>,
-    web_thread: Option<std::thread::JoinHandle<()>>,
-    tcp_thread: Option<std::thread::JoinHandle<()>>,
-    grpc_thread: Option<std::thread::JoinHandle<()>>,
-    snapshot_thread: Option<std::thread::JoinHandle<()>>,
-    snapshot_generation_thread: Option<std::thread::JoinHandle<()>>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl ThreadHandles {
+    fn new() -> Self {
+        ThreadHandles {
+            handles: Vec::new(),
+        }
+    }
+
+    fn add_handle(&mut self, handle: std::thread::JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+
+    fn join_all(&mut self) {
+        for handle in self.handles.drain(..) {
+            handle.join().expect("Failed to join thread");
+        }
+    }
 }
 
 struct MarketSimulator {
@@ -119,7 +127,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     );
 
     {
-        market_simulator.thread_handles.lock().unwrap().multicast_receiver_thread = Some(_multicast_receiver_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_multicast_receiver_thread);
     }
 
     // Initialization of shared queues for inter-thread communication
@@ -143,7 +151,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().er_thread = Some(_er_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_er_thread);
     }
 
     // DB engine thread
@@ -186,7 +194,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().db_thread = Some(_db_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_db_thread);
     }
 
     // Order-book control channel (used by the gRPC reset service).
@@ -207,7 +215,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().ob_thread = Some(_ob_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_ob_thread);
     }
 
     // Snapshot generation thread (reads from order book and pushes to multicast engine)
@@ -219,14 +227,14 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().snapshot_generation_thread = Some(_snapshot_generation_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_snapshot_generation_thread);
     }
 
     // Snapshot multicast engine thread
     let mut snapshot_engine = snapshot::engine::SnapshotMultiCastEngine::new(
         ob_ss_rx,
         Arc::clone(&global_shutdown),
-        &config.snapshot_multicast.address,
+        &config.snapshot_multicast.ip,
         config.snapshot_multicast.port,
     );
 
@@ -237,14 +245,14 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().snapshot_thread = Some(_snapshot_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_snapshot_thread);
     }
 
     // Market feed engine thread
     let mut market_feed_engine = MarketDataFeedEngine::new(
         ob_md_rx,
         Arc::clone(&global_shutdown),
-        &config.market_feed_multicast.address,
+        &config.market_feed_multicast.ip,
         config.market_feed_multicast.port,
     )?;
 
@@ -255,7 +263,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().market_feed_thread = Some(_market_feed_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_market_feed_thread);
     }
 
     // fix engine thread
@@ -274,8 +282,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 
     {
         let mut thread_handles = market_simulator.thread_handles.lock().unwrap();
-        thread_handles.fix_inbound_thread = Some(_fix_inbound_thread);
-        thread_handles.fix_outbound_thread = Some(_fix_outbound_thread);
+        thread_handles.add_handle(_fix_inbound_thread);
+        thread_handles.add_handle(_fix_outbound_thread);
     }
 
     // Start the web server in a separate thread, passing it the event bus
@@ -294,7 +302,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().web_thread = Some(_web_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_web_thread);
     }
 
     // tcp server — each client pushes directly into fifo_in
@@ -311,7 +319,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().tcp_thread = Some(_tcp_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_tcp_thread);
     }
 
     // gRPC MarketControl server — handles ResetMarket (order book + DB).
@@ -334,14 +342,14 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     });
 
     {
-        market_simulator.thread_handles.lock().unwrap().grpc_thread = Some(_grpc_thread);
+        market_simulator.thread_handles.lock().unwrap().add_handle(_grpc_thread);
     }
 
     tracing::info!("[{}] FIX server    -> {}:{}", utils::market_name(), config.tcp.ip, config.tcp.port);
     tracing::info!("[{}] Web terminal  -> http://{}:{}", utils::market_name(), config.web.ip, config.web.port);
     tracing::info!("[{}] gRPC control  -> {}:{}", utils::market_name(), config.grpc.ip, config.grpc.port);
-    tracing::info!("[{}] Market feed   -> {}:{}", utils::market_name(), config.market_feed_multicast.address, config.market_feed_multicast.port);
-    tracing::info!("[{}] Snapshot feed -> {}:{}", utils::market_name(), config.snapshot_multicast.address, config.snapshot_multicast.port);
+    tracing::info!("[{}] Market feed   -> {}:{}", utils::market_name(), config.market_feed_multicast.ip, config.market_feed_multicast.port);
+    tracing::info!("[{}] Snapshot feed -> {}:{}", utils::market_name(), config.snapshot_multicast.ip, config.snapshot_multicast.port);
 
     Ok(())
 }
@@ -365,44 +373,10 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
     }
 
     let thread_handles = &mut thread_handles.lock().unwrap();
+    thread_handles.join_all();
+    
 
-    if let Some(handle) = thread_handles.fix_inbound_thread.take() {
-        handle.join().expect("Failed to join FIX inbound thread");
-    }
-    if let Some(handle) = thread_handles.fix_outbound_thread.take() {
-        handle.join().expect("Failed to join FIX outbound thread");
-    }
-    if let Some(handle) = thread_handles.ob_thread.take() {
-        handle.join().expect("Failed to join Order Book thread");
-    }
-    if let Some(handle) = thread_handles.er_thread.take() {
-        handle.join().expect("Failed to join Execution Report thread");
-    }
-    if let Some(handle) = thread_handles.market_feed_thread.take() {
-        handle.join().expect("Failed to join Market Feed thread");
-    }
-    if let Some(handle) = thread_handles.snapshot_thread.take() {
-        handle.join().expect("Failed to join Snapshot thread");
-    }
-    if let Some(handle) = thread_handles.snapshot_generation_thread.take() {
-        handle.join().expect("Failed to join Snapshot Generation thread");
-    }
-    if let Some(handle) = thread_handles.multicast_receiver_thread.take() {
-        handle.join().expect("Failed to join Multicast Receiver thread");
-    }
-    if let Some(handle) = thread_handles.db_thread.take() {
-        handle.join().expect("Failed to join Database thread");
-    }
-    if let Some(handle) = thread_handles.web_thread.take() {
-        handle.join().expect("Failed to join Web Server thread");
-    }
-    if let Some(handle) = thread_handles.tcp_thread.take() {
-        handle.join().expect("Failed to join TCP Server thread");
-    }
-    // Join gRPC server thread after signaling grpc_shutdown.
-    if let Some(handle) = thread_handles.grpc_thread.take() {
-        handle.join().expect("Failed to join gRPC Server thread");
-    }
+     tracing::info!("[{}] All threads stopped, market simulator exiting", market_name());
 }
 
 fn main() {
@@ -420,17 +394,17 @@ fn main() {
 
     // ── Single-market mode (child process) ──────────────────────────────────
     if let Some(index) = cli.market_index {
-        let market_feed_sources = config.markets.iter().map(|market| MulticastSource {
-            market: market.name.clone(),
-            address: market.market_feed_multicast.address.clone(),
-            port: market.market_feed_multicast.port,
-        }).collect::<Vec<_>>();
+        let market_feed_sources = config.markets.iter().map(|market| MulticastSource::new(
+            market.market_feed_multicast.ip.as_str(),
+            market.market_feed_multicast.port,
+            market_name()
+        )).collect::<Vec<_>>();
 
-        let market_snapshot_sources = config.markets.iter().map(|market| MulticastSource {
-            market: market.name.clone(),
-            address: market.snapshot_multicast.address.clone(),
-            port: market.snapshot_multicast.port,
-        }).collect::<Vec<_>>();
+        let market_snapshot_sources = config.markets.iter().map(|market| MulticastSource::new(
+            market.snapshot_multicast.ip.as_str(),
+            market.snapshot_multicast.port,
+            market_name()
+        )).collect::<Vec<_>>();
 
         let market_config = config
             .markets
@@ -443,20 +417,7 @@ fn main() {
 
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,
-            thread_handles: Arc::new(Mutex::new(ThreadHandles {
-                fix_inbound_thread: None,
-                fix_outbound_thread: None,
-                ob_thread: None,
-                er_thread: None,
-                market_feed_thread: None,
-                multicast_receiver_thread: None,
-                db_thread: None,
-                web_thread: None,
-                tcp_thread: None,
-                grpc_thread: None,
-                snapshot_thread: None,
-                snapshot_generation_thread: None,
-            })),
+            thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
             entry_point: None,
             shutdown: None,
             market_feed_sources,

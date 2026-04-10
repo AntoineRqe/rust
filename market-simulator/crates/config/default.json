@@ -17,11 +17,11 @@
                 "port": 50051
             },
             "market_feed_multicast": {
-                "address": "239.0.0.1",
+                "ip": "239.0.0.1",
                 "port": 9001
             },
             "snapshot_multicast": {
-                "address": "239.0.0.1",
+                "ip": "239.0.0.1",
                 "port": 9002
             },
             "snapshot": {
@@ -57,11 +57,11 @@
                 "port": 50052
             },
             "market_feed_multicast": {
-                "address": "239.0.0.1",
+                "ip": "239.0.0.1",
                 "port": 9003
             },
             "snapshot_multicast": {
-                "address": "239.0.0.4",
+                "ip": "239.0.0.1",
                 "port": 9004
             },
             "snapshot": {
