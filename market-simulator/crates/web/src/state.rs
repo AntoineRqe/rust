@@ -38,6 +38,7 @@ pub enum WsEvent {
         username: String,
         tokens: f64,
         pending_orders: Vec<PendingOrder>,
+        is_admin: bool,
         /// Last 4 characters of the stored password hash — used by the browser
         /// as a stable, unique suffix in ClOrdID generation.
         id_suffix: String,

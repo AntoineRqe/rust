@@ -174,6 +174,9 @@ const userEl = document.getElementById('username');
 const passEl = document.getElementById('password');
 const btn    = document.getElementById('btn-login');
 const errEl  = document.getElementById('error-msg');
+const pageParams = new URLSearchParams(window.location.search);
+const requestedMarket = (pageParams.get('market') || '').toUpperCase();
+const requestedUsername = pageParams.get('username') || '';
 
 // ── load markets ──────────────────────────────────────────────────────────────
 async function loadMarkets() {
@@ -196,12 +199,23 @@ async function loadMarkets() {
       sel.appendChild(opt);
     });
 
+    if (requestedMarket) {
+      for (const opt of sel.options) {
+        if (String(opt.textContent || '').toUpperCase() === requestedMarket) {
+          opt.selected = true;
+          break;
+        }
+      }
+    }
+
     // If we're already on a market's server, pre-select it.
     const origin = location.origin;
-    for (const opt of sel.options) {
-      if (opt.value === origin) {
-        opt.selected = true;
-        break;
+    if (!requestedMarket) {
+      for (const opt of sel.options) {
+        if (opt.value === origin) {
+          opt.selected = true;
+          break;
+        }
       }
     }
   } catch (e) {
@@ -210,6 +224,10 @@ async function loadMarkets() {
 }
 
 loadMarkets();
+
+if (requestedUsername) {
+  userEl.value = requestedUsername;
+}
 
 // ── login ─────────────────────────────────────────────────────────────────────
 function showError(msg) {
@@ -256,11 +274,17 @@ async function doLogin() {
       return;
     }
 
-    // Cross-origin handoff: pass token in query so the selected market app
-    // can store it in its own origin-scoped sessionStorage.
+    try {
+      localStorage.setItem('last_username', data.username || username);
+    } catch (_) {}
+
+    // Cross-origin handoff: pass token + credentials in query so the selected
+    // market app can store them in its own origin-scoped sessionStorage.
     const token = encodeURIComponent(data.token || '');
     const usernameSafe = encodeURIComponent(data.username || username);
-    location.href = `${marketUrl}/app?token=${token}&username=${usernameSafe}`;
+    const passwordSafe = encodeURIComponent(password);
+    const adminSafe = encodeURIComponent(String(!!data.is_admin));
+    location.href = `${marketUrl}/app?token=${token}&username=${usernameSafe}&password=${passwordSafe}&is_admin=${adminSafe}`;
   } catch (e) {
     showError('Could not reach market server.');
     setLoading(false);
@@ -274,7 +298,16 @@ btn.addEventListener('click', doLogin);
 });
 
 // Auto-focus username field
-userEl.focus();
+if (!userEl.value) {
+  try {
+    userEl.value = localStorage.getItem('last_username') || '';
+  } catch (_) {}
+}
+if (userEl.value) {
+  passEl.focus();
+} else {
+  userEl.focus();
+}
 </script>
 </body>
 </html>

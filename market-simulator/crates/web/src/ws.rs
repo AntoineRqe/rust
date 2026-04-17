@@ -9,7 +9,7 @@ use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Deserialize;
-use crate::server::{AppState, authenticate_token};
+use crate::server::{AppState, SessionInfo, authenticate_token};
 use crate::state::{WsEvent, BrowserCommand, PendingOrder};
 
 fn market_name() -> &'static str {
@@ -30,18 +30,20 @@ pub async fn ws_handler(
     Query(params): Query<WsParams>,
 ) -> impl IntoResponse {
     let token = params.token.unwrap_or_default();
-    let Some(username) = authenticate_token(&state, &token) else {
+    let Some(session) = authenticate_token(&state, &token) else {
         return (StatusCode::UNAUTHORIZED, "Invalid or missing session token").into_response();
     };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, username))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, session))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
+async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo) {
     // Split into sender and receiver so we can use both concurrently
     // in the select! loop without borrow issues.
     let (mut sender, mut receiver) = socket.split();
     let mut rx: tokio::sync::broadcast::Receiver<WsEvent> = state.bus.subscribe();
+    let username = session.username.clone();
+    let is_admin = session.is_admin;
 
     let tcp_stream = match TcpStream::connect(&state.fix_tcp_addr) {
         Ok(stream) => stream,
@@ -131,16 +133,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
     let _ = sender.send(Message::Text(status.into())).await;
 
     // Send the player's current state (tokens + pending orders) on every new connection.
-    if let Some(player) = state.player_store.get_player(&username) {
-        let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
-        let ps = serde_json::to_string(&WsEvent::PlayerState {
-            username: player.username.clone(),
-            tokens:   player.tokens,
-            pending_orders: player.pending_orders.clone(),
-            id_suffix,
-        }).unwrap();
-        let _ = sender.send(Message::Text(ps.into())).await;
-    }
+    send_player_state(&mut sender, &state, &username, is_admin).await;
 
     tracing::debug!("[{}] Browser WebSocket connected", market_name());
 
@@ -165,16 +158,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
                                 // always refresh this socket's player state so every client
                                 // sees up-to-date tokens/pending orders.
                                 state.player_store.apply_fix_execution_report(body);
-                                if let Some(player) = state.player_store.get_player(&username) {
-                                    let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
-                                    let ps = serde_json::to_string(&WsEvent::PlayerState {
-                                        username: player.username.clone(),
-                                        tokens:   player.tokens,
-                                        pending_orders: player.pending_orders.clone(),
-                                        id_suffix,
-                                    }).unwrap();
-                                    let _ = sender.send(Message::Text(ps.into())).await;
-                                }
+                                send_player_state(&mut sender, &state, &username, is_admin).await;
                             }
                         }
 
@@ -194,18 +178,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_browser_message(&text, &state, &username, &tcp_writer).await;
+                        handle_browser_message(&text, &state, &username, is_admin, &tcp_writer).await;
                         // After every command, push the updated player state to this client.
-                        if let Some(player) = state.player_store.get_player(&username) {
-                            let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
-                            let ps = serde_json::to_string(&WsEvent::PlayerState {
-                                username: player.username.clone(),
-                                tokens:   player.tokens,
-                                pending_orders: player.pending_orders.clone(),
-                                id_suffix,
-                            }).unwrap();
-                            let _ = sender.send(Message::Text(ps.into())).await;
-                        }
+                        send_player_state(&mut sender, &state, &username, is_admin).await;
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         tracing::debug!("[{}] Browser disconnected", market_name());
@@ -229,7 +204,50 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String) {
     state.bus.publish(WsEvent::Status { connected: false });
 }
 
-async fn handle_browser_message(text: &str, state: &AppState, username: &str, tcp_writer: &Arc<Mutex<TcpStream>>) {
+async fn send_player_state(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    state: &AppState,
+    username: &str,
+    is_admin: bool,
+) {
+    let event = if let Some(player) = state.player_store.get_player(username) {
+        let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
+        WsEvent::PlayerState {
+            username: player.username.clone(),
+            tokens: player.tokens,
+            pending_orders: player.pending_orders.clone(),
+            is_admin,
+            id_suffix,
+        }
+    } else {
+        WsEvent::PlayerState {
+            username: username.to_string(),
+            tokens: 0.0,
+            pending_orders: Vec::new(),
+            is_admin,
+            id_suffix: String::new(),
+        }
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let _ = sender.send(Message::Text(json.into())).await;
+}
+
+fn require_admin(state: &AppState, username: &str, is_admin: bool) -> bool {
+    if is_admin {
+        return true;
+    }
+
+    state.bus.publish(WsEvent::FixMessage {
+        label: "ADMIN ONLY".into(),
+        body: "This action is reserved to the admin user.".into(),
+        tag: "err".into(),
+        recipient: Some(username.to_string()),
+    });
+    false
+}
+
+async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool, tcp_writer: &Arc<Mutex<TcpStream>>) {
     tracing::debug!("[{}] Received message from browser: {text}", market_name());
     let cmd: BrowserCommand = match serde_json::from_str(text) {
         Ok(c)  => c,
@@ -319,6 +337,9 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, tc
         }
 
         BrowserCommand::ResetSeq => {
+            if !require_admin(state, username, is_admin) {
+                return;
+            }
             // We'll handle sequence numbers in the FIX engine
             // For now just ack it
             state.bus.publish(WsEvent::FixMessage {
@@ -330,6 +351,9 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, tc
         }
 
         BrowserCommand::ClearBook => {
+            if !require_admin(state, username, is_admin) {
+                return;
+            }
             use grpc::proto::market_control_client::MarketControlClient;
             use grpc::proto::ResetRequest;
             match MarketControlClient::connect(state.grpc_addr.clone()).await {
@@ -387,17 +411,22 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, tc
         }
 
         BrowserCommand::ResetTokens => {
-            if state.player_store.reset_tokens(username) {
+            if !require_admin(state, username, is_admin) {
+                return;
+            }
+
+            let players_reset = state.player_store.reset_all_tokens();
+            if players_reset > 0 {
                 state.bus.publish(WsEvent::FixMessage {
                     label: "INFO".into(),
-                    body: "Player token balance reset to initial value.".into(),
+                    body: format!("Reset token balances for {players_reset} player(s)."),
                     tag: "info".into(),
-                    recipient: Some(username.to_string()),
+                    recipient: None,
                 });
             } else {
                 state.bus.publish(WsEvent::FixMessage {
                     label: "ERROR".into(),
-                    body: "Unable to reset tokens: player not found.".into(),
+                    body: "Unable to reset tokens: no players found.".into(),
                     tag: "err".into(),
                     recipient: Some(username.to_string()),
                 });

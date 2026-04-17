@@ -35,6 +35,12 @@ pub struct MarketInfo {
     pub url: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct SessionInfo {
+    pub username: String,
+    pub is_admin: bool,
+}
+
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
 #[derive(Clone)]
 pub struct AppState {
@@ -47,8 +53,8 @@ pub struct AppState {
     pub player_store: PlayerStore,
     /// All configured markets (name + web URL), sent to the login page.
     pub known_markets: Vec<MarketInfo>,
-    /// Active sessions: token → username.
-    pub sessions: Arc<Mutex<HashMap<String, String>>>,
+    /// Active sessions: token → session metadata.
+    pub sessions: Arc<Mutex<HashMap<String, SessionInfo>>>,
 }
 
 /// Generate a cryptographically random 128-bit hex token.
@@ -58,9 +64,15 @@ pub(crate) fn generate_token() -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Look up a session token and return the associated username.
-pub(crate) fn authenticate_token(state: &AppState, token: &str) -> Option<String> {
+/// Look up a session token and return the associated session metadata.
+pub(crate) fn authenticate_token(state: &AppState, token: &str) -> Option<SessionInfo> {
     state.sessions.lock().unwrap().get(token).cloned()
+}
+
+fn admin_password() -> Option<String> {
+    std::env::var("MARKET_SIMULATOR_ADMIN_PWD")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 pub fn run_web_server(
@@ -153,13 +165,17 @@ async fn login_page_handler() -> impl IntoResponse {
 
 /// Serve the trading terminal. Auth is enforced client-side via sessionStorage
 /// token; the WebSocket upgrade enforces it server-side.
-async fn app_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn app_handler(State(state): State<AppState>) -> impl IntoResponse {
     let market = market_name();
     let login_gateway_url = std::env::var("LOGIN_GATEWAY_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:9875".to_string());
+    let markets_json = serde_json::to_string(&state.known_markets)
+        .unwrap_or_else(|_| "[]".to_string());
     let html = include_str!("../frontend/index.html")
         .replace("{{MARKET_NAME}}", market)
-        .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url);
+        .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url)
+        .replace("{{CURRENT_MARKET_NAME}}", market)
+        .replace("{{MARKETS_JSON}}", &markets_json);
     Html(html)
 }
 
@@ -175,14 +191,48 @@ async fn api_login_handler(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    let admin_login = body.username.eq_ignore_ascii_case("admin")
+        && admin_password().as_deref() == Some(body.password.as_str());
+
+    if admin_login {
+        let token = generate_token();
+        state.sessions.lock().unwrap().insert(
+            token.clone(),
+            SessionInfo {
+                username: "admin".to_string(),
+                is_admin: true,
+            },
+        );
+        tracing::info!("[{}] Admin session created", market_name());
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "token": token,
+                "username": "admin",
+                "is_admin": true
+            })),
+        )
+            .into_response();
+    }
+
     match state.player_store.authenticate_or_register(&body.username, &body.password) {
         Ok(username) => {
             let token = generate_token();
-            state.sessions.lock().unwrap().insert(token.clone(), username.clone());
+            state.sessions.lock().unwrap().insert(
+                token.clone(),
+                SessionInfo {
+                    username: username.clone(),
+                    is_admin: false,
+                },
+            );
             tracing::info!("[{}] Session created for '{username}'", market_name());
             (
                 StatusCode::OK,
-                Json(serde_json::json!({ "token": token, "username": username })),
+                Json(serde_json::json!({
+                    "token": token,
+                    "username": username,
+                    "is_admin": false
+                })),
             )
                 .into_response()
         }

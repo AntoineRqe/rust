@@ -30,7 +30,7 @@
             },
             "snapshot": {
                 "max_depth": 5,
-                "update_interval_ms": 1500
+                "update_interval_ms": 100000
             },
             "core_mapping": {
                 "order_book_core": 0,
@@ -70,7 +70,7 @@
             },
             "snapshot": {
                 "max_depth": 3,
-                "update_interval_ms": 1000
+                "update_interval_ms": 100000
             },
             "core_mapping": {
                 "order_book_core": 0,

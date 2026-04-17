@@ -28,6 +28,13 @@
   #ws-dot{font-size:10px;color:var(--muted);white-space:nowrap;flex-shrink:0}
   #ws-dot.on{color:var(--teal)}
   #token-balance{font-size:11px;color:var(--gold);white-space:nowrap;flex-shrink:0}
+  #market-switch{background:#0e1520;color:var(--teal);border:1px solid var(--border);
+                 min-width:150px;height:30px;display:inline-flex;align-items:center;
+                 justify-content:center;font-size:10px;font-weight:bold;
+                 letter-spacing:.05em;padding:0 10px;text-transform:uppercase;
+                 white-space:nowrap;flex-shrink:0;border-radius:4px}
+  #market-switch:hover{border-color:var(--blue);color:var(--text)}
+  #market-switch:disabled{opacity:.35;cursor:not-allowed}
 
   /* ── mobile tab bar ── */
   #tabbar{display:none;background:var(--panel);border-bottom:1px solid var(--border);
@@ -215,6 +222,7 @@
 
 <div id="topbar">
   <h1>&#x2B21; FIX 4.2 &nbsp;ORDER &amp; MARKET DATA TERMINAL &nbsp;[{{MARKET_NAME}}]</h1>
+  <button id="market-switch" onclick="switchMarket()" title="Switch market" aria-label="Switch market">Switch market</button>
   <span id="token-balance">TOKENS: &#8212;</span>
   <span id="ws-dot">&#9679; WS</span>
   <span id="status-dot">&#9679; DISCONNECTED</span>
@@ -272,9 +280,9 @@
   <button class="md-btn" id="md-Y" onclick="openDlg('Y')" disabled>Y &nbsp; MD Request Reject</button>
 
   <div class="footer-row">
-    <button class="ghost" onclick="send({action:'clear_book'})">clear book</button>
-    <button class="ghost" onclick="send({action:'reset_seq'})">reset seq</button>
-    <button class="ghost" onclick="send({action:'reset_tokens'})">reset tokens</button>
+    <button class="ghost" id="btn-clear-book" onclick="send({action:'clear_book'})" disabled>clear book</button>
+    <button class="ghost" id="btn-reset-seq" onclick="send({action:'reset_seq'})" disabled>reset seq</button>
+    <button class="ghost" id="btn-reset-tokens" onclick="send({action:'reset_tokens'})" disabled>reset tokens</button>
   </div>
 </div>
 
@@ -333,17 +341,27 @@
 const params = new URLSearchParams(window.location.search);
 const tokenFromQuery = params.get('token');
 const usernameFromQuery = params.get('username');
+const passwordFromQuery = params.get('password');
+const adminFromQuery = params.get('is_admin');
 
 if (tokenFromQuery) {
   sessionStorage.setItem('auth_token', tokenFromQuery);
   if (usernameFromQuery) {
     sessionStorage.setItem('auth_username', usernameFromQuery);
   }
+  if (passwordFromQuery) {
+    sessionStorage.setItem('auth_password', passwordFromQuery);
+  }
+  if (adminFromQuery !== null) {
+    sessionStorage.setItem('auth_is_admin', adminFromQuery);
+  }
   // Remove secrets from URL after one-time handoff.
   history.replaceState({}, '', '/app');
 }
 
 const LOGIN_GATEWAY_URL = '{{LOGIN_GATEWAY_URL}}';
+const CURRENT_MARKET_NAME = '{{CURRENT_MARKET_NAME}}';
+const KNOWN_MARKETS = {{MARKETS_JSON}};
 const AUTH_TOKEN = sessionStorage.getItem('auth_token');
 if (!AUTH_TOKEN) {
   // No token — send back to the central login gateway
@@ -360,11 +378,99 @@ const ORDER_PENDING_TIMEOUT_MS = 30000;
 const UI_RENDER_DELAY_MS = 120;
 const PENDING_VISIBILITY_DELAY_MS = 250;
 let currentPlayer = null;
+let currentIsAdmin = sessionStorage.getItem('auth_is_admin') === 'true';
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
 let lastTokenBalance = null;
 let playerStateTimer = null;    // debounce handle for handlePlayerState
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
+
+function getNextMarket() {
+  if (!Array.isArray(KNOWN_MARKETS) || KNOWN_MARKETS.length < 2) return null;
+  const currentIndex = KNOWN_MARKETS.findIndex(m => (m.name || '').toUpperCase() === CURRENT_MARKET_NAME.toUpperCase());
+  if (currentIndex === -1) return KNOWN_MARKETS[0] || null;
+  return KNOWN_MARKETS[(currentIndex + 1) % KNOWN_MARKETS.length] || null;
+}
+
+function updateMarketSwitchButton() {
+  const btn = ge('market-switch');
+  const nextMarket = getNextMarket();
+  if (!btn) return;
+  if (!nextMarket) {
+    btn.textContent = 'Single market';
+    btn.title = 'Single market configured';
+    btn.setAttribute('aria-label', 'Single market configured');
+    btn.disabled = true;
+    return;
+  }
+  const nextName = String(nextMarket.name || '').toUpperCase();
+  btn.textContent = `Switch to ${nextName}`;
+  btn.title = `Switch to ${nextName}`;
+  btn.setAttribute('aria-label', `Switch to ${nextName}`);
+  btn.disabled = false;
+}
+
+function setAdminControlsEnabled(enabled) {
+  currentIsAdmin = !!enabled;
+  try {
+    sessionStorage.setItem('auth_is_admin', String(currentIsAdmin));
+  } catch (_) {}
+
+  ['btn-clear-book', 'btn-reset-seq', 'btn-reset-tokens'].forEach(id => {
+    const btn = ge(id);
+    if (!btn) return;
+    btn.disabled = !currentIsAdmin;
+    btn.title = currentIsAdmin ? '' : 'Admin only';
+  });
+}
+
+async function switchMarket() {
+  const nextMarket = getNextMarket();
+  if (!nextMarket) return;
+  const btn = ge('market-switch');
+  const username = sessionStorage.getItem('auth_username') || currentPlayer || '';
+  const password = sessionStorage.getItem('auth_password') || '';
+
+  if (!username || !password) {
+    const target = new URL(LOGIN_GATEWAY_URL);
+    target.searchParams.set('market', nextMarket.name || '');
+    if (username) target.searchParams.set('username', username);
+    location.href = target.toString();
+    return;
+  }
+
+  if (btn) {
+    btn.disabled = true;
+    btn.title = `Switching to ${String(nextMarket.name || '').toUpperCase()}...`;
+  }
+
+  try {
+    const res = await fetch(`${nextMarket.url}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Authentication failed');
+    }
+
+    const token = encodeURIComponent(data.token || '');
+    const usernameSafe = encodeURIComponent(data.username || username);
+    const passwordSafe = encodeURIComponent(password);
+    const adminSafe = encodeURIComponent(String(!!data.is_admin));
+    location.href = `${nextMarket.url}/app?token=${token}&username=${usernameSafe}&password=${passwordSafe}&is_admin=${adminSafe}`;
+  } catch (e) {
+    appendLog({
+      ts: now(),
+      label: 'ERROR',
+      body: `Market switch failed: ${e && e.message ? e.message : 'unable to switch market'}`,
+      tag: 'err'
+    });
+    updateMarketSwitchButton();
+  }
+}
 
 // client-side order book (updated from exec reports)
 const book = {
@@ -390,6 +496,9 @@ const ge  = id => document.getElementById(id);
 const fmt = v  => parseFloat(v).toFixed(4);
 const esc = s  => String(s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+updateMarketSwitchButton();
+setAdminControlsEnabled(currentIsAdmin);
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
@@ -498,6 +607,8 @@ function schedulePlayerState(msg) {
 
 function handlePlayerState(msg) {
   currentPlayer = msg.username || null;
+  currentIsAdmin = !!msg.is_admin;
+  setAdminControlsEnabled(currentIsAdmin);
   currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
 
   // Replace local open-orders view with server truth while preserving

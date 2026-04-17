@@ -190,6 +190,23 @@ impl PlayerStore {
         true
     }
 
+    /// Reset every player's token balance to the initial amount.
+    ///
+    /// Returns the number of players updated.
+    pub fn reset_all_tokens(&self) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let mut updated = 0usize;
+
+        for player in inner.players.values_mut() {
+            player.tokens = INITIAL_TOKENS;
+            updated += 1;
+        }
+
+        drop(inner);
+        self.flush();
+        updated
+    }
+
     /// Reset player-side market state after a global market reset.
     ///
     /// Clears all pending orders for every player and drops execution-report
