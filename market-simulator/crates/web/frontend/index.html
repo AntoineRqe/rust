@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>FIX 4.2 Terminal — {{MARKET_NAME}}</title>
+<title>FIX 4.2 Terminal — Multi-Market</title>
 <style>
   :root {
     --bg:#0d0f14; --panel:#13161e; --panel2:#0f111a; --border:#1e2330;
@@ -52,19 +52,32 @@
   #tabbar button.active{color:var(--green);border-bottom-color:var(--green)}
 
   /* ── main layout ── */
-  #body{display:flex;flex:1;overflow:hidden;min-height:0}
+  #body{display:flex;flex:1;overflow:hidden;min-height:0;flex-direction:row}
+  
+  /* ── markets container (CSS Grid for multiple markets) ── */
+  #markets-container{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+                     gap:8px;padding:8px;overflow-y:auto;flex:1;
+                     background:var(--bg);min-height:0}
+  .market-card{display:flex;flex-direction:column;background:var(--panel2);
+               border:1px solid var(--border);border-radius:4px;overflow:hidden;
+               min-height:400px;max-height:600px}
+  .market-card-header{background:var(--panel);padding:10px 12px;border-bottom:1px solid var(--border);
+                      display:flex;justify-content:space-between;align-items:center}
+  .market-card-header h3{color:var(--teal);font-size:12px;font-weight:bold;margin:0;flex:1}
+  .market-book{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}
+  .market-controls{padding:8px;border-top:1px solid var(--border);background:var(--panel);}
+  .market-subtitle{font-size:10px;color:var(--muted);letter-spacing:.04em;margin-top:2px}
+  .market-chart{border-top:1px solid var(--border);padding:6px 8px 8px;background:#0a0c10}
+  .market-chart-title{font-size:8px;color:var(--muted);letter-spacing:.1em;margin-bottom:4px}
+  .market-chart svg{display:block;width:100%;height:58px}
 
   /* ── panels ── */
   .panel{display:flex;flex-direction:column;overflow:hidden;min-height:0}
   #col-left{width:290px;min-width:260px;background:var(--panel);
             border-right:1px solid var(--border);flex-shrink:0;overflow-y:auto}
-  #col-book{width:280px;min-width:240px;background:var(--panel2);
-            border-right:1px solid var(--border);flex-shrink:0;
-            display:flex;flex-direction:column;overflow:hidden}
-  #col-log{flex:1;background:var(--bg);display:flex;flex-direction:column;min-width:0}
-  #col-chart{width:260px;min-width:220px;background:var(--panel2);
-             border-left:1px solid var(--border);flex-shrink:0;
-             display:flex;flex-direction:column}
+  #col-book{display:none}
+  #col-log{display:none}
+  #col-chart{display:none}
 
   /* ── form elements ── */
   .stitle{font-size:9px;letter-spacing:.12em;color:var(--muted);
@@ -96,9 +109,6 @@
   .sbtn{padding:6px 0;width:76px;font-size:11px;font-weight:bold}
   #btn-buy{background:var(--green);color:#0d0f14;margin-right:6px}
   #btn-sell{background:#1a1e2a;color:var(--muted)}
-  .md-btn{display:block;width:calc(100% - 28px);margin:2px 14px;
-          padding:6px 10px;text-align:left;background:#0e1520;
-          color:var(--teal);font-size:11px;font-weight:bold}
   .footer-row{display:flex;justify-content:space-between;padding:8px 14px 10px}
   .ghost{background:transparent;color:var(--muted);font-size:10px;
          font-family:'Courier New',monospace;padding:3px 6px}
@@ -194,13 +204,10 @@
   ════════════════════════════════════ */
   @media (max-width:1199px) {
     #body{flex-wrap:wrap}
-    #col-left {width:50%;min-width:0;border-right:none;border-bottom:1px solid var(--border);
-               max-height:55vh;overflow-y:auto;flex-shrink:0}
-    #col-book {width:50%;min-width:0;border-right:none;border-left:1px solid var(--border);
-               border-bottom:1px solid var(--border);max-height:55vh;flex-shrink:0}
-    #col-log  {width:60%;min-width:0;flex:none;height:calc(45vh - 42px)}
-    #col-chart{width:40%;min-width:0;border-left:1px solid var(--border);
-               height:calc(45vh - 42px)}
+    #markets-container{grid-template-columns:repeat(2,minmax(0,1fr))}
+    #body{flex-direction:column}
+    #col-left {width:100%;min-width:0;border-right:none;border-bottom:1px solid var(--border);
+           max-height:38vh;overflow-y:auto;flex-shrink:0}
   }
 
   /* ════════════════════════════════════
@@ -210,14 +217,14 @@
     #topbar h1{font-size:10px}
     #tabbar{display:flex}
     #body{flex-wrap:nowrap;flex-direction:column}
-    #col-left,#col-book,#col-log,#col-chart{
+    #markets-container{grid-template-columns:1fr}
+    #col-left,#col-book,#col-log,#markets-container{
       width:100%;min-width:0;height:100%;flex-shrink:0;
       border:none;max-height:none;display:none}
-    #col-left.active,#col-book.active,#col-log.active,#col-chart.active{display:flex}
+    #col-left.active,#col-book.active,#col-log.active,#markets-container.active{display:flex}
     .btn{padding:12px 0;font-size:13px}
     .btn-send{padding:14px 0;font-size:15px}
     .frow input{font-size:13px;padding:7px 6px}
-    .md-btn{padding:10px 12px;font-size:12px}
     .sbtn{padding:9px 0;font-size:13px}
     .dlg-row{flex-direction:column;align-items:flex-start}
     .dlg-row label{width:auto;margin-bottom:3px}
@@ -228,7 +235,7 @@
 <body>
 
 <div id="topbar">
-  <h1>&#x2B21; FIX 4.2 &nbsp;ORDER &amp; MARKET DATA TERMINAL &nbsp;[{{MARKET_NAME}}]</h1>
+  <h1>&#x2B21; FIX 4.2 &nbsp;MULTI-MARKET TERMINAL</h1>
   <button id="market-switch" onclick="switchMarket()" title="Switch market" aria-label="Switch market">Switch market</button>
   <span id="token-balance">TOKENS: &#8212;</span>
   <span id="ws-dot">&#9679; WS</span>
@@ -237,17 +244,24 @@
 </div>
 
 <div id="tabbar">
-  <button onclick="showTab('col-left')"  id="tab-left"  class="active">ORDERS</button>
-  <button onclick="showTab('col-book')"  id="tab-book">BOOK</button>
+  <button onclick="showTab('col-left')"  id="tab-left">ORDERS</button>
+  <button onclick="showTab('col-book')"  id="tab-book" class="active">MARKETS</button>
   <button onclick="showTab('col-log')"   id="tab-log">LOG</button>
-  <button onclick="showTab('col-chart')" id="tab-chart">CHART</button>
 </div>
 
 <div id="body">
 
+<!-- Multi-market view -->
+<div id="markets-container" class="panel active">
+  <!-- Market cards will be dynamically inserted here -->
+</div>
+
 <!-- LEFT: order entry -->
-<div id="col-left" class="panel active">
+<div id="col-left" class="panel">
   <div class="stitle">ORDER ENTRY</div><div class="ssep"></div>
+  <div class="frow"><label>Market</label>
+    <select id="o-market"></select>
+  </div>
   <div class="frow"><label>Symbol</label>     <input id="o-sym"   value="AAPL"></div>
   <div class="frow"><label>Quantity</label>
     <div class="spin-wrap">
@@ -281,20 +295,14 @@
     <span style="color:var(--muted);font-size:10px">No open orders</span>
   </div>
 
-  <div class="stitle" style="margin-top:8px">MARKET DATA</div><div class="ssep"></div>
-  <button class="md-btn" id="md-V" onclick="openDlg('V')" disabled>V &nbsp; Market Data Request</button>
-  <button class="md-btn" id="md-W" onclick="openDlg('W')" disabled>W &nbsp; MD Snapshot Full Refresh</button>
-  <button class="md-btn" id="md-X" onclick="openDlg('X')" disabled>X &nbsp; MD Incremental Refresh</button>
-  <button class="md-btn" id="md-Y" onclick="openDlg('Y')" disabled>Y &nbsp; MD Request Reject</button>
-
   <div class="footer-row">
-    <button class="ghost" id="btn-clear-book" onclick="send({action:'clear_book'})" disabled>clear book</button>
-    <button class="ghost" id="btn-reset-seq" onclick="send({action:'reset_seq'})" disabled>reset seq</button>
-    <button class="ghost" id="btn-reset-tokens" onclick="send({action:'reset_tokens'})" disabled>reset tokens</button>
+    <button class="ghost" id="btn-clear-book" onclick="sendToSelectedMarket({action:'clear_book'})" disabled>clear book</button>
+    <button class="ghost" id="btn-reset-seq" onclick="sendToSelectedMarket({action:'reset_seq'})" disabled>reset seq</button>
+    <button class="ghost" id="btn-reset-tokens" onclick="sendToSelectedMarket({action:'reset_tokens'})" disabled>reset tokens</button>
   </div>
 </div>
 
-<!-- BOOK: order book + trades -->
+<!-- BOOK: order book + trades (now shows first market by default) -->
 <div id="col-book" class="panel">
   <div id="book-hdr">
     <span id="book-sym">ORDER BOOK &nbsp;&#8212;</span>
@@ -315,17 +323,6 @@
     <button class="ghost" onclick="ge('log-box').innerHTML=''">CLEAR</button>
   </div>
   <div id="log-box"></div>
-</div>
-
-<!-- CHART: price chart -->
-<div id="col-chart" class="panel">
-  <div id="chart-hdr">
-    <span>PRICE CHART</span>
-    <button class="ghost" onclick="clearChart()">CLEAR</button>
-  </div>
-  <div id="chart-wrap">
-    <canvas id="price-canvas"></canvas>
-  </div>
 </div>
 
 </div><!-- #body -->
@@ -402,28 +399,65 @@ function getNextMarket() {
 
 function updateMarketSwitchButton() {
   const btn = ge('market-switch');
-  const nextMarket = getNextMarket();
   if (!btn) return;
-  if (!nextMarket) {
-    btn.textContent = 'Single market';
-    btn.title = 'Single market configured';
-    btn.setAttribute('aria-label', 'Single market configured');
-    btn.disabled = true;
-    return;
-  }
-  const nextName = String(nextMarket.name || '').toUpperCase();
-  btn.textContent = `Switch to ${nextName}`;
-  btn.title = `Switch to ${nextName}`;
-  btn.setAttribute('aria-label', `Switch to ${nextName}`);
-  btn.disabled = false;
+  btn.textContent = 'Split view';
+  btn.title = 'NASDA and NYSE are shown together';
+  btn.setAttribute('aria-label', 'Split market view enabled');
+  btn.disabled = true;
 }
 
-function setAdminControlsEnabled(enabled) {
-  currentIsAdmin = !!enabled;
-  try {
-    sessionStorage.setItem('auth_is_admin', String(currentIsAdmin));
-  } catch (_) {}
+function getSelectedOrderMarketName() {
+  const sel = ge('o-market');
+  return normalizeMarketName(sel && sel.value ? sel.value : getPrimaryMarketName());
+}
 
+function populateOrderMarketOptions() {
+  const sel = ge('o-market');
+  if (!sel) return;
+  const options = resolveSplitMarketConfigs();
+  sel.innerHTML = options.map(market => {
+    const name = normalizeMarketName(market.name);
+    return `<option value="${esc(name)}">${esc(name)}</option>`;
+  }).join('');
+
+  const preferred = options.find(m => normalizeMarketName(m.name) === getPrimaryMarketName()) || options[0];
+  if (preferred) {
+    sel.value = normalizeMarketName(preferred.name);
+  }
+  updateTargetMarketControls();
+}
+
+function updateTargetMarketControls() {
+  const selectedMarket = markets[getSelectedOrderMarketName()];
+  const connected = !!(selectedMarket && selectedMarket.connected);
+  ge('btn-send').disabled = !connected;
+  updateAdminControlAvailability();
+}
+
+function sendToSelectedMarket(obj) {
+  send(obj, getSelectedOrderMarketName());
+}
+
+function buildEndpoint(baseUrl, suffix) {
+  const base = new URL(baseUrl, location.origin);
+  const cleanedPath = base.pathname.replace(/\/+$/, '');
+  const pathPrefix = cleanedPath && cleanedPath !== '/' ? cleanedPath : '';
+  return `${base.origin}${pathPrefix}${suffix}`;
+}
+
+function buildWsEndpoint(baseUrl) {
+  const httpUrl = new URL(buildEndpoint(baseUrl, '/ws'));
+  const wsProto = httpUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${wsProto}//${httpUrl.host}${httpUrl.pathname}`;
+}
+
+function getCurrentAppBaseUrl() {
+  const current = new URL(location.href);
+  const basePath = current.pathname.replace(/\/app\/?$/, '').replace(/\/+$/, '');
+  return `${current.origin}${basePath}`;
+}
+
+function updateAdminControlAvailability() {
   ['btn-clear-book', 'btn-reset-seq', 'btn-reset-tokens'].forEach(id => {
     const btn = ge(id);
     if (!btn) return;
@@ -432,52 +466,17 @@ function setAdminControlsEnabled(enabled) {
   });
 }
 
-async function switchMarket() {
-  const nextMarket = getNextMarket();
-  if (!nextMarket) return;
-  const btn = ge('market-switch');
-  const username = sessionStorage.getItem('auth_username') || currentPlayer || '';
-  const password = sessionStorage.getItem('auth_password') || '';
-
-  if (!username || !password) {
-    const target = new URL(LOGIN_GATEWAY_URL);
-    target.searchParams.set('market', nextMarket.name || '');
-    if (username) target.searchParams.set('username', username);
-    location.href = target.toString();
-    return;
-  }
-
-  if (btn) {
-    btn.disabled = true;
-    btn.title = `Switching to ${String(nextMarket.name || '').toUpperCase()}...`;
-  }
-
+function setAdminControlsEnabled(enabled) {
+  currentIsAdmin = !!enabled;
   try {
-    const res = await fetch(`${nextMarket.url}/api/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
+    sessionStorage.setItem('auth_is_admin', String(currentIsAdmin));
+  } catch (_) {}
 
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Authentication failed');
-    }
+  updateAdminControlAvailability();
+}
 
-    const token = encodeURIComponent(data.token || '');
-    const usernameSafe = encodeURIComponent(data.username || username);
-    const passwordSafe = encodeURIComponent(password);
-    const adminSafe = encodeURIComponent(String(!!data.is_admin));
-    location.href = `${nextMarket.url}/app?token=${token}&username=${usernameSafe}&password=${passwordSafe}&is_admin=${adminSafe}`;
-  } catch (e) {
-    appendLog({
-      ts: now(),
-      label: 'ERROR',
-      body: `Market switch failed: ${e && e.message ? e.message : 'unable to switch market'}`,
-      tag: 'err'
-    });
-    updateMarketSwitchButton();
-  }
+async function switchMarket() {
+  return;
 }
 
 function disconnect() {
@@ -515,6 +514,105 @@ const orderTimeouts = {}; // clordId → timeout handle
 // chart history
 let chartPts = [], lastTradeCount = 0;
 
+// ── Multi-market support ───────────────────────────────────────────────────────
+const markets = {}; // marketName → { ws, book, openOrders, openOrderFirstSeen, orderTimeouts, chartPts, lastTradeCount, connected }
+
+function createMarketState() {
+  return {
+    bids: {}, asks: {}, trades: [], last: null, symbol: '—',
+    pending: {}, orderState: {},
+  };
+}
+
+function addMarket(marketName) {
+  if (markets[marketName]) return; // Already added
+  
+  markets[marketName] = {
+    name: marketName,
+    ws: null,
+    book: createMarketState(),
+    openOrders: {},
+    openOrderFirstSeen: {},
+    orderTimeouts: {},
+    chartPts: [],
+    lastTradeCount: 0,
+    connected: false,
+  };
+  
+  renderMarketsContainer();
+  return markets[marketName];
+}
+
+function normalizeMarketName(name) {
+  return String(name || '').trim().toUpperCase();
+}
+
+function getPrimaryMarketName() {
+  return normalizeMarketName(CURRENT_MARKET_NAME) || Object.keys(markets)[0] || '';
+}
+
+function resolveSplitMarketConfigs() {
+  const configured = Array.isArray(KNOWN_MARKETS) ? KNOWN_MARKETS : [];
+  const byName = new Map(configured.map(m => [normalizeMarketName(m.name), m]));
+  const picks = [];
+
+  ['NASDA', 'NASDAQ', 'NYSE'].forEach(name => {
+    const market = byName.get(name);
+    if (market && !picks.some(existing => normalizeMarketName(existing.name) === normalizeMarketName(market.name))) {
+      picks.push(market);
+    }
+  });
+
+  configured.forEach(market => {
+    if (picks.length >= 2) return;
+    if (!picks.some(existing => normalizeMarketName(existing.name) === normalizeMarketName(market.name))) {
+      picks.push(market);
+    }
+  });
+
+  return picks.slice(0, 2);
+}
+
+function renderMarketsContainer() {
+  const container = ge('markets-container');
+  if (!container) return;
+
+  const marketNames = resolveSplitMarketConfigs()
+    .map(market => normalizeMarketName(market.name))
+    .filter(name => markets[name]);
+
+  const html = marketNames.map(name => {
+    const m = markets[name];
+    const symbol = m.book.symbol;
+    const lastPrice = m.book.last != null ? fmt(m.book.last) : '—';
+    const statusColor = m.connected ? 'var(--green)' : 'var(--muted)';
+    
+    return `<div class="market-card">
+      <div class="market-card-header">
+        <div>
+          <h3>${esc(name)}</h3>
+          <div class="market-subtitle">${esc(symbol)} • last ${lastPrice}</div>
+        </div>
+      </div>
+      <div class="market-book" id="market-${esc(name)}">
+        <div style="text-align:center;padding:20px;color:var(--muted)">Loading...</div>
+      </div>
+      <div class="market-controls">
+        <span style="font-size:10px;color:${statusColor}">● ${m.connected ? 'CONNECTED' : 'DISCONNECTED'}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  if (marketNames.length === 0) {
+    container.innerHTML = `<div style="grid-column:1/-1;padding:40px;text-align:center;color:var(--muted)">
+      <p>NASDA / NYSE markets are not configured.</p>
+    </div>`;
+  } else {
+    container.innerHTML = html;
+  }
+}
+
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 const ge  = id => document.getElementById(id);
 const fmt = v  => parseFloat(v).toFixed(4);
@@ -524,23 +622,36 @@ const esc = s  => String(s)
 updateMarketSwitchButton();
 setAdminControlsEnabled(currentIsAdmin);
 
+resolveSplitMarketConfigs().forEach(market => addMarket(normalizeMarketName(market.name)));
+populateOrderMarketOptions();
+if (ge('o-market')) {
+  ge('o-market').addEventListener('change', updateTargetMarketControls);
+}
+
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const token = AUTH_TOKEN ? encodeURIComponent(AUTH_TOKEN) : '';
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}`);
+  const wsBase = buildWsEndpoint(getCurrentAppBaseUrl());
+  ws = new WebSocket(`${wsBase}?token=${token}`);
 
   ws.onopen = () => {
     ge('ws-dot').textContent = '● WS';
     ge('ws-dot').className   = 'on';
     appendLog({ ts: now(), label: 'INFO', body: 'WebSocket connected', tag: 'info' });
-    // enable send button only when FIX is also connected
-    // (status event from server will enable it)
+    // Primary market connected
+    const primaryMarket = getPrimaryMarketName();
+    if (primaryMarket && markets[primaryMarket]) {
+      markets[primaryMarket].ws = ws;
+      markets[primaryMarket].connected = true;
+      renderMarketsContainer();
+    }
   };
 
   ws.onmessage = e => {
     const msg = JSON.parse(e.data);
-    handleServerEvent(msg);
+    const primaryMarket = getPrimaryMarketName();
+    handleServerEvent(msg, primaryMarket);
   };
 
   ws.onclose = () => {
@@ -548,6 +659,11 @@ function connectWS() {
     ge('ws-dot').className   = '';
     appendLog({ ts: now(), label: 'INFO', body: 'WebSocket disconnected — reconnecting…', tag: 'info' });
     handleStatus(false);
+    const primaryMarket = getPrimaryMarketName();
+    if (primaryMarket && markets[primaryMarket]) {
+      markets[primaryMarket].connected = false;
+      renderMarketsContainer();
+    }
     // auto-reconnect after 2s
     setTimeout(connectWS, 2000);
   };
@@ -557,27 +673,147 @@ function connectWS() {
   };
 }
 
+async function getMarketAuthToken(market) {
+  const username = sessionStorage.getItem('auth_username') || currentPlayer || '';
+  const password = sessionStorage.getItem('auth_password') || '';
+  const normalizedTarget = normalizeMarketName(market.name);
+
+  if (normalizedTarget === getPrimaryMarketName()) {
+    return AUTH_TOKEN;
+  }
+
+  if (!username || !password) {
+    throw new Error('Missing saved credentials for cross-market login');
+  }
+
+  const res = await fetch(buildEndpoint(market.url, '/api/login'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.token) {
+    throw new Error(data.error || 'Authentication failed');
+  }
+  return data.token;
+}
+
+// ── Multi-market WebSocket connections ─────────────────────────────────────────
+async function connectMarketWS(market) {
+  if (!market || !market.name || !market.url) {
+    console.error('[Market] Invalid market config', market);
+    return;
+  }
+
+  const marketName = normalizeMarketName(market.name);
+  const marketObj = markets[marketName];
+  if (!marketObj) return;
+  if (marketName === getPrimaryMarketName()) return;
+  if (marketObj.ws && marketObj.ws.readyState !== WebSocket.CLOSED) return;
+
+  try {
+    const token = encodeURIComponent(await getMarketAuthToken(market));
+    const wsBase = buildWsEndpoint(market.url);
+    const wsUrl = `${wsBase}?token=${token}`;
+    
+    console.log(`[Market] Connecting to ${market.name} at ${wsUrl}`);
+    
+    const marketWs = new WebSocket(wsUrl);
+
+    marketWs.onopen = () => {
+      console.log(`[Market] ${marketName} WebSocket connected`);
+      marketObj.ws = marketWs;
+      marketObj.connected = true;
+      renderMarketsContainer();
+      appendLog({
+        ts: now(),
+        label: 'INFO',
+        body: `Market "${marketName}" connected`,
+        tag: 'info'
+      });
+    };
+
+    marketWs.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data);
+        handleServerEvent(msg, marketName);
+      } catch (err) {
+        console.error(`[Market] ${marketName} message parse error:`, err);
+      }
+    };
+
+    marketWs.onclose = () => {
+      console.log(`[Market] ${marketName} WebSocket disconnected`);
+      if (marketObj.ws === marketWs) {
+        marketObj.ws = null;
+        marketObj.connected = false;
+        renderMarketsContainer();
+      }
+      appendLog({
+        ts: now(),
+        label: 'INFO',
+        body: `Market "${marketName}" disconnected`,
+        tag: 'info'
+      });
+      if (resolveSplitMarketConfigs().some(candidate => normalizeMarketName(candidate.name) === marketName)) {
+        setTimeout(() => connectMarketWS(market), 2000);
+      }
+    };
+
+    marketWs.onerror = err => {
+      console.error(`[Market] ${marketName} WebSocket error`, err);
+      appendLog({
+        ts: now(),
+        label: 'ERROR',
+        body: `Market "${marketName}" connection error`,
+        tag: 'err'
+      });
+    };
+
+  } catch (e) {
+    console.error(`[Market] Failed to parse market URL: ${market.url}`, e);
+    appendLog({
+      ts: now(),
+      label: 'ERROR',
+      body: `Failed to connect to market "${market.name}": ${e.message}`,
+      tag: 'err'
+    });
+  }
+}
+
 // ── route incoming server events ──────────────────────────────────────────────
-function handleServerEvent(msg) {
-  console.debug('[WsEvent]', msg);
+function handleServerEvent(msg, marketName) {
+  const market = marketName ? markets[normalizeMarketName(marketName)] : markets[getPrimaryMarketName()];
+  if (!market) {
+    console.warn('[Event] Market not found:', marketName);
+    return;
+  }
+
+  console.debug(`[WsEvent @ ${marketName}]`, msg);
   switch (msg.type) {
     case 'status':
-      console.log('[Status]', msg.connected ? 'CONNECTED' : 'DISCONNECTED');
-      handleStatus(msg.connected);
+      console.log(`[Status @ ${marketName}]`, msg.connected ? 'CONNECTED' : 'DISCONNECTED');
+      market.connected = msg.connected;
+      if (normalizeMarketName(marketName) === getPrimaryMarketName()) {
+        handleStatus(msg.connected);
+      }
+      renderMarketsContainer();
       break;
     case 'player_state':
-      schedulePlayerState(msg);
+      if (normalizeMarketName(marketName) === getPrimaryMarketName()) {
+        schedulePlayerState(msg);
+      }
       break;
     case 'fix_message':
       // md events are high-frequency market data — only update the book, never log them
       if (msg.tag !== 'md') {
         appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
         if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
-          resetClientMarketView();
+          resetClientMarketView(marketName);
         }
       }
-      // parse the FIX message to update order book
-      updateBookFromFix(msg.body, msg.tag);
+      // parse the FIX message to update order book for this market
+      updateBookFromFix(msg.body, msg.tag, marketName);
       break;
     default:
       console.warn('Unknown server event:', msg);
@@ -585,12 +821,15 @@ function handleServerEvent(msg) {
 }
 
 // ── send to server ────────────────────────────────────────────────────────────
-function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-  } else {
-    appendLog({ ts: now(), label: 'ERROR', body: 'WebSocket not connected', tag: 'err' });
+function send(obj, targetMarket) {
+  // Default to primary market if not specified
+  const marketName = normalizeMarketName(targetMarket || getPrimaryMarketName());
+  const market = markets[marketName];
+  if (!market || !market.ws || market.ws.readyState !== WebSocket.OPEN) {
+    appendLog({ ts: now(), label: 'ERROR', body: `WebSocket not connected for market "${marketName}"`, tag: 'err' });
+    return;
   }
+  market.ws.send(JSON.stringify(obj));
 }
 
 // ── FIX status ────────────────────────────────────────────────────────────────
@@ -599,8 +838,7 @@ function handleStatus(connected) {
   const newText = connected ? '● CONNECTED' : '● DISCONNECTED';
   dot.textContent = newText;
   dot.className   = connected ? 'on' : '';
-  ge('btn-send').disabled = !connected;
-  document.querySelectorAll('.md-btn').forEach(b => b.disabled = !connected);
+  updateTargetMarketControls();
 
   if (!connected) {
     ge('token-balance').textContent = 'TOKENS: —';
@@ -640,8 +878,10 @@ function handlePlayerState(msg) {
   setAdminControlsEnabled(currentIsAdmin);
   currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
 
-  // Replace local open-orders view with server truth while preserving
-  // first-seen timestamps for orders that still exist.
+  const primaryMarketName = getPrimaryMarketName();
+
+  // Replace only primary-market open orders with server truth while preserving
+  // secondary-market optimistic entries handled by their own FIX stream.
   const nextOpenOrders = {};
   const pending = Array.isArray(msg.pending_orders) ? msg.pending_orders : [];
   pending.forEach(o => {
@@ -651,6 +891,7 @@ function handlePlayerState(msg) {
       qty: Number(o.qty || 0),
       price: Number(o.price || 0),
       side: String(o.side || '1'),
+      market: primaryMarketName,
     };
 
     if (!openOrderFirstSeen[o.cl_ord_id]) {
@@ -659,6 +900,7 @@ function handlePlayerState(msg) {
   });
 
   Object.keys(openOrders).forEach(id => {
+    if (normalizeMarketName(openOrders[id]?.market) !== primaryMarketName) return;
     if (!nextOpenOrders[id]) {
       delete openOrders[id];
       delete openOrderFirstSeen[id];
@@ -668,7 +910,7 @@ function handlePlayerState(msg) {
   Object.keys(nextOpenOrders).forEach(id => {
     openOrders[id] = nextOpenOrders[id];
   });
-  renderOrders();
+  renderOrders(null, true);
 }
 
 // ── side toggle ───────────────────────────────────────────────────────────────
@@ -706,10 +948,17 @@ function bumpField(id, step) {
 
 // ── send order ────────────────────────────────────────────────────────────────
 function sendOrder() {
+  const targetMarketName = getSelectedOrderMarketName();
+  const targetMarket = markets[targetMarketName];
   const symbol = ge('o-sym').value.trim().toUpperCase();
   const qty    = parseFloat(ge('o-qty').value);
   const price  = parseFloat(ge('o-price').value);
   const s      = side === 'BUY' ? '1' : '2';
+
+  if (!targetMarket || !targetMarket.connected) {
+    appendLog({ ts: now(), label: 'ERROR', body: `Target market "${targetMarketName}" is not connected`, tag: 'err' });
+    return;
+  }
 
   // FIX OrderId in this project is fixed-size (20 chars); keep ClOrdID <= 20
   // while embedding the player name prefix.
@@ -720,10 +969,13 @@ function sendOrder() {
   const playerPrefix = (rawPlayer || 'WEB').slice(0, 6);
   const suffix = currentPlayerSuffix || '0000';
   const clordId = `${playerPrefix}${suffix}${ts}${seq}`.slice(0, 20);
-  book.pending[clordId] = { price, qty, side: s };
-  schedulePendingTimeout(clordId);
+  targetMarket.book.pending[clordId] = { price, qty, side: s };
+  openOrders[clordId] = { symbol, qty, price, side: s, market: targetMarketName };
+  openOrderFirstSeen[clordId] = Date.now();
+  schedulePendingTimeout(clordId, targetMarketName);
+  renderOrders(null, true);
 
-  send({ action: 'order', clord_id: clordId, symbol, qty, price, side: s });
+  send({ action: 'order', clord_id: clordId, symbol, qty, price, side: s }, targetMarketName);
 }
 
 function clearPendingTimeout(clordId) {
@@ -743,7 +995,22 @@ function cleanupOrderState(clordId) {
   delete openOrderFirstSeen[clordId];
 }
 
-function resetClientMarketView() {
+function resetClientMarketView(marketName) {
+  // If market name provided, reset only that market
+  if (marketName) {
+    const market = markets[normalizeMarketName(marketName)];
+    if (!market) return;
+    Object.keys(market.orderTimeouts).forEach(id => clearTimeout(market.orderTimeouts[id]));
+    market.book = createMarketState();
+    market.openOrders = {};
+    market.openOrderFirstSeen = {};
+    market.chartPts = [];
+    market.lastTradeCount = 0;
+    renderMarketBook(marketName);
+    return;
+  }
+  
+  // Otherwise reset primary market (backward compatibility)
   Object.keys(orderTimeouts).forEach(id => clearPendingTimeout(id));
 
   book.bids = {};
@@ -757,16 +1024,18 @@ function resetClientMarketView() {
   Object.keys(openOrderFirstSeen).forEach(id => delete openOrderFirstSeen[id]);
 
   clearChart();
-  renderOrders();
+  renderOrders(null, true);
   renderBook();
 }
 
-function schedulePendingTimeout(clordId) {
+function schedulePendingTimeout(clordId, marketName) {
   clearPendingTimeout(clordId);
   orderTimeouts[clordId] = setTimeout(() => {
-    if (!book.pending[clordId]) return;
+    const targetMarket = markets[normalizeMarketName(marketName)] || { book };
+    if (!targetMarket.book.pending[clordId]) return;
+    delete targetMarket.book.pending[clordId];
     cleanupOrderState(clordId);
-    renderOrders();
+    renderOrders(null, true);
     appendLog({
       ts: now(),
       label: 'INFO',
@@ -777,10 +1046,19 @@ function schedulePendingTimeout(clordId) {
 }
 
 // ── render open orders ─────────────────────────────────────────────────────────
-function renderOrders(immediate = false) {
+function renderOrders(marketName, immediate = false) {
+  // Support both old and new signatures for backward compatibility
+  if (typeof marketName === 'boolean') {
+    immediate = marketName;
+    marketName = null;
+  }
+  
+  // Only render orders panel for primary-market events.
+  if (marketName && normalizeMarketName(marketName) !== getPrimaryMarketName()) return;
+  
   if (!immediate) {
     clearTimeout(openOrdersRenderTimer);
-    openOrdersRenderTimer = setTimeout(() => renderOrders(true), UI_RENDER_DELAY_MS);
+    openOrdersRenderTimer = setTimeout(() => renderOrders(null, true), UI_RENDER_DELAY_MS);
     return;
   }
 
@@ -795,7 +1073,7 @@ function renderOrders(immediate = false) {
   if (hiddenIds.length > 0) {
     const maxAge = Math.max(...hiddenIds.map(id => nowMs - (openOrderFirstSeen[id] || nowMs)));
     const waitMs = Math.max(10, PENDING_VISIBILITY_DELAY_MS - maxAge);
-    setTimeout(() => renderOrders(), waitMs);
+    setTimeout(() => renderOrders(null, true), waitMs);
   }
   
   if (orderIds.length === 0) {
@@ -806,25 +1084,26 @@ function renderOrders(immediate = false) {
   list.innerHTML = orderIds.map(clordId => {
     const o = openOrders[clordId];
     const isSell = o.side === '2';
-    const leaves = book.orderState[clordId]?.leaves || o.qty;
-    const sideStr = isSell ? 'SELL' : 'BUY';
+    const market = markets[normalizeMarketName(o.market)] || null;
+    const leaves = (market && market.book.orderState[clordId]?.leaves) || o.qty;
     return `<div class="order-row ${isSell ? 'sell' : ''}">
       <div class="order-info">
-        <span class="sym">${esc(o.symbol)}</span>
+        <span class="sym">${esc(o.market || '')}</span>
+        <span class="qty">${esc(o.symbol)}</span>
         <span class="qty">${Math.round(leaves).toLocaleString()}</span>
         <span class="px">@ ${fmt(o.price)}</span>
       </div>
-      <button class="order-cancel" onclick="cancelOrder('${esc(clordId)}', '${esc(o.symbol)}', ${o.qty})">✕</button>
+      <button class="order-cancel" onclick="cancelOrder('${esc(clordId)}', '${esc(o.symbol)}', ${o.qty}, '${esc(o.market || getPrimaryMarketName())}')">✕</button>
     </div>`;
   }).join('');
 }
 
-function cancelOrder(clordId, symbol, qty) {
+function cancelOrder(clordId, symbol, qty, marketName) {
   clearPendingTimeout(clordId);
-  send({ action: 'cancel', clord_id: clordId, symbol, qty });
+  send({ action: 'cancel', clord_id: clordId, symbol, qty }, normalizeMarketName(marketName || getPrimaryMarketName()));
   delete openOrders[clordId];
   delete openOrderFirstSeen[clordId];
-  renderOrders();
+  renderOrders(null, true);
 }
 
 // ── MD dialogs ────────────────────────────────────────────────────────────────
@@ -871,7 +1150,7 @@ function submitDlg() {
     p[id] = ge('di-'+id).value.split('=')[0].trim();
   });
   closeDlg();
-  send(p);
+  send(p, getSelectedOrderMarketName());
 }
 
 // ── log ───────────────────────────────────────────────────────────────────────
@@ -952,15 +1231,73 @@ function applyOrderLeaves(clordId, side, price, newLeaves) {
   }
 }
 
-function updateBookFromFix(body, tag) {
+// ── Market-specific versions of book helpers ──────────────────────────────────
+function rmQtyForMarket(market, side, price, qty) {
+  if (side === '1') {
+    if (market.book.bids[price] !== undefined) {
+      market.book.bids[price] = Math.max(0, market.book.bids[price] - qty);
+      if (market.book.bids[price] === 0) delete market.book.bids[price];
+    }
+  } else {
+    if (market.book.asks[price] !== undefined) {
+      market.book.asks[price] = Math.max(0, market.book.asks[price] - qty);
+      if (market.book.asks[price] === 0) delete market.book.asks[price];
+    }
+  }
+}
+
+function addQtyForMarket(market, side, price, qty) {
+  if (side === '1') market.book.bids[price] = (market.book.bids[price] || 0) + qty;
+  else              market.book.asks[price] = (market.book.asks[price] || 0) + qty;
+}
+
+function applyOrderLeavesForMarket(market, clordId, side, price, newLeaves) {
+  if (!clordId) return;
+
+  const b = market.book;
+  const prev = b.orderState[clordId];
+  const effSide = side || (prev ? prev.side : '');
+  const effPrice = (price > 0) ? price : (prev ? prev.price : 0);
+
+  if (!effSide || !(effPrice > 0)) return;
+
+  const prevLeaves = prev ? prev.leaves : 0;
+  const delta = newLeaves - prevLeaves;
+
+  if (delta > 0) addQtyForMarket(market, effSide, effPrice, delta);
+  else if (delta < 0) rmQtyForMarket(market, effSide, effPrice, -delta);
+
+  if (newLeaves > 0) {
+    b.orderState[clordId] = { side: effSide, price: effPrice, leaves: newLeaves };
+  } else {
+    delete b.orderState[clordId];
+  }
+}
+
+function cleanupOrderStateForMarket(market, clordId) {
+  if (!clordId) return;
+  delete market.book.pending[clordId];
+  delete market.book.orderState[clordId];
+  delete openOrders[clordId];
+  delete openOrderFirstSeen[clordId];
+}
+
+function updateBookFromFix(body, tag, marketName) {
   // Order book widget is driven exclusively by the multicast MD feed.
   // FIX execution reports ('feed') are handled server-side for token/player state only.
   if (tag !== 'md') return;
 
+  // Use primary market if not specified
+  const mn = normalizeMarketName(marketName || getPrimaryMarketName());
+  const market = markets[mn];
+  if (!market) return;
+  
+  const b = market.book; // Use market-specific book
+  
   const f = parseFix(body);
 
   // ── debug: log every MD packet received ──────────────────────────────────
-  console.log('[MD]', body, f);
+  console.log(`[MD @ ${mn}]`, body, f);
   appendLog({
     ts: now(),
     label: 'MD',
@@ -981,30 +1318,32 @@ function updateBookFromFix(body, tag) {
   const leavesQty = sf(f['151']);
   const sym       = f['55'];
 
-  if (clordId) clearPendingTimeout(clordId);
+  if (clordId && mn === getPrimaryMarketName()) {
+    clearPendingTimeout(clordId); // Only for primary market orders
+  }
 
   // resolve price: tag 44 > tag 6 > pending cache
   let price = sf(f['44'] || f['6']);
-  const cached = book.pending[clordId];
+  const cached = b.pending[clordId];
   if (price === 0 && cached) price = cached.price;
 
-  if (sym) book.symbol = sym;
+  if (sym) b.symbol = sym;
 
   if (status === '0' || status === 'A') {
     // New: set leaves on book
     const newLeaves = leavesQty > 0 ? leavesQty : qty;
-    applyOrderLeaves(clordId, side, price, newLeaves);
+    applyOrderLeavesForMarket(market, clordId, side, price, newLeaves);
 
   } else if (status === '1') {
     // PartiallyFilled / Modify-like updates
     if (lastPx > 0 && lastQty > 0) {
-      book.last = lastPx;
-      book.trades.unshift([lastPx, lastQty, side === '1' ? 'B' : 'S',
+      b.last = lastPx;
+      b.trades.unshift([lastPx, lastQty, side === '1' ? 'B' : 'S',
                            new Date().toTimeString().slice(0,8)]);
-      book.trades = book.trades.slice(0, 20);
+      b.trades = b.trades.slice(0, 20);
     }
-    applyOrderLeaves(clordId, side, price, leavesQty);
-    renderOrders();
+    applyOrderLeavesForMarket(market, clordId, side, price, leavesQty);
+    renderOrders(mn);
 
   } else if (status === '2') {
     // Filled / Trade-like updates
@@ -1012,42 +1351,49 @@ function updateBookFromFix(body, tag) {
     const fillQty = lastQty > 0 ? lastQty : qty;
     const isSyntheticMdTrade = clordId.startsWith('T');
     if (fillPx > 0 && fillQty > 0) {
-      book.last = fillPx;
-      book.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
+      b.last = fillPx;
+      b.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
                            new Date().toTimeString().slice(0,8)]);
-      book.trades = book.trades.slice(0, 20);
+      b.trades = b.trades.slice(0, 20);
 
       if (isSyntheticMdTrade) {
         // MD trade packets do not carry original maker/taker order IDs.
         // Apply the executed quantity to both sides at trade price so
         // the displayed aggregate book stays consistent after a match.
-        rmQty('1', fillPx, fillQty);
-        rmQty('2', fillPx, fillQty);
+        rmQtyForMarket(market, '1', fillPx, fillQty);
+        rmQtyForMarket(market, '2', fillPx, fillQty);
       }
     }
     if (!isSyntheticMdTrade) {
-      applyOrderLeaves(clordId, side, price, 0);
-      cleanupOrderState(clordId);
+      applyOrderLeavesForMarket(market, clordId, side, price, 0);
+      cleanupOrderStateForMarket(market, clordId);
     }
-    renderOrders();
+    renderOrders(mn);
 
   } else if (status === '3' && f['9000'] === 'SNAPSHOT') {
     // Market-data snapshot refresh marker: reset local displayed book and wait
     // for subsequent incremental/add events.
-    book.bids = {};
-    book.asks = {};
-    book.trades = [];
-    book.last = null;
-    book.orderState = {};
+    b.bids = {};
+    b.asks = {};
+    b.trades = [];
+    b.last = null;
+    b.orderState = {};
 
   } else if (status === '3' || status === '4' || status === 'C' || status === '8') {
     // Cancelled/Expired
-    applyOrderLeaves(clordId, side, price, 0);
-    cleanupOrderState(clordId);
-    renderOrders();
+    applyOrderLeavesForMarket(market, clordId, side, price, 0);
+    cleanupOrderStateForMarket(market, clordId);
+    renderOrders(mn);
   }
 
-  renderBook();
+  // For primary market, update main book and render on the right
+  if (mn === getPrimaryMarketName()) {
+    Object.assign(book, b);
+    renderBook();
+  }
+  
+  // Update multi-market display
+  renderMarketBook(mn);
 }
 
 // ── render order book ─────────────────────────────────────────────────────────
@@ -1116,11 +1462,103 @@ function renderLevels(id, levels, cls, maxQ) {
   }).join('');
 }
 
+// ── Render multi-market order books ────────────────────────────────────────────
+function renderMarketBook(marketName) {
+  const market = markets[marketName];
+  if (!market) return;
+  
+  const container = ge(`market-${esc(marketName)}`);
+  if (!container) return;
+  
+  const b = market.book;
+  const bids = Object.entries(b.bids).map(([p,q])=>[+p,q])
+                     .sort((a,b)=>b[0]-a[0]).slice(0, 4);
+  const asks = Object.entries(b.asks).map(([p,q])=>[+p,q])
+                     .sort((a,b)=>a[0]-b[0]).slice(0, 4);
+  
+  const allQ = [...bids,...asks].map(r=>r[1]);
+  const maxQ = allQ.length ? Math.max(...allQ) : 1;
+  
+  let html = '';
+  
+  // Asks
+  [...asks].reverse().forEach(([px, qty]) => {
+    const pct = (qty / maxQ * 100).toFixed(1);
+    html += `<div class="bk-level ask-lv" style="font-size:9px;padding:2px 4px">
+      <div class="bar" style="width:${pct}%"></div>
+      <span class="lv-qty">${Math.round(qty).toLocaleString()}</span>
+      <span class="lv-px">${fmt(px)}</span></div>`;
+  });
+  
+  // Spread
+  if (bids.length && asks.length) {
+    const sp = asks[0][0] - bids[0][0], mid = (asks[0][0] + bids[0][0]) / 2;
+    html += `<div style="background:var(--border);padding:2px 4px;font-size:9px;text-align:center;color:var(--muted)">
+      spread: ${fmt(sp)} / mid: ${fmt(mid)}</div>`;
+  }
+  
+  // Bids
+  bids.forEach(([px, qty]) => {
+    const pct = (qty / maxQ * 100).toFixed(1);
+    html += `<div class="bk-level bid-lv" style="font-size:9px;padding:2px 4px">
+      <div class="bar" style="width:${pct}%"></div>
+      <span class="lv-qty">${Math.round(qty).toLocaleString()}</span>
+      <span class="lv-px">${fmt(px)}</span></div>`;
+  });
+  
+  // Trades
+  if (b.trades.length > 0) {
+    html += `<div style="border-top:1px solid var(--border);padding:4px;font-size:8px;color:var(--muted)">TRADES</div>`;
+    b.trades.slice(0, 5).forEach(([px,qty,s,ts]) => {
+      html += `<div style="padding:1px 4px;font-size:8px;color:${s==='B'?'var(--green)':'var(--red)'}">
+        ${s} ${Math.round(qty)}@${fmt(px)}</div>`;
+    });
+  }
+
+  html += `<div class="market-chart">
+    <div class="market-chart-title">PRICE CHART</div>
+    ${renderMarketMiniChartSvg(b.trades)}
+  </div>`;
+  
+  container.innerHTML = html;
+}
+
+function renderMarketMiniChartSvg(trades) {
+  const points = [...(trades || [])].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
+  const width = 260;
+  const height = 58;
+  const pad = 6;
+
+  if (points.length < 2) {
+    return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="price chart">
+      <text x="50%" y="50%" fill="#5a6070" font-size="9" text-anchor="middle" dominant-baseline="middle">waiting for trades…</text>
+    </svg>`;
+  }
+
+  let min = Math.min(...points);
+  let max = Math.max(...points);
+  if (min === max) {
+    min -= 0.5;
+    max += 0.5;
+  }
+
+  const xFor = i => pad + (i / (points.length - 1)) * (width - pad * 2);
+  const yFor = v => pad + (1 - (v - min) / (max - min)) * (height - pad * 2);
+  const line = points.map((v, i) => `${xFor(i).toFixed(2)},${yFor(v).toFixed(2)}`).join(' ');
+  const lastY = yFor(points[points.length - 1]).toFixed(2);
+
+  return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="price chart">
+    <polyline points="${line}" fill="none" stroke="#00e676" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <line x1="${pad}" y1="${lastY}" x2="${width - pad}" y2="${lastY}" stroke="#ffd740" stroke-width="1" stroke-dasharray="3 3"/>
+  </svg>`;
+}
+
 // ── price chart ───────────────────────────────────────────────────────────────
 function clearChart() { chartPts = []; lastTradeCount = 0; drawChart(); }
 
 function drawChart() {
   const wrap = ge('chart-wrap'), canvas = ge('price-canvas');
+  if (!wrap || !canvas) return;
   const dpr = window.devicePixelRatio || 1;
   const W = wrap.clientWidth || 240, H = wrap.clientHeight || 300;
   canvas.width = W*dpr; canvas.height = H*dpr;
@@ -1188,19 +1626,26 @@ function drawChart() {
 
 // ── mobile tabs ───────────────────────────────────────────────────────────────
 function showTab(id) {
-  ['col-left','col-book','col-log','col-chart'].forEach(c => {
-    ge(c).classList.toggle('active', c === id);
+  // Map col-book button to markets-container display
+  const displayId = id === 'col-book' ? 'markets-container' : id;
+  
+  ['col-left','col-log','markets-container'].forEach(c => {
+    const el = ge(c);
+    if (el) el.classList.toggle('active', c === displayId);
   });
-  ['tab-left','tab-book','tab-log','tab-chart'].forEach(t => {
-    ge(t).classList.toggle('active', t.replace('tab-','col-') === id);
+  
+  ['tab-left','tab-book','tab-log'].forEach(t => {
+    const isActive = (t === 'tab-book' && id === 'col-book') || 
+                     (t !== 'tab-book' && t.replace('tab-','col-') === id);
+    ge(t).classList.toggle('active', isActive);
   });
-  if (id === 'col-chart') setTimeout(drawChart, 50);
 }
 
 // ── boot ──────────────────────────────────────────────────────────────────────
-window.addEventListener('load',   drawChart);
-window.addEventListener('resize', drawChart);
 connectWS();
+resolveSplitMarketConfigs()
+  .filter(market => normalizeMarketName(market.name) !== getPrimaryMarketName())
+  .forEach(market => connectMarketWS(market));
 </script>
 </body>
 </html>

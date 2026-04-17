@@ -446,18 +446,6 @@ fn main() {
 
     // ── Single-market mode (child process) ──────────────────────────────────
     if let Some(index) = cli.market_index {
-        let market_feed_sources = config.markets.iter().map(|market| MulticastSource::new(
-            market.market_feed_multicast.ip.as_str(),
-            market.market_feed_multicast.port,
-            market_name()
-        )).collect::<Vec<_>>();
-
-        let market_snapshot_sources = config.markets.iter().map(|market| MulticastSource::new(
-            market.snapshot_multicast.ip.as_str(),
-            market.snapshot_multicast.port,
-            market_name()
-        )).collect::<Vec<_>>();
-
         // Build the list of all markets for the login page.
         let known_markets: Vec<web::MarketInfo> = config.markets.iter().map(|m| web::MarketInfo {
             name: m.name.clone(),
@@ -472,6 +460,19 @@ fn main() {
                 tracing::error!("Market index {index} out of range");
                 std::process::exit(1);
             });
+
+        // In single-market mode, subscribe ONLY to this market's multicast sources.
+        let market_feed_sources = vec![MulticastSource::new(
+            market_config.market_feed_multicast.ip.as_str(),
+            market_config.market_feed_multicast.port,
+            market_name(),
+        )];
+
+        let market_snapshot_sources = vec![MulticastSource::new(
+            market_config.snapshot_multicast.ip.as_str(),
+            market_config.snapshot_multicast.port,
+            market_name(),
+        )];
 
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,

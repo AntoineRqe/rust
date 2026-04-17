@@ -52,6 +52,25 @@ impl Default for OrderEvent {
     }
 }
 
+impl std::fmt::Display for OrderEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\nOrderEvent {{ price: {}
+            \nquantity: {}
+            \nside: {}
+            \norder_type: {:?}
+            \ncl_ord_id: {}
+            \norig_cl_ord_id: {:?}
+            \nsender_id: {:?}
+            \ntarget_id: {:?}
+            \nsymbol: {:?}
+            \ntimestamp: {:?} }}",
+            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.orig_cl_ord_id, self.sender_id, self.target_id, self.symbol, self.timestamp
+        )
+    }
+}
+
 impl OrderEvent {
     pub fn new(
         price: FixedPointArithmetic,
@@ -129,16 +148,6 @@ impl OrderEvent {
             return Err("Price cannot be zero");
         }
         Ok(())
-    }
-}
-
-impl std::fmt::Display for OrderEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "OrderEvent {{ price: {}, quantity: {}, side: {:?}, order_type: {:?}, cl_ord_id: {:?}, orig_cl_ord_id: {:?}, sender_id: {:?}, target_id: {:?}, symbol: {:?}, timestamp: {:?} }}",
-            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.orig_cl_ord_id, self.sender_id, self.target_id, self.symbol, self.timestamp
-        )
     }
 }
 
@@ -300,6 +309,15 @@ impl std::fmt::Display for OrderResult {
 pub enum Side {
     Buy,
     Sell,
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Side::Buy => write!(f, "Buy"),
+            Side::Sell => write!(f, "Sell"),
+        }
+    }
 }
 
 /// Represents the type of an order (limit or market).
