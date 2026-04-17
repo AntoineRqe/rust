@@ -22,17 +22,14 @@ impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
     pub fn run(&mut self) {
         while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(snapshot) = self.fifo_in.pop() {
-                // Process the snapshot
                 if snapshot.timestamp == 0 {
                     tracing::info!("[{}] Received shutdown signal, stopping SnapshotMultiCastEngine", market_name());
                     continue;
                 }
 
-                tracing::debug!("[{}] Received snapshot: {:?}", market_name(), snapshot);
-
                 // Process incoming order events and results from the order book engine
                 // Transform the order event and result into a market data feed event
-                let bytes = [0u8; 256]; // TODO: serialize the snapshot into bytes
+                let bytes = crate::encode::encode_snapshot(&snapshot);
                 let _ = self.source.socket.send_to(&bytes, &self.source.source.address);
             }
         }

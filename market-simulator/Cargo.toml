@@ -31,6 +31,7 @@ lazy_static = "1.4.0"
 tokio    = { version = "1", features = ["full"] }   # ← add this
 serde    = { version = "1", features = ["derive"] }  # ← add this
 serde_json = "1" 
+core_affinity = "0.8.3"
 
 # Main binary crate
 [package]
@@ -77,6 +78,7 @@ strip = true                    # Remove debug symbols
 panic = "abort"
 
 [profile.bench]
+debug = true
 opt-level = 3
 lto = "thin"
 codegen-units = 1

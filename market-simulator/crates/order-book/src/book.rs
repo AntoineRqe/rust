@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+use std::{collections::BTreeMap};
 use types::{
     FixedPointArithmetic,
     OrderEvent,
@@ -10,179 +10,12 @@ use types::{
     Trade,
     Trades,
     macros::{
-        EntityId,
         OrderId,
     }
 };
 
-use snapshot::types::{Snapshot};
-use spsc::spsc_lock_free::{Consumer, Producer};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::RwLock;
+use utils::market_name;
 
-pub enum OrderBookControl {
-    Reset,
-}
-
-fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
-}
-
-
-pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent, N>) {
-    let order_event = OrderEvent {
-        sender_id: EntityId::from_ascii(""), // An empty sender_id is used as a signal to the order book engine to shut down
-        ..Default::default() // Fill the rest of the fields with default values
-    };
-
-    fix_to_ob_tx.push(order_event).unwrap();  
-} 
-
-pub struct SnapshotGenerationEngine<'a, const N: usize> {
-    producer: Producer<'a, Snapshot, N>,
-    shutdown: Arc<AtomicBool>,
-    order_book: Arc<RwLock<OrderBook>>,
-    interval_ms: u64,
-    depth: usize,
-}
-
-impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
-    pub fn new(
-        producer: Producer<'a, Snapshot, N>,
-        shutdown: Arc<AtomicBool>,
-        order_book: Arc<RwLock<OrderBook>>, 
-        interval_ms: u64,
-        depth: usize)
-        -> Self {
-        Self { producer, shutdown, order_book, interval_ms, depth }
-    }
-
-    fn generate_snapshot(&self) -> Snapshot {
-        let order_book = self.order_book.read().unwrap();
-
-        let mut bids = order_book.dump_order_book(Side::Buy);
-        let mut asks = order_book.dump_order_book(Side::Sell);
-
-        // Warning : is the order of truncation and sorting correct here ? We want to make sure we are sending the top of the book for both sides, so we need to sort before truncating. This is fine for now since we are using BTreeMap which is already sorted, but if we switch to a different data structure in the future we need to make sure to sort before truncating.
-        bids.truncate(self.depth);
-        asks.truncate(self.depth);
-        
-        let id = order_book.internal_id_counter; // Use the internal order ID counter as a simple way to track the snapshot ID, it will increment with each new order processed and can serve as a unique identifier for the snapshot. In a more advanced implementation, you might want to use a separate counter or timestamp-based ID for snapshots.
-        let order_book_snapshot = snapshot::types::OrderBookSnapshot { bids, asks };
-
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-
-        Snapshot {
-            timestamp: timestamp as u64, // Use the elapsed time since the order book engine started as the timestamp for the snapshot
-            symbol: order_book.symbol.clone(),
-            id: id, // The ID can be set to a unique value if needed, for now we can set it to 0 or use a counter if we want to track multiple snapshots
-            order_book: order_book_snapshot,
-        }
-    }
-
-    pub fn run(&self) {
-        while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_millis(self.interval_ms)); // Sleep for the configured interval before generating the next snapshot
-            
-            if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                break; // Check for shutdown signal again after waking up to avoid generating an unnecessary snapshot
-            }
-
-            let mut snapshot = self.generate_snapshot();
-            tracing::debug!("[{}] Snapshot sent with ID: {}, timestamp: {}", market_name(), snapshot.id, snapshot.timestamp);
-            
-            while let Err(s) = self.producer.push(snapshot) {
-                snapshot = s;
-                std::hint::spin_loop(); // If the output queue is full, spin until there is space
-            }
-        }
-
-        // Send a final snapshot with the shutdown flag set to true to signal the snapshot consumer to stop processing snapshots and exit gracefully.
-        let mut snapshot = Snapshot::default();
-    
-        while let Err(s) = self.producer.push(snapshot) {
-            snapshot = s;
-            std::hint::spin_loop(); // If the output queue is full, spin until there is space
-        }
-
-        tracing::info!("[{}] Snapshot generation engine shutting down gracefully", market_name());
-    }
-}
-
-pub struct OrderBookEngine<'a, const N: usize> {
-    fifo_in: Consumer<'a, OrderEvent, N>,
-    fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
-    control_rx: crossbeam_channel::Receiver<OrderBookControl>,
-    order_book: Arc<RwLock<OrderBook>>,
-    shutdown: Arc<AtomicBool>,
-}
-
-impl<'a, const N: usize> OrderBookEngine<'a, N> {
-    pub fn new(
-        fifo_in: Consumer<'a, OrderEvent, N>,
-        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
-        control_rx: crossbeam_channel::Receiver<OrderBookControl>,
-        order_book: Arc<RwLock<OrderBook>>,
-        shutdown: Arc<AtomicBool>
-    ) -> Self {
-        OrderBookEngine {
-            fifo_in,
-            fifo_out,
-            control_rx,
-            order_book,
-            shutdown,
-        }
-    }
-
-    pub fn import_order_book(&mut self, orders: Vec<OrderEvent>) {
-        for order in orders {
-            self.order_book.write().unwrap().process_order(order);
-        }
-    }
-
-    pub fn run(&mut self) {
-        loop {
-            // Process control messages first
-            while let Ok(control) = self.control_rx.try_recv() {
-                match control {
-                    OrderBookControl::Reset => {
-                        *self.order_book.write().unwrap() = OrderBook::new(self.order_book.read().unwrap().symbol.as_str()); // Reset the order book by creating a new instance
-                        tracing::info!("[{}][{}] Order book reset completed", market_name(), self.order_book.read().unwrap().symbol);
-                    }
-                }
-            }
-
-            if let Some(event) = self.fifo_in.pop() {
-                let (event, result) = self.order_book.write().unwrap().process_order(event);
-                let mut execution_report_input = (event, result);
-                for producer in &self.fifo_out {
-                    if let Some(producer) = producer {
-                        while let Err((event_er, result_er)) = producer.push(execution_report_input) {
-                            execution_report_input = (event_er, result_er);
-                            std::hint::spin_loop(); // If the output queue is full, spin until there is space
-                        }
-                    }
-                }
-            }
-
-            if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
-                tracing::info!("[{}][{}] Shutdown signal received, stopping order book engine", market_name(), self.order_book.read().unwrap().symbol);
-                break;
-            }
-        }
-
-        tracing::info!("[{}][{}] Order book engine shutting down gracefully", market_name(), self.order_book.read().unwrap().symbol);
-    }
-}
 
 #[derive(Debug)]
 struct OrderRef {
@@ -207,10 +40,10 @@ impl OrderRef {
 pub struct OrderBook {
     pub bids: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
     pub asks: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
-    internal_id_counter: u64, // Counter for generating unique internal order IDs
+    pub(crate) internal_id_counter: u64, // Counter for generating unique internal order IDs
     trade_id_counter: u64, // Counter for generating unique trade IDs
     order_map: HashMap<OrderId, OrderRef>, // Map to track orders by their ID for efficient cancellation
-    symbol: String, // The symbol for this order book, can be set from environment variable or constructor parameter if needed
+    pub(crate) symbol: String, // The symbol for this order book, can be set from environment variable or constructor parameter if needed
 }
 
 impl std::fmt::Display for OrderBook {
@@ -292,7 +125,9 @@ impl OrderBook {
     }
 
     fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
-        if order.orig_cl_ord_id.is_none() {
+        let orig_cl_ord_id = if let Some(orig_cl_ord_id) = order.orig_cl_ord_id {
+            orig_cl_ord_id
+        } else {
             tracing::error!("[{}][{}][{}] Cancel order with ID: {} is missing original client order ID, cannot process cancellation", market_name(), order.symbol, order.cl_ord_id, order.cl_ord_id);
             return (order, OrderResult {
                 internal_order_id: 0, // No internal order ID since the cancellation cannot be processed
@@ -300,9 +135,7 @@ impl OrderBook {
                 status: OrderStatus::CancelRejected,
                 ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
             });
-        }
-
-        let orig_cl_ord_id = order.orig_cl_ord_id.unwrap();
+        };
 
         if let Some(order_ref) = self.order_map.get(&orig_cl_ord_id) {
             let order_queue = match order_ref.side {
@@ -575,20 +408,18 @@ impl OrderBook {
     /// - `side`: The side of the order book to dump (either `Side::Buy` for bids or `Side::Sell` for asks).
     /// Returns:
     /// - A `Vec<OrderEvent>` containing the orders for the specified side of the order book. For bids, it returns the orders directly from the `bids` heap, and for asks, it extracts the inner `OrderEvent` from the `Reverse` wrapper in the `asks` heap.
-    pub fn dump_order_book(&self, side: Side) -> Vec<OrderEvent> {
+    pub fn dump_order_book(&self, side: Side, depth: usize) -> Vec<OrderEvent> {
         match side {
-            Side::Buy => self.bids.iter().flat_map(|(_price, queue)| queue.iter().cloned()).collect(),
-            Side::Sell => self.asks.iter().flat_map(|(_price, queue)| queue.iter().cloned()).collect(),
+            Side::Buy => self.bids.iter().flat_map(|(_price, queue)| queue.iter().cloned()).take(depth).collect(),
+            Side::Sell => self.asks.iter().flat_map(|(_price, queue)| queue.iter().cloned()).take(depth).collect(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{thread};
-
     use super::*;
-    use types::macros::{SymbolId};
+    use types::macros::{SymbolId, EntityId, OrderId};
 
     const SYMBOL_STR: &str = "TEST";
     const SYMBOL_ID: SymbolId = SymbolId::from_ascii(SYMBOL_STR);
@@ -1132,8 +963,8 @@ mod tests {
         order_book.process_order(order1);
         order_book.process_order(order2);
 
-        let bids = order_book.dump_order_book(Side::Buy);
-        let asks = order_book.dump_order_book(Side::Sell);
+        let bids = order_book.dump_order_book(Side::Buy, 10); // Dump the top 10 levels of the bid side
+        let asks = order_book.dump_order_book(Side::Sell, 10); // Dump the top 10 levels of the ask side
 
         assert_eq!(bids.len(), 1); // One bid should be in the order book
         assert_eq!(bids[0].price, FixedPointArithmetic::from_f64(100.0)); // The bid should have the correct price
@@ -1149,156 +980,5 @@ mod tests {
         assert_eq!(asks[0].sender_id, SENDER); // The ask should have the correct sender ID
         assert_eq!(asks[0].target_id, TARGET); // The ask should have the correct target ID
         assert_eq!(asks[0].order_type, OrderType::LimitOrder); // The ask should have the correct order type
-    }
-
-    #[test]
-    fn test_engine(){
-        let mut inbound_queue = spsc::spsc_lock_free::RingBuffer::<OrderEvent, 1024>::new();
-        let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
-
-        thread::scope(|s| {
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let order_book = Arc::new(RwLock::new(OrderBook::new(SYMBOL_STR)));
-            let(inbound_producer, inbound_consumer) = inbound_queue.split();
-            let(outbound_producer, outbound_consumer) = outbound_queue.split();
-
-            let (_control_tx, control_rx) = crossbeam_channel::unbounded();
-            let mut engine = OrderBookEngine::new(
-        inbound_consumer,
-        [Some(outbound_producer), None, None],
-                control_rx,
-                Arc::clone(&order_book),
-                Arc::clone(&shutdown),
-            );
-            
-            let ob_handle = s.spawn(move || {
-                engine.run();
-            });
-
-            // Send some orders to the engine
-            let order = OrderEvent {
-                price: FixedPointArithmetic::from_f64(100.0),
-                quantity: FixedPointArithmetic::from_f64(10.0),
-                side: Side::Buy,
-                order_type: OrderType::LimitOrder,
-                cl_ord_id: CL_ORD_ID,
-                orig_cl_ord_id: None,
-                sender_id: SENDER,
-                target_id: TARGET,
-                symbol: SYMBOL_ID,
-                ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
-            };
-
-            inbound_producer.push(order).unwrap();
-            // Give some time for the engine to process the order
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let (order_event, order_result) = outbound_consumer.pop().unwrap();
-
-            assert!(order_event.price == FixedPointArithmetic::from_f64(100.0));
-            assert!(order_result.trades.len() == 0);
-
-            assert!(order_result.status == OrderStatus::New);
-            
-            // Send a matching sell order to the engine
-            let order2 = OrderEvent {
-                price: FixedPointArithmetic::from_f64(100.0),
-                quantity: FixedPointArithmetic::from_f64(10.0),
-                side: Side::Sell,
-                order_type: OrderType::LimitOrder,
-                cl_ord_id: CL_ORD_ID,
-                orig_cl_ord_id: None,
-                sender_id: SENDER,
-                target_id: TARGET,
-                symbol: SYMBOL_ID,
-                ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
-            };
-
-            inbound_producer.push(order2).unwrap();
-            // Give some time for the engine to process the order
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let (order_event2, order_result2) = outbound_consumer.pop().unwrap();
-            
-            assert!(order_event2.price == FixedPointArithmetic::from_f64(100.0));
-            assert!(order_result2.trades.len() == 1); // One trade should be executed for the matching orders
-            assert!(order_result2.status == OrderStatus::New); // Both orders should be filled
-
-            // Send a dummy order to unblock the engine if it's waiting for orders
-            shutdown.store(true, std::sync::atomic::Ordering::Release);
-            kill_order_book_engine(&inbound_producer);
-
-            ob_handle.join().expect("Engine thread panicked");
-        });
-    }
-
-    #[test]
-    fn test_send_snapshot() {
-        let order1 = OrderEvent {
-            price: FixedPointArithmetic::from_f64(100.0),
-            quantity: FixedPointArithmetic::from_f64(10.0),
-            side: Side::Buy,
-            order_type: OrderType::LimitOrder,
-            cl_ord_id: CL_ORD_ID,
-            orig_cl_ord_id: None,
-            sender_id: SENDER,
-            target_id: TARGET,
-            symbol: SYMBOL_ID,
-            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
-        };
-        let order2 = OrderEvent {
-            price: FixedPointArithmetic::from_f64(102.0),
-            quantity: FixedPointArithmetic::from_f64(5.0),
-            side: Side::Sell,
-            order_type: OrderType::LimitOrder,
-            cl_ord_id: CL_ORD_ID,
-            orig_cl_ord_id: None,
-            sender_id: SENDER,
-            target_id: TARGET,
-            symbol: SYMBOL_ID,
-            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
-        };
-
-        let mut queue = spsc::spsc_lock_free::RingBuffer::<Snapshot, 1024>::new();
-        
-        std::thread::scope(|   s| {
-            let (ss_producer, ss_consumer) = queue.split();
-
-            let order_book = Arc::new(RwLock::new(OrderBook::new(SYMBOL_STR)));
-            let shutdown = Arc::new(AtomicBool::new(false));
-
-            let snapshot_engine = SnapshotGenerationEngine::new(
-                ss_producer,
-                Arc::clone(&shutdown),
-                Arc::clone(&order_book),
-                1000, // Set the snapshot interval to 1000 milliseconds (1 second)
-                10, // Set the maximum depth of the order book to include in the snapshot
-            );
-            
-
-            let _engine_handle = s.spawn(move || {
-                snapshot_engine.run();
-            });
-
-            order_book.write().unwrap().process_order(order1);
-            order_book.write().unwrap().process_order(order2);
-
-            // Give some time for the snapshot to be sent and received
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-
-            let recv_snapshot = ss_consumer.pop().unwrap();
-        
-            // Check ask side
-            assert_eq!(recv_snapshot.order_book.bids.len(), 1); // One bid should be in the snapshot
-            assert_eq!(recv_snapshot.order_book.bids[0].price, FixedPointArithmetic::from_f64(100.0));
-            assert_eq!(recv_snapshot.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(10.0));
-
-            // Check bid side
-            assert_eq!(recv_snapshot.order_book.asks.len(), 1); // One ask should be in the snapshot
-            assert_eq!(recv_snapshot.order_book.asks[0].price, FixedPointArithmetic::from_f64(102.0));
-            assert_eq!(recv_snapshot.order_book.asks[0].quantity, FixedPointArithmetic::from_f64(5.0));
-
-            shutdown.store(true, Ordering::Relaxed);
-
-            _engine_handle.join().expect("Engine thread panicked");
-        });
     }
 }

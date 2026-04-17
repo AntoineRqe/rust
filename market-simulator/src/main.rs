@@ -9,7 +9,9 @@ use axum::{
     response::Html,
     Json,
 };
-use order_book::order_book::{OrderBook, OrderBookEngine, SnapshotGenerationEngine};
+use order_book::book::{OrderBook};
+use order_book::engine::OrderBookEngine;
+use order_book::snapshot::SnapshotGenerationEngine;
 use order_book::OrderBookControl;
 use server::tcp::{
     FixServer,

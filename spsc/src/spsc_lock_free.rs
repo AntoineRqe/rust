@@ -50,7 +50,6 @@ impl<T, const N: usize> Drop for RingBuffer<T, N> {
         let head = self.head.0.load(Ordering::Relaxed);
         let mut tail = self.tail.0.load(Ordering::Relaxed);
         while head != tail {
-            println!("Dropping item at index {}", tail);
             unsafe {
                 self.buffer.get()
                     .as_mut()

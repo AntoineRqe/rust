@@ -426,6 +426,7 @@ impl FixedPointArithmetic {
                     }
                 }
                 b'.' => in_frac = true,
+                0 => break, // null terminator for fixed-size byte arrays
                 _ => return None,
             }
             i += 1;
