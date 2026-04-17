@@ -56,6 +56,7 @@ impl MarketConfig {
 #[derive(Clone, Deserialize)]
 pub struct MarketsConfig {
     pub ring_buffer_size: usize,
+    pub entry_point: Connection,
     pub markets: Vec<MarketConfig>,
 }
 
@@ -77,6 +78,10 @@ impl MarketsConfig {
     pub fn new() -> Self {
         MarketsConfig {
             ring_buffer_size: 0,
+            entry_point: Connection {
+                ip: "127.0.0.1".to_string(),
+                port: 9875,
+            },
             markets: vec![],
         }
     }

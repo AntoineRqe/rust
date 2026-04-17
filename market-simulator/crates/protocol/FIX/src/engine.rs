@@ -143,17 +143,6 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 tracing::debug!("[{}] Received message from network layer, parsing FIX message...", market_name());
                 let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
 
-                if msg.len == 0 {
-                    tracing::debug!("[{}] Shutdown signal received in inbound engine, shutting down...", market_name());
-                    // This is a signal to stop the engine, so we can set the shutdown flag and return
-                    self.request_out.push(OrderEvent {
-                        sender_id: EntityId::from_ascii(""), // Use an empty sender ID to indicate a shutdown signal in the response queue, this is a bit of a hack but it allows us to unblock the engine if it's waiting on the response queue
-                        ..Default::default()
-                    }).ok(); // Ignore errors when pushing the shutdown signal, since we're shutting down anyway
-                    self.shared.shutdown.store(true, Ordering::Relaxed);
-                    continue;
-                }
-        
                 let order_event = match self.build_order(msg) {
                     Ok(event) => event,
                     Err(e) => {
@@ -281,17 +270,10 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
     pub fn run(&mut self) {
         while !self.shared.shutdown.load(Ordering::Relaxed) || !self.response_in.is_empty() {
             if let Some((key, _response)) = self.response_in.pop() {
-                if key == EntityId::from_ascii("") {
-                    tracing::info!("[{}] Shutdown signal received in outbound engine, shutting down...", market_name());
-                    // This is a signal to stop the engine, so we can ignore it
-                    self.shared.shutdown.store(true, Ordering::Relaxed);
-                    continue;
-                } else {
-                    if let Some(resp_queue) = self.shared.get_pending(&key) {
-                        match resp_queue.send(_response) {
-                            Ok(_) => {self.counter += 1;},
-                            Err(_) => { tracing::error!("[{}] Failed to push response back to client, dropping response", market_name()); },
-                        }
+                if let Some(resp_queue) = self.shared.get_pending(&key) {
+                    match resp_queue.send(_response) {
+                        Ok(_) => {self.counter += 1;},
+                        Err(_) => { tracing::error!("[{}] Failed to push response back to client, dropping response", market_name()); },
                     }
                 }
             }

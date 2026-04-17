@@ -30,9 +30,6 @@ impl SourceSocket {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
 
-        #[cfg(unix)]
-        socket.set_reuse_port(true)?;
-
         let bind_addr = std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
         socket.bind(&bind_addr.into())?;
         Ok(socket.into())

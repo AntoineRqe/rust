@@ -329,6 +329,27 @@
 <script>
 'use strict';
 
+// ── session auth ──────────────────────────────────────────────────────────────
+const params = new URLSearchParams(window.location.search);
+const tokenFromQuery = params.get('token');
+const usernameFromQuery = params.get('username');
+
+if (tokenFromQuery) {
+  sessionStorage.setItem('auth_token', tokenFromQuery);
+  if (usernameFromQuery) {
+    sessionStorage.setItem('auth_username', usernameFromQuery);
+  }
+  // Remove secrets from URL after one-time handoff.
+  history.replaceState({}, '', '/app');
+}
+
+const LOGIN_GATEWAY_URL = '{{LOGIN_GATEWAY_URL}}';
+const AUTH_TOKEN = sessionStorage.getItem('auth_token');
+if (!AUTH_TOKEN) {
+  // No token — send back to the central login gateway
+  location.replace(LOGIN_GATEWAY_URL);
+}
+
 // ── state ─────────────────────────────────────────────────────────────────────
 let side      = 'BUY';
 let dlgType   = null;
@@ -373,7 +394,8 @@ const esc = s  => String(s)
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const token = AUTH_TOKEN ? encodeURIComponent(AUTH_TOKEN) : '';
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}`);
 
   ws.onopen = () => {
     ge('ws-dot').textContent = '● WS';

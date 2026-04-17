@@ -270,7 +270,7 @@ impl Default for OrderResult {
         Self {
             internal_order_id: 0,
             trades: Trades::new(),
-            status: OrderStatus::New,
+            status: OrderStatus::Unmatched,
             timestamp: Instant::now(),
         }
     }
@@ -323,6 +323,7 @@ pub enum OrderStatus {
     Filled,
     Cancelled,
     CancelRejected,
+    Unmatched,
 }
 
 /// Price represented as integer with implicit 8 decimal places

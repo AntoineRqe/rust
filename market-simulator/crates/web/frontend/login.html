@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Market Simulator — Login</title>
+<style>
+  :root {
+    --bg:#0d0f14; --panel:#13161e; --border:#1e2330;
+    --green:#00e676; --red:#ff3d57; --blue:#2979ff;
+    --teal:#00bcd4; --text:#e8ecf4; --muted:#5a6070;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .login-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    width: 100%;
+    max-width: 380px;
+    padding: 36px 32px 28px;
+  }
+
+  .login-logo {
+    text-align: center;
+    margin-bottom: 28px;
+  }
+  .login-logo h1 {
+    color: var(--green);
+    font-size: 15px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  .login-logo p {
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: .08em;
+    margin-top: 4px;
+  }
+
+  .field {
+    margin-bottom: 14px;
+  }
+  .field label {
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+  .field input,
+  .field select {
+    width: 100%;
+    background: #1a1e2a;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    padding: 8px 10px;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+  .field input:focus,
+  .field select:focus {
+    border-color: var(--blue);
+  }
+  .field select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a6070'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 28px;
+    cursor: pointer;
+  }
+  .field select option {
+    background: #1a1e2a;
+    color: var(--text);
+  }
+
+  .btn-login {
+    display: block;
+    width: 100%;
+    margin-top: 22px;
+    padding: 11px 0;
+    background: var(--blue);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    font-weight: bold;
+    letter-spacing: .06em;
+    border: none;
+    cursor: pointer;
+    text-transform: uppercase;
+  }
+  .btn-login:hover   { filter: brightness(1.15); }
+  .btn-login:active  { filter: brightness(.9); }
+  .btn-login:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+    filter: none;
+  }
+
+  #error-msg {
+    display: none;
+    margin-top: 14px;
+    padding: 9px 12px;
+    background: rgba(255, 61, 87, .12);
+    border: 1px solid var(--red);
+    color: var(--red);
+    font-size: 11px;
+    text-align: center;
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255,255,255,.3);
+    border-top-color: var(--text);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="login-card">
+  <div class="login-logo">
+    <h1>Market Simulator</h1>
+    <p>FIX 4.2 Trading Terminal</p>
+  </div>
+
+  <div class="field">
+    <label for="market-select">Market</label>
+    <select id="market-select">
+      <option value="" disabled selected>Loading markets…</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="username">Username</label>
+    <input id="username" type="text" autocomplete="username"
+           placeholder="enter username" spellcheck="false">
+  </div>
+
+  <div class="field">
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password"
+           placeholder="enter password">
+  </div>
+
+  <button class="btn-login" id="btn-login">Connect</button>
+  <div id="error-msg"></div>
+</div>
+
+<script>
+'use strict';
+
+const sel    = document.getElementById('market-select');
+const userEl = document.getElementById('username');
+const passEl = document.getElementById('password');
+const btn    = document.getElementById('btn-login');
+const errEl  = document.getElementById('error-msg');
+
+// ── load markets ──────────────────────────────────────────────────────────────
+async function loadMarkets() {
+  try {
+    const res = await fetch('/api/markets');
+    if (!res.ok) throw new Error('Failed to fetch markets');
+    const markets = await res.json();
+
+    sel.innerHTML = '';
+    if (!markets || markets.length === 0) {
+      sel.innerHTML = '<option value="" disabled selected>No markets available</option>';
+      return;
+    }
+
+    markets.forEach((m, i) => {
+      const opt = document.createElement('option');
+      opt.value = m.url;
+      opt.textContent = m.name;
+      if (i === 0) opt.selected = true;
+      sel.appendChild(opt);
+    });
+
+    // If we're already on a market's server, pre-select it.
+    const origin = location.origin;
+    for (const opt of sel.options) {
+      if (opt.value === origin) {
+        opt.selected = true;
+        break;
+      }
+    }
+  } catch (e) {
+    sel.innerHTML = '<option value="" selected>' + location.origin + '</option>';
+  }
+}
+
+loadMarkets();
+
+// ── login ─────────────────────────────────────────────────────────────────────
+function showError(msg) {
+  errEl.textContent = msg;
+  errEl.style.display = 'block';
+}
+
+function hideError() {
+  errEl.style.display = 'none';
+}
+
+function setLoading(on) {
+  btn.disabled = on;
+  btn.innerHTML = on
+    ? '<span class="spinner"></span>Connecting…'
+    : 'Connect';
+}
+
+async function doLogin() {
+  hideError();
+
+  const marketUrl = sel.value || location.origin;
+  const username  = userEl.value.trim();
+  const password  = passEl.value;
+
+  if (!username) { showError('Username is required.'); userEl.focus(); return; }
+  if (!password) { showError('Password is required.'); passEl.focus(); return; }
+
+  setLoading(true);
+
+  try {
+    const res = await fetch(`${marketUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      showError(data.error || 'Authentication failed.');
+      setLoading(false);
+      passEl.focus();
+      return;
+    }
+
+    // Cross-origin handoff: pass token in query so the selected market app
+    // can store it in its own origin-scoped sessionStorage.
+    const token = encodeURIComponent(data.token || '');
+    const usernameSafe = encodeURIComponent(data.username || username);
+    location.href = `${marketUrl}/app?token=${token}&username=${usernameSafe}`;
+  } catch (e) {
+    showError('Could not reach market server.');
+    setLoading(false);
+  }
+}
+
+btn.addEventListener('click', doLogin);
+
+[userEl, passEl, sel].forEach(el => {
+  el.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+});
+
+// Auto-focus username field
+userEl.focus();
+</script>
+</body>
+</html>

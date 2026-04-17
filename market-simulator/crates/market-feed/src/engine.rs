@@ -2,9 +2,6 @@ use spsc::spsc_lock_free::{Consumer};
 use types::{
     OrderEvent,
     OrderResult,
-    macros::{
-        EntityId,
-    }
 };
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use crate::types::{
@@ -84,17 +81,21 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         header
     }
 
-    fn build_market_data_feed_events(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Vec<MarketEvent> {
+    fn build_market_data_feed_events(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<Vec<MarketEvent>> {
         if order_event.order_type == types::OrderType::CancelOrder {
             let delete_order = self.build_delete_order_event(order_event);
             let header = self.build_header(order_event, MessageType::DeleteOrder, 8);
-            return vec![MarketEvent::Delete(header, delete_order)];
+            return Some(vec![MarketEvent::Delete(header, delete_order)]);
+        }
+
+        if order_result.status == types::OrderStatus::Unmatched {
+            return None;
         }
 
         if order_result.status == types::OrderStatus::PartiallyFilled && order_result.trades.len() == 0 {
             let modify_order = self.build_modify_order_event(order_event);
             let header = self.build_header(order_event, MessageType::ModifyOrder, 48);
-            return vec![MarketEvent::Modify(header, modify_order)];
+            return Some(vec![MarketEvent::Modify(header, modify_order)]);
         }
 
         let mut events = Vec::new();
@@ -124,18 +125,19 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
             events.push(MarketEvent::Add(header, add_order));
         }
 
-        events
+        Some(events)
     }
 
-    pub fn build_market_data_feed_from_order(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> MarketEvent {
-        self.build_market_data_feed_events(order_event, order_result)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| {
+    pub fn build_market_data_feed_from_order(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<MarketEvent> {
+        if let Some(events) = self.build_market_data_feed_events(order_event, order_result) {
+            events.into_iter().next().or_else(|| {
                 let add_order = self.build_add_order_event(order_event);
                 let header = self.build_header(order_event, MessageType::AddOrder, 49);
-                MarketEvent::Add(header, add_order)
+                Some(MarketEvent::Add(header, add_order))
             })
+        } else {
+            None
+        }
     }
 
 
@@ -143,15 +145,10 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             // If shutdown is signaled and there are no more events to process, exit the loop
             if let Some((order_event, order_result)) = self.fifo_in.pop() {
-                if order_event.sender_id == EntityId::from_ascii("") {
-                    tracing::info!("[{}] Shutdown signal received. Market Data Feed Engine will shut down after processing remaining events.", market_name());
-                    self.shutdown.store(true, Ordering::Relaxed);
-
-                } else {
-                    // Process incoming order events and results from the order book engine
-                    // Transform the order event and result into a market data feed event
-                    tracing::debug!("[{}] Received order event: {:?}, result: {:?}", market_name(), order_event, order_result);
-                    let market_data_feed_events = self.build_market_data_feed_events(&order_event, &order_result);
+                // Process incoming order events and results from the order book engine
+                // Transform the order event and result into a market data feed event
+                tracing::debug!("[{}] Received order event: {:?}, result: {:?}", market_name(), order_event, order_result);
+                if let Some(market_data_feed_events) = self.build_market_data_feed_events(&order_event, &order_result) {
                     for market_data_feed_event in market_data_feed_events {
                         let bytes = market_data_feed_event.to_bytes();
                         tracing::info!("[{}] Broadcasting market data feed event: header={:?}, event={:?}", market_name(), market_data_feed_event, market_data_feed_event);
@@ -173,12 +170,17 @@ mod tests {
     };
 
     use super::*;
-    use spsc::spsc_lock_free::Producer;
     use std::net::{Ipv4Addr};
     use std::sync::atomic::AtomicU16;
     use std::{thread};
+    use std::sync::{Mutex, OnceLock};
 
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18097);
+    static UDP_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn udp_test_mutex() -> &'static Mutex<()> {
+        UDP_TEST_MUTEX.get_or_init(|| Mutex::new(()))
+    }
 
     fn next_test_port() -> u16 {
         NEXT_TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -196,27 +198,15 @@ mod tests {
         .unwrap()
     }
 
-    fn kill_market_data_feed_engine<const N: usize>(fix_to_ob_tx: &Producer<(OrderEvent, OrderResult), N>) {
-        let order_event = OrderEvent {
-            sender_id: EntityId::from_ascii(""), // An empty sender_id is used as a signal to the order book engine to shut down
-            ..Default::default() // Fill the rest of the fields with default values
-        };
-
-        fix_to_ob_tx.push((order_event, OrderResult::default())).unwrap();  
-    } 
-
     fn retrieve_market_data_feed_events(port: u16, multicast_ip: &str) -> Result<(MarketDataHeader, MarketEvent), Box<dyn std::error::Error>> {
-        // 0.0.0.0 is used to listen on all interfaces
-        let socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port))?;
+        let socket = SourceSocket::create_multicast_socket(port)?;
         socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
 
         let group = multicast_ip.parse::<Ipv4Addr>()?;
-        let interface = "0.0.0.0".parse::<Ipv4Addr>()?; // Listen on all interfaces
-    
-        socket.join_multicast_v4(
-            &group,
-            &interface,
-        )?;
+        if group.is_multicast() {
+            let interface = "0.0.0.0".parse::<Ipv4Addr>()?;
+            socket.join_multicast_v4(&group, &interface)?;
+        }
 
         let mut buf = [0u8; 1024];
 
@@ -261,6 +251,7 @@ mod tests {
     }
 
     fn run_engine_once_and_receive(order_event: OrderEvent, order_result: OrderResult) -> (MarketDataHeader, MarketEvent) {
+        let _udp_test_guard = udp_test_mutex().lock().unwrap();
         let mut rb_in = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 16>::new();
 
         thread::scope(|s| {
@@ -268,10 +259,11 @@ mod tests {
 
             let multicast_ip = "239.0.0.1";
             let port = next_test_port();
+            let shutdown_signal = Arc::new(AtomicBool::new(false));
 
             let mut engine = MarketDataFeedEngine::new(
                 consumer_in,
-                Arc::new(AtomicBool::new(false)),
+                Arc::clone(&shutdown_signal),
                 multicast_ip,
                 port,
             )
@@ -288,7 +280,9 @@ mod tests {
 
             let received = recv_handle.join().unwrap();
 
-            kill_market_data_feed_engine(&producer_in);
+            shutdown_signal.store(true, Ordering::Relaxed);
+            producer_in.push((order_event, order_result)).unwrap();
+
             engine_handle.join().unwrap();
 
             received
@@ -348,7 +342,7 @@ mod tests {
             ..OrderResult::default()
         };
 
-        let event = engine.build_market_data_feed_from_order(&order_event, &order_result);
+        let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
         match event {
             MarketEvent::Modify(header, modify_order) => {
                 assert_header_fields(&header, &order_event, MessageType::ModifyOrder, 48, 0);
@@ -380,7 +374,13 @@ mod tests {
             ..Default::default()
         };
 
-        let event = engine.build_market_data_feed_from_order(&order_event, &OrderResult::default());
+        let order_result = OrderResult {
+            status: types::OrderStatus::Cancelled,
+            ..OrderResult::default()
+        };
+
+        let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
+
         match event {
             MarketEvent::Delete(header, delete_order) => {
                 assert_header_fields(&header, &order_event, MessageType::DeleteOrder, 8, 0);
@@ -426,7 +426,7 @@ mod tests {
             timestamp: std::time::Instant::now(),
         };
 
-        let event = engine.build_market_data_feed_from_order(&order_event, &order_result);
+        let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
         match event {
             MarketEvent::Trade(header, trade) => {
                 assert_header_fields(&header, &order_event, MessageType::Trade, 49, 0);

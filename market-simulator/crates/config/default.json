@@ -1,5 +1,9 @@
 {
     "ring_buffer_size": 1024,
+    "entry_point": {
+        "ip": "127.0.0.1",
+        "port": 9875
+    },
     "markets": [
         {
             "name" : "NASDAQ",

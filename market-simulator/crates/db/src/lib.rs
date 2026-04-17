@@ -51,12 +51,8 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
     pub fn run(&self) {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
-                if exec_report.0.sender_id == EntityId::from_ascii("") {
-                    self.shutdown.store(true, Ordering::Relaxed);
-                } else {
-                    if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
-                        tracing::error!("[{}] Error persisting order update: {}", market_name(), e);
-                    }
+                if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
+                    tracing::error!("[{}] Error persisting order update: {}", market_name(), e);
                 }
             }
         }
@@ -222,11 +218,38 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(&mut *tx)
         .await?;
 
+    // Check whether each table already exists.
     let order_event_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
         .bind("order_event")
         .fetch_one(&mut *tx)
         .await?;
+    let order_result_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
+        .bind("order_result")
+        .fetch_one(&mut *tx)
+        .await?;
+    let trades_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
+        .bind("trades")
+        .fetch_one(&mut *tx)
+        .await?;
+    let pending_orders_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
+        .bind("pending_orders")
+        .fetch_one(&mut *tx)
+        .await?;
 
+    // All tables present — nothing to do; skip all DDL to avoid permission
+    // errors on the public schema (PostgreSQL 15+ restricts CREATE/ALTER to
+    // the table owner).
+    if order_event_exists.is_some()
+        && order_result_exists.is_some()
+        && trades_exists.is_some()
+        && pending_orders_exists.is_some()
+    {
+        tx.commit().await?;
+        tracing::debug!("[{}] Database tables already exist, skipping DDL", utils::market_name());
+        return Ok(());
+    }
+
+    // ── First-time setup ─────────────────────────────────────────────────────
     if order_event_exists.is_none() {
         query(
             r#"
@@ -252,50 +275,27 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
     }
 
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS side TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS symbol TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS order_type TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS cl_ord_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS orig_cl_ord_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS order_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS sender_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS target_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS event_timestamp TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS payload JSONB")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE order_event ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
-        .execute(&mut *tx)
-        .await?;
-
-    let order_result_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("order_result")
-        .fetch_one(&mut *tx)
-        .await?;
+    // Column migrations — only applied when order_event was just created or
+    // was partially migrated on a previous incomplete run.
+    if order_event_exists.is_none() {
+        for col_sql in [
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS side TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS symbol TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS order_type TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS cl_ord_id TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS orig_cl_ord_id TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS order_id TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS sender_id TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS target_id TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS event_timestamp TEXT",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS payload JSONB",
+            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        ] {
+            query(col_sql).execute(&mut *tx).await?;
+        }
+    }
 
     if order_result_exists.is_none() {
         query(
@@ -314,16 +314,12 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         )
         .execute(&mut *tx)
         .await?;
+
+        query("ALTER TABLE order_result ADD COLUMN IF NOT EXISTS internal_order_id BIGINT")
+            .execute(&mut *tx)
+            .await?;
     }
 
-    query("ALTER TABLE order_result ADD COLUMN IF NOT EXISTS internal_order_id BIGINT")
-        .execute(&mut *tx)
-        .await?;
-
-    let trades_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("trades")
-        .fetch_one(&mut *tx)
-        .await?;
     if trades_exists.is_none() {
         query(
             r#"
@@ -343,16 +339,12 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         )
         .execute(&mut *tx)
         .await?;
+
+        query("ALTER TABLE trades ADD COLUMN IF NOT EXISTS trade_id BIGINT")
+            .execute(&mut *tx)
+            .await?;
     }
 
-    query("ALTER TABLE trades ADD COLUMN IF NOT EXISTS trade_id BIGINT")
-        .execute(&mut *tx)
-        .await?;
-
-    let pending_orders_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("pending_orders")
-        .fetch_one(&mut *tx)
-        .await?;
     if pending_orders_exists.is_none() {
         query(
             r#"
@@ -375,44 +367,24 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         )
         .execute(&mut *tx)
         .await?;
-    }
 
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS side TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS symbol TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_type TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS orig_cl_ord_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS sender_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS target_id TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS event_timestamp TEXT")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS payload JSONB")
-        .execute(&mut *tx)
-        .await?;
-    query("ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
-        .execute(&mut *tx)
-        .await?;
+        for col_sql in [
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS side TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS symbol TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_type TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS orig_cl_ord_id TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_id TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS sender_id TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS target_id TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS event_timestamp TEXT",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS payload JSONB",
+            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        ] {
+            query(col_sql).execute(&mut *tx).await?;
+        }
+    }
 
     tx.commit().await?;
 
@@ -823,7 +795,8 @@ fn classify_result_type(order_event: &OrderEvent, order_result: &OrderResult) ->
             } else {
                 "PARTIAL_FILL"
             }
-        }
+        },
+        OrderStatus::Unmatched => "UNMATCHED",
     }
 }
 

@@ -1,27 +1,38 @@
 use axum::{
     Router,
-    routing::get,
+    routing::{get, post},
     response::{Html, IntoResponse},
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::StatusCode,
+    Json,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
+use serde::{Deserialize, Serialize};
+use rand_core::RngCore;
+use tower_http::cors::{Any, CorsLayer};
 use crate::state::EventBus;
 use crate::players::PlayerStore;
 use crate::ws::ws_handler;
-use base64::{Engine as _, engine::general_purpose};
 
 fn market_name() -> &'static str {
     static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MARKET_NAME
         .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
         .as_str()
+}
+
+/// Information about a single market, served to the login page.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarketInfo {
+    pub name: String,
+    pub url: String,
 }
 
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
@@ -34,6 +45,22 @@ pub struct AppState {
     pub grpc_addr: String,
     /// Per-player state registry (tokens, pending orders, credentials).
     pub player_store: PlayerStore,
+    /// All configured markets (name + web URL), sent to the login page.
+    pub known_markets: Vec<MarketInfo>,
+    /// Active sessions: token → username.
+    pub sessions: Arc<Mutex<HashMap<String, String>>>,
+}
+
+/// Generate a cryptographically random 128-bit hex token.
+pub(crate) fn generate_token() -> String {
+    let mut bytes = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Look up a session token and return the associated username.
+pub(crate) fn authenticate_token(state: &AppState, token: &str) -> Option<String> {
+    state.sessions.lock().unwrap().get(token).cloned()
 }
 
 pub fn run_web_server(
@@ -43,6 +70,7 @@ pub fn run_web_server(
     ip: &str,
     port: u16,
     players_file: PathBuf,
+    known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
 ) {
     tokio::runtime::Builder::new_multi_thread()
@@ -50,7 +78,7 @@ pub fn run_web_server(
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, players_file, shutdown))
+        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, players_file, known_markets, shutdown))
 }
 
 async fn serve(
@@ -60,17 +88,37 @@ async fn serve(
     ip: &str,
     port: u16,
     players_file: PathBuf,
+    known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
 ) {
     let player_store = PlayerStore::load(players_file);
-    let state = AppState { bus, fix_tcp_addr, grpc_addr, player_store };
+    let state = AppState {
+        bus,
+        fix_tcp_addr,
+        grpc_addr,
+        player_store,
+        known_markets,
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+    };
 
     let app = Router::new()
-        .route("/",   get(index_handler))
-        .route("/ws", get(ws_handler))
+        .route("/",            get(app_handler))
+        .route("/login",       get(login_page_handler))
+        .route("/app",         get(app_handler))
+        .route("/api/login",   post(api_login_handler))
+        .route("/api/markets", get(api_markets_handler))
+        .route("/ws",          get(ws_handler))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr: SocketAddr = format!("0.0.0.0:{}", port)
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
     let listener = TcpListener::bind(addr).await
         .unwrap_or_else(|e| panic!("Cannot bind to port {port}: {e}"));
 
@@ -98,39 +146,55 @@ async fn shutdown_signal(shutdown: Arc<AtomicBool>) {
     }
 }
 
-async fn index_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if authenticate(&headers, &state.player_store).is_none() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"Market Simulator\"")],
-            "Authentication required",
-        )
-            .into_response();
-    }
+/// Serve the login page (always accessible, no auth required).
+async fn login_page_handler() -> impl IntoResponse {
+    Html(include_str!("../frontend/login.html"))
+}
 
+/// Serve the trading terminal. Auth is enforced client-side via sessionStorage
+/// token; the WebSocket upgrade enforces it server-side.
+async fn app_handler(State(_state): State<AppState>) -> impl IntoResponse {
     let market = market_name();
+    let login_gateway_url = std::env::var("LOGIN_GATEWAY_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:9875".to_string());
     let html = include_str!("../frontend/index.html")
-        .replace("{{MARKET_NAME}}", market);
-
-    Html(html).into_response()
+        .replace("{{MARKET_NAME}}", market)
+        .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url);
+    Html(html)
 }
 
-/// Extract `(username, password)` from an HTTP Basic-Auth header.
-pub(crate) fn extract_credentials(headers: &HeaderMap) -> Option<(String, String)> {
-    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let encoded = auth.strip_prefix("Basic ")?;
-    let decoded = general_purpose::STANDARD.decode(encoded).ok()?;
-    let user_pass = std::str::from_utf8(&decoded).ok()?.to_string();
-    let (user, pass) = user_pass.split_once(':')?;
-    Some((user.to_string(), pass.to_string()))
+/// POST /api/login — body: `{ "username": "...", "password": "..." }`
+/// Returns 200 `{ token, username }` on success, 401 `{ error }` on failure.
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
 }
 
-/// Authenticate (or auto-register) via the player store.
-/// Returns `Some(username)` on success, `None` on missing / wrong credentials.
-pub(crate) fn authenticate(headers: &HeaderMap, store: &PlayerStore) -> Option<String> {
-    let (username, password) = extract_credentials(headers)?;
-    store.authenticate_or_register(&username, &password).ok()
+async fn api_login_handler(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> impl IntoResponse {
+    match state.player_store.authenticate_or_register(&body.username, &body.password) {
+        Ok(username) => {
+            let token = generate_token();
+            state.sessions.lock().unwrap().insert(token.clone(), username.clone());
+            tracing::info!("[{}] Session created for '{username}'", market_name());
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "token": token, "username": username })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/markets — returns the list of all configured markets.
+async fn api_markets_handler(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.known_markets.clone())
 }

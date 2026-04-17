@@ -167,29 +167,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 }
             }
 
-            // Blocking pop: shutdown should be triggered by a kill message
-            // to unblock this receive path.
             if let Some(event) = self.fifo_in.pop() {
-                // Kill signal: if the sender_id is empty, we treat it as a signal to shut down the order book engine. This allows us to unblock the pop() call and exit the loop gracefully.
-                if event.sender_id == EntityId::from_ascii("") {
-                    self.shutdown.store(true, Ordering::Relaxed);
-
-                    if self.fifo_in.is_empty() {
-                        for producer in &self.fifo_out {
-                            if let Some(producer) = producer {
-                                let mut shutdown_msg = (OrderEvent::default(), OrderResult::default());
-                                while let Err(msg) = producer.push(shutdown_msg) {
-                                    shutdown_msg = msg;
-                                    std::hint::spin_loop();
-                                }
-                            }
-                        }
-                        break;
-                    }
-
-                    continue;
-                }
-
                 let (event, result) = self.order_book.write().unwrap().process_order(event);
                 let mut execution_report_input = (event, result);
                 for producer in &self.fifo_out {
@@ -202,17 +180,8 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 }
             }
 
-            // Break only when shutdown is signaled AND fifo is empty
             if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
-                for producer in &self.fifo_out {
-                    if let Some(producer) = producer {
-                        let mut shutdown_msg = (OrderEvent::default(), OrderResult::default());
-                        while let Err(msg) = producer.push(shutdown_msg) {
-                            shutdown_msg = msg;
-                            std::hint::spin_loop();
-                        }
-                    }
-                }
+                tracing::info!("[{}][{}] Shutdown signal received, stopping order book engine", market_name(), self.order_book.read().unwrap().symbol);
                 break;
             }
         }
@@ -1258,7 +1227,7 @@ mod tests {
             assert!(order_result2.status == OrderStatus::New); // Both orders should be filled
 
             // Send a dummy order to unblock the engine if it's waiting for orders
-            kill_order_book_engine(&inbound_producer);
+            ob_handle.thread().unpark();
             ob_handle.join().expect("Engine thread panicked");
         });
     }

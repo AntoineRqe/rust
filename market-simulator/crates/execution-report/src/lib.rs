@@ -9,21 +9,9 @@ use types::{
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use fix::{engine::FixRawMsg, tags::{exec_type_code_set, msg_types, ord_status_code_set, side_code_set, tags::{self}}};
-use utils::{field_str, number_to_bytes};
+use utils::{field_str, number_to_bytes, market_name};
 use std::sync::Arc;
 use types::FixedPointArithmetic;
-
-fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
-}
-
-pub fn kill_execution_report_engine<const N: usize>(producer: &Producer<'_, (OrderEvent, OrderResult), N>) {
-    // Send a dummy message with an empty sender_id to signal the engine to shut down
-    let _ = producer.push((OrderEvent::default(), OrderResult::default()));
-}
 
 pub struct ExecutionReportEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
@@ -43,12 +31,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     pub fn run(&self) {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
-                if exec_report.0.sender_id == EntityId::from_ascii("") {
-                    self.fifo_out.push((EntityId::default(), FixRawMsg::default())).ok(); // Push a dummy message to unblock any waiting consumers
-                    self.shutdown.store(true, Ordering::Relaxed);
-                } else {
-                    self.process_execution_report(&exec_report);
-                }
+                self.process_execution_report(&exec_report);
             }
         }
         
@@ -204,22 +187,29 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 
         let mut reports: Vec<FixRawMsg<N>> = vec![];
 
-        if exec_report.1.status == types::OrderStatus::Cancelled || exec_report.1.status == types::OrderStatus::CancelRejected {
-            reports.push(self.build_cancel_report(exec_report));
-        } else {
-            reports.push(self.build_new_execution_report(exec_report));
+        match exec_report.1.status {
+            types::OrderStatus::Unmatched => {
+                // For unmatched orders, we don't want to send any execution reports back to the client, since the order was never accepted by the order book engine. We can just ignore it.
+                return;
+            },
+            types::OrderStatus::Cancelled | types::OrderStatus::CancelRejected => {
+                reports.push(self.build_cancel_report(exec_report));
+            },
+            _ => {
+                reports.push(self.build_new_execution_report(exec_report));
 
-            if exec_report.1.trades.len() > 0 {
-                reports.push(self.build_execution_report(exec_report));
+                if exec_report.1.trades.len() > 0 {
+                    reports.push(self.build_execution_report(exec_report));
 
-                let maker_side = match exec_report.0.side {
-                    types::Side::Buy => types::Side::Sell,
-                    types::Side::Sell => types::Side::Buy,
-                };
+                    let maker_side = match exec_report.0.side {
+                        types::Side::Buy => types::Side::Sell,
+                        types::Side::Sell => types::Side::Buy,
+                    };
 
-                for trade in exec_report.1.trades.iter() {
-                    if trade.cl_ord_id != exec_report.0.cl_ord_id {
-                        reports.push(self.build_execution_report_for_trade(&exec_report.0, trade, maker_side));
+                    for trade in exec_report.1.trades.iter() {
+                        if trade.cl_ord_id != exec_report.0.cl_ord_id {
+                            reports.push(self.build_execution_report_for_trade(&exec_report.0, trade, maker_side));
+                        }
                     }
                 }
             }
@@ -331,7 +321,6 @@ mod tests {
         let (fifo_out_tx, fifo_out_rx) = rb_out.split();
 
         let shutdown_signal = Arc::new(AtomicBool::new(false));
-
         let engine = ExecutionReportEngine::new(fifo_in_rx, fifo_out_tx, Arc::clone(&shutdown_signal));
         
         std::thread::scope(|s| {
@@ -529,9 +518,13 @@ mod tests {
             assert_eq!(ord_status_field.value, ord_status_code_set::NEW);
     
             // Stop the engine
-            kill_execution_report_engine(&fifo_in_tx);
-            let _ = fifo_out_rx.pop(); // Purge the dummy message pushed to unblock the engine
-    
+            shutdown_signal.store(true, Ordering::Relaxed);
+
+            match fifo_in_tx.push((OrderEvent::default(), OrderResult::default())) {
+                Ok(_) => {},
+                Err(e) => panic!("Failed to push cancel reject order event into engine: {:?}", e),
+            }
+
             handle.join().unwrap();
         });
     }

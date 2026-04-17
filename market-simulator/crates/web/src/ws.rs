@@ -1,15 +1,15 @@
 use axum::{
-    extract::{ws::{WebSocket, Message}, WebSocketUpgrade, State},
+    extract::{ws::{WebSocket, Message}, WebSocketUpgrade, State, Query},
     response::IntoResponse,
-    http::{HeaderMap, StatusCode, header},
+    http::StatusCode,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::server::AppState;
-use crate::server::authenticate;
+use serde::Deserialize;
+use crate::server::{AppState, authenticate_token};
 use crate::state::{WsEvent, BrowserCommand, PendingOrder};
 
 fn market_name() -> &'static str {
@@ -19,18 +19,19 @@ fn market_name() -> &'static str {
         .as_str()
 }
 
+#[derive(Deserialize)]
+pub struct WsParams {
+    token: Option<String>,
+}
+
 pub async fn ws_handler(
     ws:           WebSocketUpgrade,
     State(state): State<AppState>,
-    headers:      HeaderMap,
+    Query(params): Query<WsParams>,
 ) -> impl IntoResponse {
-    let Some(username) = authenticate(&headers, &state.player_store) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"Market Simulator\"")],
-            "Authentication required",
-        )
-            .into_response();
+    let token = params.token.unwrap_or_default();
+    let Some(username) = authenticate_token(&state, &token) else {
+        return (StatusCode::UNAUTHORIZED, "Invalid or missing session token").into_response();
     };
 
     ws.on_upgrade(move |socket| handle_socket(socket, state, username))
