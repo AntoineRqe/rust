@@ -35,6 +35,13 @@
                  white-space:nowrap;flex-shrink:0;border-radius:4px}
   #market-switch:hover{border-color:var(--blue);color:var(--text)}
   #market-switch:disabled{opacity:.35;cursor:not-allowed}
+  #disconnect-btn{background:#0e1520;color:var(--red);border:1px solid var(--border);
+                  min-width:110px;height:30px;display:inline-flex;align-items:center;
+                  justify-content:center;font-size:10px;font-weight:bold;
+                  letter-spacing:.05em;padding:0 10px;text-transform:uppercase;
+                  white-space:nowrap;flex-shrink:0;border-radius:4px}
+  #disconnect-btn:hover{border-color:var(--red);color:#fff;background:rgba(255,61,87,.1)}
+  #disconnect-btn:active{background:rgba(255,61,87,.2)}
 
   /* ── mobile tab bar ── */
   #tabbar{display:none;background:var(--panel);border-bottom:1px solid var(--border);
@@ -226,6 +233,7 @@
   <span id="token-balance">TOKENS: &#8212;</span>
   <span id="ws-dot">&#9679; WS</span>
   <span id="status-dot">&#9679; DISCONNECTED</span>
+  <button id="disconnect-btn" onclick="disconnect()" title="Disconnect and return to login" aria-label="Disconnect">Disconnect</button>
 </div>
 
 <div id="tabbar">
@@ -472,6 +480,22 @@ async function switchMarket() {
   }
 }
 
+function disconnect() {
+  // Clear session storage
+  sessionStorage.removeItem('auth_token');
+  sessionStorage.removeItem('auth_username');
+  sessionStorage.removeItem('auth_password');
+  sessionStorage.removeItem('auth_is_admin');
+  
+  // Close WebSocket if connected
+  if (ws) {
+    ws.close();
+  }
+  
+  // Redirect to login gateway
+  location.replace(LOGIN_GATEWAY_URL);
+}
+
 // client-side order book (updated from exec reports)
 const book = {
   bids:    {},   // price → qty
@@ -535,8 +559,10 @@ function connectWS() {
 
 // ── route incoming server events ──────────────────────────────────────────────
 function handleServerEvent(msg) {
+  console.debug('[WsEvent]', msg);
   switch (msg.type) {
     case 'status':
+      console.log('[Status]', msg.connected ? 'CONNECTED' : 'DISCONNECTED');
       handleStatus(msg.connected);
       break;
     case 'player_state':
@@ -570,7 +596,8 @@ function send(obj) {
 // ── FIX status ────────────────────────────────────────────────────────────────
 function handleStatus(connected) {
   const dot = ge('status-dot');
-  dot.textContent = connected ? '● CONNECTED' : '● DISCONNECTED';
+  const newText = connected ? '● CONNECTED' : '● DISCONNECTED';
+  dot.textContent = newText;
   dot.className   = connected ? 'on' : '';
   ge('btn-send').disabled = !connected;
   document.querySelectorAll('.md-btn').forEach(b => b.disabled = !connected);
@@ -578,6 +605,8 @@ function handleStatus(connected) {
   if (!connected) {
     ge('token-balance').textContent = 'TOKENS: —';
   }
+  
+  console.log('[UI] Status updated to:', newText);
 }
 
 // Debounce player_state updates so rapid server bursts (exec-report + player_state)

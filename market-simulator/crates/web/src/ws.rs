@@ -49,6 +49,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo)
         Ok(stream) => stream,
         Err(e) => {
             tracing::warn!("[{}] Browser FIX TCP connect failed: {e}", market_name());
+            
+            // Send error message
             let err = serde_json::to_string(&WsEvent::FixMessage {
                 label: "ERROR".into(),
                 body: format!("Unable to connect to FIX TCP server: {e}"),
@@ -56,6 +58,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo)
                 recipient: Some(username.clone()),
             }).unwrap();
             let _ = sender.send(Message::Text(err.into())).await;
+            
+            // Send disconnected status
+            let status = serde_json::to_string(&WsEvent::Status { connected: false }).unwrap();
+            let _ = sender.send(Message::Text(status.into())).await;
+            
             return;
         }
     };
@@ -68,6 +75,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo)
         Ok(stream) => stream,
         Err(e) => {
             tracing::warn!("[{}] Browser FIX TCP clone failed: {e}", market_name());
+            
+            // Send error message
             let err = serde_json::to_string(&WsEvent::FixMessage {
                 label: "ERROR".into(),
                 body: format!("Unable to initialize FIX TCP session: {e}"),
@@ -75,6 +84,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo)
                 recipient: Some(username.clone()),
             }).unwrap();
             let _ = sender.send(Message::Text(err.into())).await;
+            
+            // Send disconnected status
+            let status = serde_json::to_string(&WsEvent::Status { connected: false }).unwrap();
+            let _ = sender.send(Message::Text(status.into())).await;
+            
             return;
         }
     };
