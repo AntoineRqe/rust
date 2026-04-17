@@ -263,7 +263,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let order_book = Arc::new(RwLock::new(OrderBook::new("AAAPL")));
 
     // Book engine thread
-    let mut order_book_engine = OrderBookEngine::with_shutdown(ob_rx, [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)], ob_control_rx, Arc::clone(&order_book), Some(Arc::clone(&global_shutdown)));
+    let mut order_book_engine = OrderBookEngine::new(ob_rx, [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)], ob_control_rx, Arc::clone(&order_book), Arc::clone(&global_shutdown));
 
     order_book_engine.import_order_book(initial_orders);
 

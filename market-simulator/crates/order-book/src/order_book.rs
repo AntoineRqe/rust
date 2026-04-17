@@ -19,7 +19,6 @@ use snapshot::types::{Snapshot};
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 use std::sync::RwLock;
 
 pub enum OrderBookControl {
@@ -93,6 +92,11 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
     pub fn run(&self) {
         while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(self.interval_ms)); // Sleep for the configured interval before generating the next snapshot
+            
+            if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                break; // Check for shutdown signal again after waking up to avoid generating an unnecessary snapshot
+            }
+
             let mut snapshot = self.generate_snapshot();
             tracing::debug!("[{}] Snapshot sent with ID: {}, timestamp: {}", market_name(), snapshot.id, snapshot.timestamp);
             
@@ -128,18 +132,8 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
         fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
         order_book: Arc<RwLock<OrderBook>>,
+        shutdown: Arc<AtomicBool>
     ) -> Self {
-        Self::with_shutdown(fifo_in, fifo_out, control_rx, order_book, None)
-    }
-
-    pub fn with_shutdown(
-        fifo_in: Consumer<'a, OrderEvent, N>,
-        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
-        control_rx: crossbeam_channel::Receiver<OrderBookControl>,
-        order_book: Arc<RwLock<OrderBook>>,
-        shutdown: Option<Arc<AtomicBool>>,
-    ) -> Self {
-        let shutdown = shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         OrderBookEngine {
             fifo_in,
             fifo_out,
@@ -304,7 +298,7 @@ impl OrderBook {
                 internal_order_id: 0, // No internal order ID since the cancellation cannot be processed
                 trades: Trades::default(),
                 status: OrderStatus::CancelRejected,
-                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
             });
         }
 
@@ -350,7 +344,7 @@ impl OrderBook {
                                 internal_order_id: self.generate_internal_order_id(),
                                 trades: Trades::default(),
                                 status: OrderStatus::Cancelled,
-                                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                                ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
                             });
                         }
                         None => tracing::error!("[{}][{}][{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id, order_ref.side, order_ref.price, index),
@@ -365,7 +359,7 @@ impl OrderBook {
             internal_order_id: self.generate_internal_order_id(),
             trades: Trades::default(),
             status: OrderStatus::CancelRejected,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         })
     }
 
@@ -376,7 +370,7 @@ impl OrderBook {
             trades,
             status:  OrderStatus::New,
             internal_order_id: self.generate_internal_order_id(),
-            timestamp: Instant::now(), // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
+            ..Default::default() // Timestamp can be set to the current time in milliseconds since epoch if needed for time-priority sorting in the future
         };
         (order, order_result)
     }
@@ -418,7 +412,7 @@ impl OrderBook {
                         id: self.generate_trade_id(), // Generate a unique trade ID
                         order_qty: maker_qty_before,
                         leaves_qty: best_bid.quantity,
-                        timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                        ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
                         tracing::error!("[{}][{}][{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name(), order.symbol, order.cl_ord_id);
@@ -491,7 +485,7 @@ impl OrderBook {
                         id: self.generate_trade_id(), // Generate a unique trade ID
                         order_qty: maker_qty_before,
                         leaves_qty: best_ask.quantity,
-                        timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                        ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
                     }) {
                         // Maximum Trades reached
                         tracing::error!("[{}][{}][{}] Maximum number of trades reached for this order, some trades may not be recorded in the OrderResult", market_name(), order.symbol, order.cl_ord_id);
@@ -591,7 +585,7 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Instant};
+    use std::{thread};
 
     use super::*;
     use types::macros::{SymbolId};
@@ -623,7 +617,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (order, result) = order_book.process_order(order);
@@ -641,7 +635,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the cancel order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (cancel_order, cancel_result) = order_book.process_order(cancel_order);
@@ -663,7 +657,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (order, result) = order_book.process_order(order);
@@ -681,7 +675,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the cancel order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (cancel_order, cancel_result) = order_book.process_order(cancel_order);
@@ -706,7 +700,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (order, result) = order_book.process_order(order);
@@ -734,7 +728,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0),
@@ -746,7 +740,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (order1, result1) = order_book.process_order(order1);
@@ -782,7 +776,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(99.0),
@@ -794,7 +788,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -806,7 +800,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID, // Set the symbol for the order
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (order1, result1) = order_book.process_order(order1);
@@ -875,7 +869,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -887,7 +881,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
             price: FixedPointArithmetic::from_f64(97.0),
@@ -899,7 +893,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order4 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0),
@@ -911,7 +905,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (order1, result1) = order_book.process_order(order1);
@@ -982,7 +976,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -994,7 +988,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order3 = OrderEvent {
             price: FixedPointArithmetic::from_f64(98.0),
@@ -1006,7 +1000,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order4 = OrderEvent {
             price: FixedPointArithmetic::from_f64(0.0), // Price is ignored for market orders
@@ -1018,7 +1012,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let (order1, result1) = order_book.process_order(order1);
@@ -1081,7 +1075,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(102.0),
@@ -1093,7 +1087,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         order_book.process_order(order1);
@@ -1120,7 +1114,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(102.0),
@@ -1132,7 +1126,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         order_book.process_order(order1);
@@ -1163,6 +1157,7 @@ mod tests {
         let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
 
         thread::scope(|s| {
+            let shutdown = Arc::new(AtomicBool::new(false));
             let order_book = Arc::new(RwLock::new(OrderBook::new(SYMBOL_STR)));
             let(inbound_producer, inbound_consumer) = inbound_queue.split();
             let(outbound_producer, outbound_consumer) = outbound_queue.split();
@@ -1173,6 +1168,7 @@ mod tests {
         [Some(outbound_producer), None, None],
                 control_rx,
                 Arc::clone(&order_book),
+                Arc::clone(&shutdown),
             );
             
             let ob_handle = s.spawn(move || {
@@ -1190,7 +1186,7 @@ mod tests {
                 sender_id: SENDER,
                 target_id: TARGET,
                 symbol: SYMBOL_ID,
-                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
             };
 
             inbound_producer.push(order).unwrap();
@@ -1214,7 +1210,7 @@ mod tests {
                 sender_id: SENDER,
                 target_id: TARGET,
                 symbol: SYMBOL_ID,
-                timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+                ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
             };
 
             inbound_producer.push(order2).unwrap();
@@ -1227,18 +1223,15 @@ mod tests {
             assert!(order_result2.status == OrderStatus::New); // Both orders should be filled
 
             // Send a dummy order to unblock the engine if it's waiting for orders
-            ob_handle.thread().unpark();
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
+            kill_order_book_engine(&inbound_producer);
+
             ob_handle.join().expect("Engine thread panicked");
         });
     }
 
     #[test]
     fn test_send_snapshot() {
-        tracing_subscriber::fmt::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .init();
-
-
         let order1 = OrderEvent {
             price: FixedPointArithmetic::from_f64(100.0),
             quantity: FixedPointArithmetic::from_f64(10.0),
@@ -1249,7 +1242,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(102.0),
@@ -1261,7 +1254,7 @@ mod tests {
             sender_id: SENDER,
             target_id: TARGET,
             symbol: SYMBOL_ID,
-            timestamp: Instant::now(), // Set the timestamp to the current time in milliseconds since epoch
+            ..Default::default() // Set the timestamp to the current time in milliseconds since epoch
         };
 
         let mut queue = spsc::spsc_lock_free::RingBuffer::<Snapshot, 1024>::new();

@@ -246,7 +246,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 },
                 tags::SENDING_TIME => {
                     if let Some(timestamp) = utils::UtcTimestamp::from_fix_bytes(field.value) {
-                        order_event.timestamp = timestamp.to_instant();
+                        order_event.timestamp = timestamp.to_unix_ms();
                     } else {
                         return Err("Invalid timestamp format"); // Invalid timestamp format
                     }
@@ -356,6 +356,7 @@ mod tests {
 
         std::thread::scope(|scope| {
 
+            let shutdown = Arc::new(AtomicBool::new(false));
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
             let (er_to_fix_tx, er_to_fix_rx) = er_to_fix.split();
 
@@ -363,7 +364,7 @@ mod tests {
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 er_to_fix_rx,
-                Arc::new(AtomicBool::new(false)),
+                Arc::clone(&shutdown),
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
@@ -405,6 +406,7 @@ mod tests {
             assert_eq!(order_event.side, Side::Buy);
 
             // Stop the FIX engine thread
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
             kill_fix_inbound_engine(&net_to_fix_tx);
             kill_fix_outbound_engine(&er_to_fix_tx);
 
@@ -416,6 +418,7 @@ mod tests {
 
     #[test]
     fn test_fix_engine_cancel_request_with_orig_cl_ord_id() {
+        let shutdown = Arc::new(AtomicBool::new(false));
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
@@ -428,7 +431,7 @@ mod tests {
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 er_to_fix_rx,
-                Arc::new(AtomicBool::new(false)),
+                Arc::clone(&shutdown),
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
@@ -470,6 +473,8 @@ mod tests {
                 field_str(order_event.orig_cl_ord_id.unwrap().as_ref()),
                 b"ORD-12345"
             );
+
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
 
             kill_fix_inbound_engine(&net_to_fix_tx);
             kill_fix_outbound_engine(&er_to_fix_tx);

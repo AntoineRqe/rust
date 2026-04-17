@@ -154,7 +154,7 @@ impl UtcTimestamp {
 
     pub fn now() -> Self {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
-        Self::from_unix_ms(now.as_millis() as u64)
+        Self::from_unix_ns(now.as_nanos() as u64)
     }
 
     /// Convert to unix timestamp in milliseconds
@@ -169,31 +169,71 @@ impl UtcTimestamp {
         ms
     }
 
-pub fn from_unix_ms(ms: u64) -> Self {
-    let days = ms.div_euclid(86_400_000);
-    let time_ms = ms.rem_euclid(86_400_000);
-
-    let z   = days + 719_467;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);                              // [0, 146096]
-    let yoe = (doe - doe/1_460 + doe/36_524 - doe/146_096) / 365; // [0, 399] -- was doe/4, must be doe/1460
-    let y   = yoe + era * 400;
-    let doy = doe - (365*yoe + yoe/4 - yoe/100);                 // [0, 365]
-    let m   = (5*doy + 2) / 153;                                  // [0, 11]
-    let d   = doy - (153*m + 2)/5 + 1;                           // [1, 31]
-    let m   = if m < 10 { m + 3 } else { m - 9 };
-    let y   = if m <= 2 { y + 1 } else { y };
-
-    let hour   = (time_ms / 3_600_000) as u8;
-    let minute = ((time_ms % 3_600_000) / 60_000) as u8;
-    let second = ((time_ms % 60_000) / 1_000) as u8;
-    let millis = (time_ms % 1_000) as u16;
-
-    Self {
-        year: y as u16, month: m as u8, day: d as u8,
-        hour, minute, second, millis, micros: None, nanos: None
+    // Convert to unix timestamp in nanoseconds
+    pub fn to_unix_ns(&self) -> u64 {
+        let ms = self.to_unix_ms();
+        let micros = self.micros.unwrap_or(0) as u64;
+        let nanos = self.nanos.unwrap_or(0) as u64;
+        ms * 1_000_000 + micros * 1_000 + nanos
     }
-}
+
+    pub fn from_unix_ms(ms: u64) -> Self {
+        let days = ms.div_euclid(86_400_000);
+        let time_ms = ms.rem_euclid(86_400_000);
+
+        let z   = days + 719_467;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);                              // [0, 146096]
+        let yoe = (doe - doe/1_460 + doe/36_524 - doe/146_096) / 365; // [0, 399] -- was doe/4, must be doe/1460
+        let y   = yoe + era * 400;
+        let doy = doe - (365*yoe + yoe/4 - yoe/100);                 // [0, 365]
+        let m   = (5*doy + 2) / 153;                                  // [0, 11]
+        let d   = doy - (153*m + 2)/5 + 1;                           // [1, 31]
+        let m   = if m < 10 { m + 3 } else { m - 9 };
+        let y   = if m <= 2 { y + 1 } else { y };
+
+        let hour   = (time_ms / 3_600_000) as u8;
+        let minute = ((time_ms % 3_600_000) / 60_000) as u8;
+        let second = ((time_ms % 60_000) / 1_000) as u8;
+        let millis = (time_ms % 1_000) as u16;
+
+        Self {
+            year: y as u16, month: m as u8, day: d as u8,
+            hour, minute, second, millis, micros: None, nanos: None
+        }
+    }
+
+    pub fn from_unix_ns(ns: u64) -> Self {
+        let ms = ns / 1_000_000;
+        let micros = (ns / 1_000) % 1_000;
+        let nanos = ns % 1_000;
+
+        let days = ms.div_euclid(86_400_000);
+        let time_ms = ms.rem_euclid(86_400_000);
+
+        let z   = days + 719_467;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);                              // [0, 146096]
+        let yoe = (doe - doe/1_460 + doe/36_524 - doe/146_096) / 365; // [0, 399] -- was doe/4, must be doe/1460
+        let y   = yoe + era * 400;
+        let doy = doe - (365*yoe + yoe/4 - yoe/100);                 // [0, 365]
+        let m   = (5*doy + 2) / 153;                                  // [0, 11]
+        let d   = doy - (153*m + 2)/5 + 1;                           // [1, 31]
+        let m   = if m < 10 { m + 3 } else { m - 9 };
+        let y   = if m <= 2 { y + 1 } else { y };
+
+        let hour   = (time_ms / 3_600_000) as u8;
+        let minute = ((time_ms % 3_600_000) / 60_000) as u8;
+        let second = ((time_ms % 60_000) / 1_000) as u8;
+        let millis = (time_ms % 1_000) as u16;
+        let micros = micros as u16;
+        let nanos = nanos as u16;
+
+        Self {
+            year: y as u16, month: m as u8, day: d as u8,
+            hour, minute, second, millis, micros: Some(micros), nanos: Some(nanos)
+        }
+    }
 }
 
 /// Parse an ASCII byte slice representing a positive integer into a `u64`.
@@ -292,6 +332,14 @@ mod tests {
         let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123, micros: None, nanos: None };
         let unix_ms = ts.to_unix_ms();
         let ts_converted = UtcTimestamp::from_unix_ms(unix_ms);
+        assert_eq!(ts, ts_converted);
+    }
+
+    #[test]
+    fn test_utc_timestamp_unix_conversion_ns() {
+        let ts = UtcTimestamp { year: 2024, month: 2, day: 19, hour: 12, minute: 30, second: 0, millis: 123, micros: Some(456), nanos: Some(789) };
+        let unix_ns = ts.to_unix_ns();
+        let ts_converted = UtcTimestamp::from_unix_ns(unix_ns);
         assert_eq!(ts, ts_converted);
     }
 

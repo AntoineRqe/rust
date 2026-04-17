@@ -47,25 +47,26 @@ unsafe impl<T: Send, const N: usize> Sync for RingBuffer<T, N> {}
 // Need to properly drop any remaining items in the buffer when RingBuffer is dropped
 impl<T, const N: usize> Drop for RingBuffer<T, N> {
     fn drop(&mut self) {
-        let mut head = self.head.0.load(Ordering::Relaxed);
-        let tail = self.tail.0.load(Ordering::Relaxed);
+        let head = self.head.0.load(Ordering::Relaxed);
+        let mut tail = self.tail.0.load(Ordering::Relaxed);
         while head != tail {
+            println!("Dropping item at index {}", tail);
             unsafe {
                 self.buffer.get()
                     .as_mut()
                     .unwrap()
                     .0
-                    .get_unchecked_mut(head)
+                    .get_unchecked_mut(tail)
                     .assume_init_drop();
             }
-            head = (head + 1) & (N - 1); // Bitwise mask because N is power of 2
+            tail = (tail + 1) & (N - 1); // Bitwise mask because N is power of 2
         }
     }
 }
 
 impl <'a, T, const N: usize> Producer<'a, T, N> {
     /// Pushes an item into the ring buffer and wakes up the consumer thread if it was sleeping, to improve latency when buffer is full.
-    /// Returns Err(item) if the buffer is full.
+    /// Returns Err(item) if the buffer is full.            while let Some(_) = ss_consumer.try_pop() {
     pub fn push(&self, item: T) -> Result<(), T> {
         match self.rb.push(item) {
             Ok(()) => {

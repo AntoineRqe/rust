@@ -3,7 +3,6 @@ use sqlx::{query, query_scalar, PgPool, Row, Transaction, Postgres};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::future::Future;
-use std::time::Instant;
 use std::time::Duration;
 use std::sync::OnceLock;
 use url::Url;
@@ -446,9 +445,7 @@ pub async fn collect_all_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::
                 .map(|value| OrderId::from_ascii(&value)),
             sender_id: entity_id_from_option(row.get("sender_id")),
             target_id: entity_id_from_option(row.get("target_id")),
-            // `Instant` cannot be faithfully reconstructed from SQL text, so we
-            // restore a fresh monotonic timestamp here.
-            timestamp: Instant::now(),
+            ..Default::default()
         })
         .collect())
 }
@@ -494,7 +491,7 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
             leaves_qty: FixedPointArithmetic::from_option_f64(row.get("leaves_qty")),
             // `Instant` cannot be faithfully reconstructed from SQL text, so we
             // restore a fresh monotonic timestamp here.
-            timestamp: Instant::now(),
+            ..Default::default()
         })
         .collect())
 }
@@ -522,7 +519,7 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
             status: parse_order_status(row.get("status")),
             // `Instant` cannot be faithfully reconstructed from SQL text, so we
             // restore a fresh monotonic timestamp here.
-            timestamp: Instant::now(),
+            ..Default::default()
         })
         .collect())
 }
@@ -562,7 +559,7 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
                 .map(|value| OrderId::from_ascii(&value)),
             sender_id: entity_id_from_option(row.get("sender_id")),
             target_id: entity_id_from_option(row.get("target_id")),
-            timestamp: Instant::now(),
+            ..Default::default()
         })
         .collect())
 }
@@ -852,7 +849,6 @@ fn trade_id_from_option(value: Option<String>) -> Option<u64> {
 mod tests {
     use super::*;
     use std::sync::OnceLock;
-    use std::time::Instant;
     use tokio::sync::Mutex;
     use types::{OrderType, Trade, Trades};
     use types::macros::{EntityId, OrderId};
@@ -897,7 +893,7 @@ mod tests {
             orig_cl_ord_id: Some(OrderId::from_ascii("orig123")),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         let mut trades = Trades::<4>::new();
@@ -908,14 +904,14 @@ mod tests {
             cl_ord_id: OrderId::from_ascii("maker123"),
             order_qty: FixedPointArithmetic::from_f64(100.0),
             leaves_qty: FixedPointArithmetic::ZERO,
-            timestamp: Instant::now(),
+            ..Default::default()
         }).unwrap();
 
         let order_result = OrderResult {
             internal_order_id: 101,
             status: OrderStatus::Filled,
             trades,
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         persist_order_update(&pool, &order_event, &order_result).await?;
@@ -963,7 +959,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         let mut trades = Trades::<4>::new();
@@ -974,14 +970,14 @@ mod tests {
             cl_ord_id: OrderId::from_ascii("maker456"),
             order_qty: FixedPointArithmetic::from_f64(75.0),
             leaves_qty: FixedPointArithmetic::from_f64(35.0),
-            timestamp: Instant::now(),
+            ..Default::default()
         }).unwrap();
 
         let order_result = OrderResult {
             internal_order_id: 102,
             status: OrderStatus::PartiallyFilled,
             trades,
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         persist_order_update(&pool, &order_event, &order_result).await?;
@@ -1026,14 +1022,14 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         let new_result = OrderResult {
             internal_order_id: 201,
             status: OrderStatus::New,
             trades: Trades::<4>::new(),
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         persist_order_update(&pool, &order_event, &new_result).await?;
@@ -1051,14 +1047,14 @@ mod tests {
             cl_ord_id: OrderId::from_ascii("maker-aa"),
             order_qty: FixedPointArithmetic::from_f64(50.0),
             leaves_qty: FixedPointArithmetic::from_f64(10.0),
-            timestamp: Instant::now(),
+            ..Default::default()
         }).unwrap();
 
         let partial_result = OrderResult {
             internal_order_id: 202,
             status: OrderStatus::PartiallyFilled,
             trades: partial_trades,
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         persist_order_update(&pool, &order_event, &partial_result).await?;
@@ -1076,14 +1072,14 @@ mod tests {
             cl_ord_id: OrderId::from_ascii("maker-bb"),
             order_qty: FixedPointArithmetic::from_f64(60.0),
             leaves_qty: FixedPointArithmetic::ZERO,
-            timestamp: Instant::now(),
+            ..Default::default()
         }).unwrap();
 
         let filled_result = OrderResult {
             internal_order_id: 203,
             status: OrderStatus::Filled,
             trades: fill_trades,
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         persist_order_update(&pool, &order_event, &filled_result).await?;
@@ -1113,7 +1109,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         persist_order_update(
@@ -1123,7 +1119,7 @@ mod tests {
                 internal_order_id: 301,
                 status: OrderStatus::New,
                 trades: Trades::<4>::new(),
-                timestamp: Instant::now(),
+                ..Default::default()
             },
         ).await?;
 
@@ -1137,7 +1133,7 @@ mod tests {
             orig_cl_ord_id: Some(OrderId::from_ascii("live001")),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
-            timestamp: Instant::now(),
+            ..Default::default()
         };
 
         persist_order_update(
@@ -1147,7 +1143,7 @@ mod tests {
                 internal_order_id: 302,
                 status: OrderStatus::Cancelled,
                 trades: Trades::<4>::new(),
-                timestamp: Instant::now(),
+                ..Default::default()
             },
         ).await?;
 

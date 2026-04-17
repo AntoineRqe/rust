@@ -147,7 +147,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
             if let Some((order_event, order_result)) = self.fifo_in.pop() {
                 // Process incoming order events and results from the order book engine
                 // Transform the order event and result into a market data feed event
-                tracing::debug!("[{}] Received order event: {:?}, result: {:?}", market_name(), order_event, order_result);
+                tracing::debug!("[{}] Received order event: {}, result: {:?}", market_name(), order_event, order_result);
                 if let Some(market_data_feed_events) = self.build_market_data_feed_events(&order_event, &order_result) {
                     for market_data_feed_event in market_data_feed_events {
                         let bytes = market_data_feed_event.to_bytes();
@@ -415,7 +415,7 @@ mod tests {
                 cl_ord_id: OrderId::from_ascii("maker001"),
                 order_qty: types::FixedPointArithmetic(5),
                 leaves_qty: types::FixedPointArithmetic(2),
-                timestamp: std::time::Instant::now(),
+                ..Default::default()
             })
             .unwrap();
 
@@ -423,7 +423,7 @@ mod tests {
             internal_order_id: 0,
             trades,
             status: types::OrderStatus::PartiallyFilled,
-            timestamp: std::time::Instant::now(),
+            ..Default::default()
         };
 
         let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
@@ -461,7 +461,7 @@ mod tests {
             internal_order_id: 0,
             trades: types::Trades::default(),
             status: types::OrderStatus::Filled,
-            timestamp: std::time::Instant::now(),
+            ..Default::default()
         };
 
         let (header, event) = run_engine_once_and_receive(order_event, order_result);
@@ -559,7 +559,7 @@ mod tests {
                 cl_ord_id: OrderId::from_ascii("maker001"),
                 order_qty: types::FixedPointArithmetic(10),
                 leaves_qty: types::FixedPointArithmetic(1),
-                timestamp: std::time::Instant::now(),
+                ..Default::default()
             })
             .unwrap();
 
@@ -567,7 +567,7 @@ mod tests {
             internal_order_id: 0,
             trades,
             status: types::OrderStatus::Filled,
-            timestamp: std::time::Instant::now(),
+            ..Default::default()
         };
 
         let (header, event) = run_engine_once_and_receive(order_event, order_result);

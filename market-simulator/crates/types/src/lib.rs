@@ -1,7 +1,7 @@
-use std::time::Instant;
 use std::{cmp::Ordering};
 use std::ops::{Index};
 use std::iter::Sum;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod macros;
 pub mod multicast;
@@ -32,7 +32,7 @@ pub struct OrderEvent {
     pub orig_cl_ord_id: Option<OrderId>, // FIX OrigClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub sender_id: EntityId, // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub target_id: EntityId, // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
-    pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
 impl Default for OrderEvent {
@@ -47,7 +47,10 @@ impl Default for OrderEvent {
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
             symbol: SymbolId::default(),
-            timestamp: Instant::now(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64, // current time in milliseconds
         }
     }
 }
@@ -82,7 +85,7 @@ impl OrderEvent {
         sender_id: EntityId,
         target_id: EntityId,
         symbol: SymbolId,
-        timestamp: Instant,
+        timestamp: u64,
     ) -> Self {
         Self {
             price,
@@ -188,7 +191,41 @@ pub struct Trade {
     pub cl_ord_id: OrderId,
     pub order_qty: FixedPointArithmetic,
     pub leaves_qty: FixedPointArithmetic,
-    pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+}
+
+impl Default for Trade {
+    fn default() -> Self {
+        Self {
+            price: FixedPointArithmetic::ZERO,
+            quantity: FixedPointArithmetic::ZERO,
+            id: 0,
+            cl_ord_id: OrderId::default(),
+            order_qty: FixedPointArithmetic::ZERO,
+            leaves_qty: FixedPointArithmetic::ZERO,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64, // current time in milliseconds
+        }
+    }
+}
+
+impl std::fmt::Display for Trade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Trade :
+            \nprice: {}
+            \nquantity: {}
+            \nid: {:?}
+            \ncl_ord_id: {}
+            \norder_qty: {}
+            \nleaves_qty: {}
+            \ntimestamp: {}",
+            self.price.raw(), self.quantity, self.id, self.cl_ord_id, self.order_qty, self.leaves_qty, self.timestamp
+        )
+    }
 }
 
 /// Represents the result of processing an order, including any trades that occurred and the final status of the order.
@@ -208,7 +245,10 @@ impl<const N: usize> Default for Trades<N> {
                 cl_ord_id: OrderId::default(),
                 order_qty: FixedPointArithmetic::ZERO,
                 leaves_qty: FixedPointArithmetic::ZERO,
-                timestamp: Instant::now(),
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
             }; N],
             count: 0,
         }
@@ -271,7 +311,7 @@ pub struct OrderResult {
     pub internal_order_id: u64, // Internal order ID assigned by the engine, can be used for tracking and debugging
     pub trades: Trades<4>, // Fixed-size array for trades, adjust size as needed
     pub status: OrderStatus,
-    pub timestamp: Instant, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
 impl Default for OrderResult {
@@ -280,7 +320,10 @@ impl Default for OrderResult {
             internal_order_id: 0,
             trades: Trades::new(),
             status: OrderStatus::Unmatched,
-            timestamp: Instant::now(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
         }
     }
 }

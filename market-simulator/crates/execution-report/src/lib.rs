@@ -292,8 +292,6 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use types::{
         Trade,
         Trades,
@@ -341,14 +339,14 @@ mod tests {
                 sender_id: EntityId::from_ascii("SENDER"),
                 target_id: EntityId::from_ascii("TARGET"),
                 symbol: SymbolId::from_ascii("TEST"),
-                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                ..Default::default()
             };
 
             let order_result = OrderResult {
                 internal_order_id: 100,
                 trades: Trades::default(),
                 status: types::OrderStatus::New,
-                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                ..Default::default()
             };
 
             match fifo_in_tx.push((order_event.clone(), order_result)) {
@@ -397,14 +395,14 @@ mod tests {
                 sender_id: EntityId::from_ascii("SENDER2"),
                 target_id: EntityId::from_ascii("TARGET2"),
                 symbol: SymbolId::from_ascii("TEST"),
-                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                ..Default::default()
             };
 
             let mut sell_order_result = OrderResult {
                 internal_order_id: 101,
                 trades: Trades::default(),
                 status: OrderStatus::New,
-                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                ..Default::default()
             };
 
             sell_order_result.trades.add_trade(Trade {
@@ -414,7 +412,7 @@ mod tests {
                 cl_ord_id: OrderId::from_ascii("CLORD12345"),
                 order_qty: FixedPointArithmetic(5_000_000_000),
                 leaves_qty: FixedPointArithmetic::ZERO,
-                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                ..Default::default()
             }).expect("Failed to add trade to OrderResult");
             
             match fifo_in_tx.push((sell_order_event, sell_order_result)) {
@@ -470,7 +468,7 @@ mod tests {
                 internal_order_id: 103,
                 trades: Trades::default(),
                 status: types::OrderStatus::Cancelled,
-                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                ..Default::default()
             };
 
             let mut order_event = order_event;
@@ -500,7 +498,7 @@ mod tests {
                 internal_order_id: 104,
                 trades: Trades::default(),
                 status: types::OrderStatus::CancelRejected,
-                timestamp: Instant::now(), // Current timestamp in milliseconds since epoch
+                ..Default::default()
             };
 
             match fifo_in_tx.push((order_event, cancel_reject_order_result)) {

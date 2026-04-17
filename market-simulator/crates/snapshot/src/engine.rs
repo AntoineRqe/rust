@@ -23,7 +23,6 @@ impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
         while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(snapshot) = self.fifo_in.pop() {
                 // Process the snapshot
-                // For example, you can update the order book snapshot based on the snapshot
                 if snapshot.timestamp == 0 {
                     tracing::info!("[{}] Received shutdown signal, stopping SnapshotMultiCastEngine", market_name());
                     continue;
