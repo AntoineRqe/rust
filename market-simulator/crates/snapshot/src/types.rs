@@ -1,4 +1,5 @@
 use types::{OrderEvent};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This module defines the data structures for representing order book snapshots and market data feeds.
 
@@ -81,7 +82,10 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
-            timestamp: 0,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
             symbol: String::new(),
             id: 0,
             order_book: OrderBookSnapshot::default(),

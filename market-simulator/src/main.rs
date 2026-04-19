@@ -265,10 +265,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         // Create shared order book instance and pass it to the order book engine and snapshot generation engine so they can read/write it without going through the queues.
         let order_book = OrderBook::new(&symbol);
         let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot {
-            timestamp: 0,
             symbol: symbol.to_string(),
-            id: 0,
-            order_book: snapshot::types::OrderBookSnapshot::default(),
+            ..Default::default()
         }));
 
         // Book engine thread
