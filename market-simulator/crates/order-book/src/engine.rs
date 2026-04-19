@@ -55,7 +55,11 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 
     pub fn import_order_book(&mut self, orders: Vec<OrderEvent>) {
         for order in orders {
-            self.order_book.process_order(order);
+            let (order_event, order_result) = self.order_book.process_order(order);
+            // Update the snapshot with the latest state of the order book after processing the order
+            if self.snapshot_ptr.is_some() {
+                self.incremental_update(order_event, order_result);
+            }
         }
     }
 

@@ -5,13 +5,13 @@ use crate::types::Snapshot;
 use types::multicast::{SourceSocket};
 
 pub struct SnapshotMultiCastEngine<'a, const N: usize> {
-    fifo_in: Consumer<'a, Snapshot, N>,
+    fifo_in: Consumer<'a, Arc<Snapshot>, N>,
     shutdown: Arc<AtomicBool>,
     source: SourceSocket,
 }
 
 impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, Snapshot, N>, shutdown: Arc<AtomicBool>, ip: &str, port: u16) -> Self {
+    pub fn new(fifo_in: Consumer<'a, Arc<Snapshot>, N>, shutdown: Arc<AtomicBool>, ip: &str, port: u16) -> Self {
         Self { 
             fifo_in,
             shutdown,

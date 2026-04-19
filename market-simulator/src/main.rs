@@ -32,12 +32,9 @@ use web::state::{
 use web::server::run_web_server;
 use config::{MarketConfig, MarketsConfig};
 use market_feed::engine::MarketDataFeedEngine;
-use std::sync::RwLock;
-
+use arc_swap::ArcSwap;
 
 const RB_SIZE: usize = 1024;
-
-
 
 #[derive(Parser, Debug)]
 #[command(name = "market-simulator")]
@@ -140,7 +137,7 @@ struct QueueHandle {
     ob_to_db: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     ob_to_md: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>>,
-    ob_to_ss: Option<memory::SharedQueue<RB_SIZE, Snapshot>>,
+    ob_to_ss: Option<memory::SharedQueue<RB_SIZE, Arc<Snapshot>>>,
 }
 
 impl QueueHandle {
@@ -151,7 +148,7 @@ impl QueueHandle {
         let ob_to_db     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_db"), true);
         let ob_to_md     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_market_feed"), true);
         let er_to_fix     = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(&format!("{market_name}_execution_report_to_fix"), true);
-        let ob_to_ss     = memory::open_shared_queue::<RB_SIZE, Snapshot>(&format!("{market_name}_order_book_to_snapshot"), true);
+        let ob_to_ss     = memory::open_shared_queue::<RB_SIZE, Arc<Snapshot>>(&format!("{market_name}_order_book_to_snapshot"), true);
 
         Self {
             net_to_fix_tx: Some(Arc::new(net_to_fix_tx)),
@@ -260,34 +257,62 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     // Order-book control channel (used by the gRPC reset service).
     let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
 
-    
-    // Create shared order book instance and pass it to the order book engine and snapshot generation engine so they can read/write it without going through the queues.
-    let order_book = Arc::new(RwLock::new(OrderBook::new("AAAPL")));
+    let symbols = vec!["AAAPL"]; // In a real implementation, this would come from the config or database.
 
-    // Book engine thread
-    let mut order_book_engine = OrderBookEngine::new(ob_rx, [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)], ob_control_rx, Arc::clone(&order_book), Arc::clone(&global_shutdown));
+    for symbol in symbols {
+        tracing::info!("[{}] Initializing market for symbol '{}'", config.name, symbol);
 
-    order_book_engine.import_order_book(initial_orders);
+        // Create shared order book instance and pass it to the order book engine and snapshot generation engine so they can read/write it without going through the queues.
+        let order_book = OrderBook::new(&symbol);
+        let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot {
+            timestamp: 0,
+            symbol: symbol.to_string(),
+            id: 0,
+            order_book: snapshot::types::OrderBookSnapshot::default(),
+        }));
 
-    let _ob_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.order_book_core });
-        order_book_engine.run();
-    });
+        // Book engine thread
+        let mut order_book_engine = OrderBookEngine::new(
+            ob_rx,
+            [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)],
+            ob_control_rx,
+            order_book,
+            Some(Arc::clone(&snapshot_ptr)),
+            Arc::clone(&global_shutdown)
+        );
 
-    {
-        market_simulator.add_thread_handle(_ob_thread);
-    }
+        // Import initial order book state from the database before starting the engine.
+        // This ensures that the engine starts with the correct state and can process new orders/events in the context of existing pending orders.
+        order_book_engine.import_order_book(initial_orders);
 
-    // Snapshot generation thread (reads from order book and pushes to multicast engine)
-    let snapshot_generation_engine = SnapshotGenerationEngine::new(ob_ss_tx, Arc::clone(&global_shutdown), Arc::clone(&order_book), config.snapshot.update_interval_ms, config.snapshot.max_depth);
-    let snapshot_generation_core = config.core_mapping.snapshot_core;
-    let _snapshot_generation_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: snapshot_generation_core });
-        snapshot_generation_engine.run();
-    });
+        let _ob_thread = std::thread::spawn(move || {
+            core_affinity::set_for_current(core_affinity::CoreId { id: config.core_mapping.order_book_core });
+            order_book_engine.run();
+        });
 
-    {
-        market_simulator.add_thread_handle(_snapshot_generation_thread);
+        {
+            market_simulator.add_thread_handle(_ob_thread);
+        }
+
+        // Snapshot generation thread (reads from order book and pushes to multicast engine)
+        let snapshot_generation_engine = SnapshotGenerationEngine::new(
+            ob_ss_tx, 
+            Arc::clone(&global_shutdown),
+            Arc::clone(&snapshot_ptr),
+            config.snapshot.update_interval_ms, 
+        );
+        let snapshot_generation_core = config.core_mapping.snapshot_core;
+        let _snapshot_generation_thread = std::thread::spawn(move || {
+            core_affinity::set_for_current(core_affinity::CoreId { id: snapshot_generation_core });
+            snapshot_generation_engine.run();
+        });
+
+        {
+            market_simulator.add_thread_handle(_snapshot_generation_thread);
+        }
+
+        // TODO : Handle multiple symbols per market (currently we just hardcode one symbol and ignore the symbol field in the orders/events, but in a real implementation we'd want to support multiple symbols per market and route orders/events to the correct order book based on the symbol).
+        break;
     }
 
     // Snapshot multicast engine thread
