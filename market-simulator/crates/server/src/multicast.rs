@@ -286,7 +286,7 @@ pub fn spawn_market_feed_receiver(
                                 match header.msg_type {
                                     x if x == MessageType::AddOrder as u8 => {
                                         if let Some(msg) = AddOrder::from_bytes(body) {
-                                            book.add_or_update_order(msg.order_id, msg.side, msg.price.to_f64(), msg.quantity.to_f64(), timestamp_ms);
+                                            book.add_or_update_order(msg.order_id, msg.side, msg.price.to_f64(), msg.quantity.to_f64(), None, timestamp_ms);
                                         }
                                     }
                                     x if x == MessageType::ModifyOrder as u8 => {

@@ -26,6 +26,7 @@ pub struct L3Order {
     pub order_id: u64,
     pub price: f64,
     pub quantity: f64,
+    pub cl_ord_id: Option<String>,
 }
 
 /// Serializable L3 order entry sent to the browser.
@@ -34,6 +35,7 @@ pub struct L3OrderView {
     pub order_id: String,
     pub price: f64,
     pub quantity: f64,
+    pub cl_ord_id: Option<String>,
 }
 
 /// Current state of the order book for a single symbol.
@@ -76,6 +78,7 @@ impl SymbolOrderBook {
                     order_id,
                     price: level.price,
                     quantity: level.quantity,
+                    cl_ord_id: None,
                 },
             );
             self.order_side.insert(order_id, 1);
@@ -89,6 +92,7 @@ impl SymbolOrderBook {
                     order_id,
                     price: level.price,
                     quantity: level.quantity,
+                    cl_ord_id: None,
                 },
             );
             self.order_side.insert(order_id, 2);
@@ -98,7 +102,15 @@ impl SymbolOrderBook {
     }
 
     /// Add or replace an order by order_id.
-    pub fn add_or_update_order(&mut self, order_id: u64, side: u8, price: f64, quantity: f64, timestamp_ms: u64) {
+    pub fn add_or_update_order(
+        &mut self,
+        order_id: u64,
+        side: u8,
+        price: f64,
+        quantity: f64,
+        cl_ord_id: Option<String>,
+        timestamp_ms: u64,
+    ) {
         if let Some(previous_side) = self.order_side.get(&order_id).copied() {
             if previous_side == 1 {
                 self.bids.remove(&order_id);
@@ -107,10 +119,20 @@ impl SymbolOrderBook {
             }
         }
 
+        let preserved_cl_ord_id = if cl_ord_id.is_some() {
+            cl_ord_id
+        } else {
+            self.bids
+                .get(&order_id)
+                .and_then(|order| order.cl_ord_id.clone())
+                .or_else(|| self.asks.get(&order_id).and_then(|order| order.cl_ord_id.clone()))
+        };
+
         let order = L3Order {
             order_id,
             price,
             quantity,
+            cl_ord_id: preserved_cl_ord_id,
         };
 
         if side == 1 {
@@ -169,6 +191,7 @@ impl SymbolOrderBook {
                 order_id: order.order_id.to_string(),
                 price: order.price,
                 quantity: order.quantity,
+                cl_ord_id: order.cl_ord_id.clone(),
             })
             .collect();
 
@@ -189,6 +212,7 @@ impl SymbolOrderBook {
                 order_id: order.order_id.to_string(),
                 price: order.price,
                 quantity: order.quantity,
+                cl_ord_id: order.cl_ord_id.clone(),
             })
             .collect();
 

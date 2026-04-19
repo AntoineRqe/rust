@@ -852,12 +852,86 @@ function applyOrderBookSnapshot(msg, marketName) {
   market.book.bids = Array.isArray(msg.bids) ? msg.bids : [];
   market.book.asks = Array.isArray(msg.asks) ? msg.asks : [];
 
+  mergeClientOpenOrdersFromBook(mn, market.book.symbol);
+
   if (mn === getPrimaryMarketName()) {
     Object.assign(book, market.book);
     renderBook(true);
   }
 
   renderMarketBook(mn);
+}
+
+function isOrderOwnedByCurrentUser(clordId) {
+  if (!clordId || !currentPlayer) return false;
+
+  const normalizedId = String(clordId).toUpperCase();
+  const playerPrefix = String(currentPlayer)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 6);
+
+  if (!playerPrefix) return false;
+
+  const suffix = (currentPlayerSuffix || '').toUpperCase();
+  if (suffix.length === 4) {
+    return normalizedId.startsWith(playerPrefix + suffix);
+  }
+
+  return normalizedId.startsWith(playerPrefix);
+}
+
+function mergeClientOpenOrdersFromBook(marketName, symbol) {
+  const mn = normalizeMarketName(marketName);
+  const market = markets[mn];
+  if (!market) return;
+
+  const presentOwnedIds = new Set();
+
+  const mergeRows = (rows, side) => {
+    (rows || []).forEach(row => {
+      const clOrdId = row && row.cl_ord_id;
+      if (!isOrderOwnedByCurrentUser(clOrdId)) return;
+
+      presentOwnedIds.add(clOrdId);
+
+      const qty = Number(row.quantity || 0);
+      const price = Number(row.price || 0);
+      if (!(qty > 0) || !(price >= 0)) return;
+
+      openOrders[clOrdId] = {
+        symbol: symbol || 'AAPL',
+        qty,
+        price,
+        side,
+        market: mn,
+        source: 'book',
+      };
+
+      if (!openOrderFirstSeen[clOrdId]) {
+        openOrderFirstSeen[clOrdId] = Date.now();
+      }
+    });
+  };
+
+  mergeRows(market.book.bids, '1');
+  mergeRows(market.book.asks, '2');
+
+  Object.keys(openOrders).forEach(clOrdId => {
+    const order = openOrders[clOrdId];
+    if (!order) return;
+    if (normalizeMarketName(order.market) !== mn) return;
+    if (order.source !== 'book') return;
+    if (!isOrderOwnedByCurrentUser(clOrdId)) return;
+    if (presentOwnedIds.has(clOrdId)) return;
+
+    delete openOrders[clOrdId];
+    delete openOrderFirstSeen[clOrdId];
+  });
+
+  if (mn === getPrimaryMarketName()) {
+    renderOrders(null, true);
+  }
 }
 
 // ── send to server ────────────────────────────────────────────────────────────
@@ -932,6 +1006,7 @@ function handlePlayerState(msg) {
       price: Number(o.price || 0),
       side: String(o.side || '1'),
       market: primaryMarketName,
+      source: 'player_state',
     };
 
     if (!openOrderFirstSeen[o.cl_ord_id]) {
@@ -940,7 +1015,13 @@ function handlePlayerState(msg) {
   });
 
   Object.keys(openOrders).forEach(id => {
-    if (normalizeMarketName(openOrders[id]?.market) !== primaryMarketName) return;
+    const existing = openOrders[id];
+    if (normalizeMarketName(existing?.market) !== primaryMarketName) return;
+    const firstSeen = openOrderFirstSeen[id] || 0;
+    const isRecentLocal = existing?.source === 'local' && ((Date.now() - firstSeen) < ORDER_PENDING_TIMEOUT_MS);
+    const marketForOrder = markets[normalizeMarketName(existing?.market)] || null;
+    const isStillPendingLocally = !!(marketForOrder && marketForOrder.book && marketForOrder.book.pending && marketForOrder.book.pending[id]);
+    if (isRecentLocal || isStillPendingLocally) return;
     if (!nextOpenOrders[id]) {
       delete openOrders[id];
       delete openOrderFirstSeen[id];
@@ -950,6 +1031,8 @@ function handlePlayerState(msg) {
   Object.keys(nextOpenOrders).forEach(id => {
     openOrders[id] = nextOpenOrders[id];
   });
+
+  mergeClientOpenOrdersFromBook(primaryMarketName, (markets[primaryMarketName] && markets[primaryMarketName].book.symbol) || 'AAPL');
   renderOrders(null, true);
 }
 
@@ -1013,7 +1096,7 @@ function sendOrder() {
   const suffix = currentPlayerSuffix || '0000';
   const clordId = `${playerPrefix}${suffix}${ts}${seq}`.slice(0, 20);
   targetMarket.book.pending[clordId] = { price, qty, side: s };
-  openOrders[clordId] = { symbol, qty, price, side: s, market: targetMarketName };
+  openOrders[clordId] = { symbol, qty, price, side: s, market: targetMarketName, source: 'local' };
   openOrderFirstSeen[clordId] = Date.now();
   schedulePendingTimeout(clordId, targetMarketName);
   renderOrders(null, true);

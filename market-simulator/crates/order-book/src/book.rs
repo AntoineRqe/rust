@@ -171,7 +171,13 @@ impl OrderBook {
                             cancel_ack.price = cancelled_order.price;
                             cancel_ack.quantity = cancelled_order.quantity;
 
-                            self.order_map.remove(&orig_cl_ord_id); // Remove the order from the map after cancellation
+                            tracing::debug!("[{}][{}][{}] Cancelled order with ID: {}, side: {:?}, price: {}, position: {}", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id, order_ref.side, order_ref.price, index);
+
+                            if let Some(_) = self.order_map.remove(&orig_cl_ord_id) {
+                                // Remove the order from the map after cancellation
+                            } else {
+                                tracing::error!("[{}][{}][{}] Failed to remove order with ID: {} from order map after cancellation, order not found", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id);
+                            }
 
                             return (cancel_ack, OrderResult {
                                 internal_order_id: self.generate_internal_order_id(),
@@ -182,7 +188,11 @@ impl OrderBook {
                         }
                         None => tracing::error!("[{}][{}][{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, position: {}, order not found in queue", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id, order_ref.side, order_ref.price, index),
                     }
+                } else {
+                    tracing::error!("[{}][{}][{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, order not found in queue", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id, order_ref.side, order_ref.price);
                 }
+            } else {
+                tracing::error!("[{}][{}][{}] Failed to cancel order with ID: {}, side: {:?}, price: {}, order queue not found for price level", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id, order_ref.side, order_ref.price);
             }
         }
 

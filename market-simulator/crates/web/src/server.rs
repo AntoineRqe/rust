@@ -324,12 +324,9 @@ async fn load_initial_order_book(
             }
         };
 
-        // For initial load, treat each pending order as an add, with a stable order ID
-        let order_id = pending_order
-            .cl_ord_id
-            .as_bytes()
-            .iter()
-            .fold(0u64, |h, &b| h.wrapping_mul(31).wrapping_add(b as u64));
+        // Use the same 20-byte stable hash as market-feed Add/Delete events,
+        // so follow-up delete updates match this bootstrapped entry exactly.
+        let order_id = stable_order_id_from_cl_ord_id(&pending_order.cl_ord_id);
 
         tracing::trace!("[{}] Loading order: {} {} @ {} x {}", 
             market_name(), symbol, 
@@ -342,6 +339,7 @@ async fn load_initial_order_book(
             side,
             pending_order.price,
             pending_order.quantity,
+            Some(pending_order.cl_ord_id.clone()),
             timestamp_ms,
         );
 
@@ -356,4 +354,18 @@ async fn load_initial_order_book(
     );
 
     Ok(count as usize)
+}
+
+fn stable_order_id_from_cl_ord_id(cl_ord_id: &str) -> u64 {
+    let mut fixed = [0u8; 20];
+    let bytes = cl_ord_id.as_bytes();
+    let len = bytes.len().min(20);
+    fixed[..len].copy_from_slice(&bytes[..len]);
+
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in &fixed {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
