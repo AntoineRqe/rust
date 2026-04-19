@@ -17,7 +17,7 @@ use tokio::signal;
 use serde::{Deserialize, Serialize};
 use rand_core::RngCore;
 use tower_http::cors::{Any, CorsLayer};
-use crate::state::EventBus;
+use crate::state::{EventBus, OrderBookState};
 use crate::players::PlayerStore;
 use crate::ws::ws_handler;
 
@@ -55,6 +55,8 @@ pub struct AppState {
     pub known_markets: Vec<MarketInfo>,
     /// Active sessions: token → session metadata.
     pub sessions: Arc<Mutex<HashMap<String, SessionInfo>>>,
+    /// Current order book state for all symbols (updated with market feed data).
+    pub order_book: Arc<Mutex<OrderBookState>>,
 }
 
 /// Generate a cryptographically random 128-bit hex token.
@@ -84,13 +86,14 @@ pub fn run_web_server(
     players_file: PathBuf,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
+    order_book: Arc<Mutex<OrderBookState>>,
 ) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, players_file, known_markets, shutdown))
+        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, players_file, known_markets, shutdown, order_book))
 }
 
 async fn serve(
@@ -102,6 +105,7 @@ async fn serve(
     players_file: PathBuf,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
+    order_book: Arc<Mutex<OrderBookState>>,
 ) {
     let player_store = PlayerStore::load(players_file);
     let state = AppState {
@@ -111,7 +115,23 @@ async fn serve(
         player_store,
         known_markets,
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        order_book,
     };
+
+    // Load initial pending orders from gRPC at startup
+    {
+        let grpc_addr_clone = state.grpc_addr.clone();
+        let order_book_clone = Arc::clone(&state.order_book);
+        
+        match load_initial_order_book(&grpc_addr_clone, order_book_clone).await {
+            Ok(count) => {
+                tracing::info!("[{}] Loaded {} pending orders from gRPC at startup", market_name(), count);
+            }
+            Err(e) => {
+                tracing::warn!("[{}] Failed to load pending orders at startup: {}", market_name(), e);
+            }
+        }
+    }
 
     let app = Router::new()
         .route("/",            get(app_handler))
@@ -247,4 +267,93 @@ async fn api_login_handler(
 /// GET /api/markets — returns the list of all configured markets.
 async fn api_markets_handler(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.known_markets.clone())
+}
+
+/// Load initial pending orders from gRPC DumpOrderBook RPC at startup.
+/// Populates the order book state with all pending orders, which will then be
+/// kept in sync by market feed updates.
+async fn load_initial_order_book(
+    grpc_addr: &str,
+    order_book: Arc<Mutex<OrderBookState>>,
+) -> Result<usize, String> {
+    use grpc::proto::market_control_client::MarketControlClient;
+    use grpc::proto::DumpOrderBookRequest;
+
+    tracing::info!("[{}] Loading initial pending orders from gRPC at {}", market_name(), grpc_addr);
+
+    let mut client = MarketControlClient::connect(grpc_addr.to_string())
+        .await
+        .map_err(|e| format!("Failed to connect to gRPC: {}", e))?;
+
+    let response = client
+        .dump_order_book(DumpOrderBookRequest {})
+        .await
+        .map_err(|e| format!("DumpOrderBook RPC failed: {}", e))?;
+
+    let dump_response = response.into_inner();
+
+    tracing::debug!("[{}] DumpOrderBook returned: success={}, message={}, order_count={}", 
+        market_name(), dump_response.success, dump_response.message, dump_response.orders.len());
+
+    if !dump_response.success {
+        return Err(format!("DumpOrderBook returned success=false: {}", dump_response.message));
+    }
+
+    let mut book_state = order_book.lock().unwrap();
+    let mut count = 0u64;
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    for pending_order in dump_response.orders {
+        let symbol = pending_order.symbol.clone();
+        let book = book_state.get_or_create(&symbol);
+
+        let side = match pending_order.side.to_ascii_lowercase().as_str() {
+            "1" | "buy" => 1,
+            "2" | "sell" => 2,
+            other => {
+                tracing::warn!(
+                    "[{}] Ignoring pending order with unknown side '{}' for symbol {}",
+                    market_name(),
+                    other,
+                    symbol
+                );
+                continue;
+            }
+        };
+
+        // For initial load, treat each pending order as an add, with a stable order ID
+        let order_id = pending_order
+            .cl_ord_id
+            .as_bytes()
+            .iter()
+            .fold(0u64, |h, &b| h.wrapping_mul(31).wrapping_add(b as u64));
+
+        tracing::trace!("[{}] Loading order: {} {} @ {} x {}", 
+            market_name(), symbol, 
+            if side == 1 { "BID" } else { "ASK" },
+            pending_order.price,
+            pending_order.quantity);
+
+        book.add_or_update_order(
+            order_id,
+            side,
+            pending_order.price,
+            pending_order.quantity,
+            timestamp_ms,
+        );
+
+        count += 1;
+    }
+
+    tracing::info!(
+        "[{}] Successfully loaded {} pending orders into order book state ({} symbols)",
+        market_name(),
+        count,
+        book_state.books.len()
+    );
+
+    Ok(count as usize)
 }

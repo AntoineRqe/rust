@@ -149,6 +149,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo)
     // Send the player's current state (tokens + pending orders) on every new connection.
     send_player_state(&mut sender, &state, &username, is_admin).await;
 
+    // Send current order book state for all symbols
+    send_order_book_snapshots(&mut sender, &state).await;
+
     tracing::debug!("[{}] Browser WebSocket connected", market_name());
 
     loop {
@@ -245,6 +248,47 @@ async fn send_player_state(
 
     let json = serde_json::to_string(&event).unwrap();
     let _ = sender.send(Message::Text(json.into())).await;
+}
+
+async fn send_order_book_snapshots(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    state: &AppState,
+) {
+    // Clone the books data so we don't hold the lock
+    let (books, total_bid_levels, total_ask_levels) = {
+        let ob = state.order_book.lock().unwrap();
+        let total_bid_levels: usize = ob.books.values().map(|book| book.bids.len()).sum();
+        let total_ask_levels: usize = ob.books.values().map(|book| book.asks.len()).sum();
+
+        tracing::info!(
+            "[{}] Order book summary before WS snapshot: symbols={}, bid_levels={}, ask_levels={}",
+            market_name(),
+            ob.books.len(),
+            total_bid_levels,
+            total_ask_levels
+        );
+
+        (ob.books.clone(), total_bid_levels, total_ask_levels)
+    };
+
+    if books.is_empty() {
+        tracing::warn!("[{}] Order book is empty at client connection", market_name());
+    } else if total_bid_levels == 0 && total_ask_levels == 0 {
+        tracing::warn!("[{}] Order book has symbols but no price levels at client connection", market_name());
+    }
+
+    for (symbol, book) in books {
+        tracing::debug!("[{}] Sending {} bids and {} asks for {}", market_name(), book.bids.len(), book.asks.len(), symbol);
+        let event = WsEvent::OrderBook {
+            symbol,
+            bids: book.l3_bids_sorted(),
+            asks: book.l3_asks_sorted(),
+            timestamp_ms: book.last_update_ms,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let _ = sender.send(Message::Text(json.into())).await;
+    }
 }
 
 fn require_admin(state: &AppState, username: &str, is_admin: bool) -> bool {

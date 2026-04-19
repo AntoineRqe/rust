@@ -27,7 +27,7 @@ use memory;
 use execution_report::{ExecutionReportEngine};
 use std::net::TcpListener;
 use web::state::{
-    EventBus,
+    EventBus, OrderBookState,
 };
 use web::server::run_web_server;
 use config::{MarketConfig, MarketsConfig};
@@ -118,7 +118,6 @@ struct MarketSimulator {
     shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Multicast endpoints for order book snapshots to forward to GUI websockets.
     market_feed_sources: Vec<MulticastSource>,
-    market_snapshot_sources: Vec<MulticastSource>,
     /// All configured markets — passed to the web server for the login page.
     known_markets: Vec<web::MarketInfo>,
 }
@@ -160,9 +159,7 @@ impl QueueHandle {
             er_to_fix: Some(er_to_fix),
             ob_to_ss: Some(ob_to_ss),
         }
-    }
-
-    
+    } 
 }
 
 fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box<dyn std::error::Error>> {
@@ -173,6 +170,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let market_feed_sources = market_simulator.market_feed_sources.clone();
     let bus = EventBus::new();
     let global_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let order_book = Arc::new(std::sync::Mutex::new(OrderBookState::new()));
 
     // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
     market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
@@ -181,6 +179,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         bus.clone(),
         market_feed_sources,
         Arc::clone(&global_shutdown),
+        Arc::clone(&order_book),
     );
 
     {
@@ -378,9 +377,10 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         let web_port = config.web.port;
         let web_shutdown = Arc::clone(&global_shutdown);
         let known_markets = market_simulator.known_markets.clone();
+        let order_book = Arc::clone(&order_book);
         move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: web_core });
-            run_web_server(bus, fix_tcp_addr, grpc_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), known_markets, web_shutdown);
+            run_web_server(bus, fix_tcp_addr, grpc_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), known_markets, web_shutdown, order_book);
         }
     });
 
@@ -461,7 +461,7 @@ fn main() {
     let config = MarketsConfig::parse_from_file(&cli.config_file);
 
     tracing_subscriber::fmt()
-        .with_env_filter("debug,sqlx=warn")
+        .with_env_filter("debug,sqlx=warn,h2=warn,tokio_util=warn")
         .init();
 
     if config.markets.is_empty() {
@@ -493,18 +493,11 @@ fn main() {
             market_name(),
         )];
 
-        let market_snapshot_sources = vec![MulticastSource::new(
-            market_config.snapshot_multicast.ip.as_str(),
-            market_config.snapshot_multicast.port,
-            market_name(),
-        )];
-
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,
             thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
             shutdown: None,
             market_feed_sources,
-            market_snapshot_sources,
             known_markets,
         }));
 

@@ -8,7 +8,7 @@ use market_feed::types::{
     AddOrder, DeleteOrder, MarketDataHeader, MessageType, ModifyOrder, OrderBookSnapshot,
     SNAPSHOT_BYTES, Trade,
 };
-use web::state::{EventBus, WsEvent};
+use web::state::{EventBus, WsEvent, PriceLevel, OrderBookState};
 
 use types::multicast::{MulticastSource, SourceSocket};
 
@@ -145,10 +145,54 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<(String, Str
     Some((label, details))
 }
 
+/// Enhanced market data parser that also returns structured data for order book updates.
+#[allow(dead_code)]
+fn parse_market_data_for_update(
+    packet: &[u8],
+) -> Option<(String, u8, u64)> {
+    if packet.len() < 24 {
+        return None;
+    }
+
+    let header = MarketDataHeader::from_bytes(&packet[0..24])?;
+    let body = &packet[24..];
+
+    let symbol = {
+        let header_symbol_id = header.symbol.to_numeric() as u32;
+        let bytes = header_symbol_id.to_be_bytes();
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(4);
+        String::from_utf8(bytes[..end].to_vec()).ok()?
+    };
+
+    match header.msg_type {
+        x if x == MessageType::AddOrder as u8 => {
+            let msg = AddOrder::from_bytes(body)?;
+            Some((symbol, header.msg_type, msg.order_id))
+        }
+        x if x == MessageType::ModifyOrder as u8 => {
+            let msg = ModifyOrder::from_bytes(body)?;
+            Some((symbol, header.msg_type, msg.order_id))
+        }
+        x if x == MessageType::DeleteOrder as u8 => {
+            let msg = DeleteOrder::from_bytes(body)?;
+            Some((symbol, header.msg_type, msg.order_id))
+        }
+        x if x == MessageType::Trade as u8 => {
+            let msg = Trade::from_bytes(body)?;
+            Some((symbol, header.msg_type, msg.trade_id))
+        }
+        x if x == MessageType::Snapshot as u8 => {
+            Option::None // Will handle separately
+        }
+        _ => None,
+    }
+}
+
 pub fn spawn_market_feed_receiver(
     bus: EventBus,
     sources: Vec<MulticastSource>,
     shutdown: Arc<AtomicBool>,
+    order_book: Arc<std::sync::Mutex<OrderBookState>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut sockets = Vec::<SourceSocket>::new();
@@ -222,6 +266,67 @@ pub fn spawn_market_feed_receiver(
                                 tag: "md".into(),
                                 recipient: None,
                             });
+                        }
+
+                        // Also update the order book state with market feed data
+                        if let Some(header) = MarketDataHeader::from_bytes(&buf[..24.min(n)]) {
+                            let body = &buf[24..n];
+                            let timestamp_ms = (header.timestamp_ns / 1_000_000) as u64;
+
+                            let symbol = {
+                                let header_symbol_id = header.symbol.to_numeric() as u32;
+                                let bytes = header_symbol_id.to_be_bytes();
+                                let end = bytes.iter().position(|&b| b == 0).unwrap_or(4);
+                                String::from_utf8(bytes[..end].to_vec())
+                                    .unwrap_or_else(|_| header_symbol_id.to_string())
+                            };
+
+                            if let Ok(mut ob) = order_book.lock() {
+                                let book = ob.get_or_create(&symbol);
+                                match header.msg_type {
+                                    x if x == MessageType::AddOrder as u8 => {
+                                        if let Some(msg) = AddOrder::from_bytes(body) {
+                                            book.add_or_update_order(msg.order_id, msg.side, msg.price.to_f64(), msg.quantity.to_f64(), timestamp_ms);
+                                        }
+                                    }
+                                    x if x == MessageType::ModifyOrder as u8 => {
+                                        if let Some(msg) = ModifyOrder::from_bytes(body) {
+                                            book.modify_order(msg.order_id, msg.new_price.to_f64(), msg.new_quantity.to_f64(), timestamp_ms);
+                                        }
+                                    }
+                                    x if x == MessageType::DeleteOrder as u8 => {
+                                        if let Some(msg) = DeleteOrder::from_bytes(body) {
+                                            book.delete_order(msg.order_id, timestamp_ms);
+                                        }
+                                    }
+                                    x if x == MessageType::Trade as u8 => {
+                                        if let Some(msg) = Trade::from_bytes(body) {
+                                            book.record_trade(msg.side, msg.price.to_f64(), msg.quantity.to_f64(), timestamp_ms);
+                                        }
+                                    }
+                                    x if x == MessageType::Snapshot as u8 => {
+                                        if let Some(msg) = OrderBookSnapshot::from_bytes(&body[..body.len().min(SNAPSHOT_BYTES)]) {
+                                            let bids: Vec<PriceLevel> = msg.bids[..msg.num_bid_levels as usize]
+                                                .iter()
+                                                .map(|l| PriceLevel { price: l.price.to_f64(), quantity: l.quantity.to_f64() })
+                                                .collect();
+                                            let asks: Vec<PriceLevel> = msg.asks[..msg.num_ask_levels as usize]
+                                                .iter()
+                                                .map(|l| PriceLevel { price: l.price.to_f64(), quantity: l.quantity.to_f64() })
+                                                .collect();
+                                            book.apply_snapshot(bids, asks, timestamp_ms);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
+                                bus.publish(WsEvent::OrderBook {
+                                    symbol: symbol.clone(),
+                                    bids: book.l3_bids_sorted(),
+                                    asks: book.l3_asks_sorted(),
+                                    timestamp_ms,
+                                });
+                            }
                         }
                     }
                     Err(e)

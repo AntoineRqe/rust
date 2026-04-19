@@ -6,6 +6,8 @@ package market_control;
 service MarketControl {
     // Reset both the order book and the database tables.
     rpc ResetMarket (ResetRequest) returns (ResetResponse);
+    // Retrieve all pending orders from the data book.
+    rpc DumpOrderBook (DumpOrderBookRequest) returns (DumpOrderBookResponse);
 }
 
 message ResetRequest {}
@@ -13,4 +15,25 @@ message ResetRequest {}
 message ResetResponse {
     bool   success = 1;
     string message = 2;
+}
+
+message DumpOrderBookRequest {}
+
+message PendingOrder {
+    double price          = 1;
+    double quantity       = 2;
+    string side           = 3;
+    string symbol         = 4;
+    string order_type     = 5;
+    string cl_ord_id      = 6;
+    string orig_cl_ord_id = 7;
+    string sender_id      = 8;
+    string target_id      = 9;
+    uint64 timestamp      = 10;
+}
+
+message DumpOrderBookResponse {
+    bool   success = 1;
+    string message = 2;
+    repeated PendingOrder orders = 3;
 }

@@ -132,16 +132,27 @@
   #book-hdr{display:flex;justify-content:space-between;align-items:center;padding:8px 10px 4px}
   #book-sym{color:var(--teal);font-size:11px;font-weight:bold}
   #book-last{color:var(--gold);font-size:10px}
+    .book-cols{display:flex;align-items:center;justify-content:space-between;
+         margin:0 6px 4px;padding:0 4px;font-size:9px;color:var(--muted);
+         letter-spacing:.08em;text-transform:uppercase}
+    .book-cols .col-qty{flex:1;text-align:right;padding-right:6px}
+    .book-cols .col-px{width:126px;text-align:right;padding-right:4px}
+    .book-cols.compact{margin:2px 0 4px;padding:0 4px;font-size:8px}
+    .book-cols.compact .col-px{width:124px}
   .bk-level{display:flex;align-items:center;height:22px;margin:1px 6px;
              position:relative;overflow:hidden}
   .bk-level .bar{position:absolute;top:0;bottom:0;left:0}
   .bid-lv{background:var(--bid-bg)}.bid-lv .bar{background:var(--bid-bar)}
   .ask-lv{background:var(--ask-bg)}.ask-lv .bar{background:var(--ask-bar)}
-  .lv-qty{flex:1;text-align:right;font-size:11px;padding-right:6px;position:relative;z-index:1}
-  .lv-px{width:86px;text-align:right;font-size:11px;font-weight:bold;
+    .lv-qty{flex:1;text-align:right;font-size:11px;font-weight:600;
+      color:var(--text);padding-right:6px;position:relative;z-index:1}
+      .lv-qty-num{display:inline-block;min-width:88px;text-align:right;
+            font-variant-numeric:tabular-nums}
+    .lv-px{width:126px;text-align:right;font-size:11px;font-weight:bold;
           padding-right:4px;position:relative;z-index:1}
-  .bid-lv .lv-px,.bid-lv .lv-qty{color:var(--green)}
-  .ask-lv .lv-px,.ask-lv .lv-qty{color:var(--red)}
+      .lv-px,.lv-qty{font-variant-numeric:tabular-nums}
+    .bid-lv .lv-px{color:var(--green)}
+    .ask-lv .lv-px{color:var(--red)}
   #spread-row{height:24px;display:flex;align-items:center;justify-content:center;
               font-size:10px;color:var(--muted);
               border-top:1px solid var(--border);border-bottom:1px solid var(--border);
@@ -266,6 +277,9 @@
   <div class="frow"><label>Quantity</label>
     <div class="spin-wrap">
       <input id="o-qty" type="number" step="1" min="1" value="100">
+      <input id="o-qty-mult" type="range" min="0" max="20" step="1" value="1" style="width:68px;margin-left:6px"
+             oninput="ge('o-qty-mult-val').textContent='x'+this.value">
+      <span id="o-qty-mult-val" style="width:30px;text-align:right;color:var(--gold);font-size:10px">x1</span>
       <div class="spin-btns">
         <button class="spin-btn" onclick="bumpField('o-qty', 1)">&#9650;</button>
         <button class="spin-btn" onclick="bumpField('o-qty', -1)">&#9660;</button>
@@ -275,6 +289,9 @@
   <div class="frow"><label>Limit Price</label>
     <div class="spin-wrap">
       <input id="o-price" type="number" step="0.1" min="0" value="150.00">
+      <input id="o-price-mult" type="range" min="0" max="20" step="1" value="1" style="width:68px;margin-left:6px"
+             oninput="ge('o-price-mult-val').textContent='x'+this.value">
+      <span id="o-price-mult-val" style="width:30px;text-align:right;color:var(--gold);font-size:10px">x1</span>
       <div class="spin-btns">
         <button class="spin-btn" onclick="bumpField('o-price', 0.1)">&#9650;</button>
         <button class="spin-btn" onclick="bumpField('o-price', -0.1)">&#9660;</button>
@@ -309,6 +326,7 @@
     <span id="book-last">last: &#8212;</span>
   </div>
   <div style="height:1px;background:var(--border);margin:0 6px 4px"></div>
+  <div id="book-cols-main" class="book-cols"><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>
   <div id="asks"></div>
   <div id="spread-row">spread: &#8212;</div>
   <div id="bids"></div>
@@ -497,8 +515,8 @@ function disconnect() {
 
 // client-side order book (updated from exec reports)
 const book = {
-  bids:    {},   // price → qty
-  asks:    {},
+  bids:    [],
+  asks:    [],
   trades:  [],   // [{px,qty,side,ts}]
   last:    null,
   symbol:  '—',
@@ -519,7 +537,7 @@ const markets = {}; // marketName → { ws, book, openOrders, openOrderFirstSeen
 
 function createMarketState() {
   return {
-    bids: {}, asks: {}, trades: [], last: null, symbol: '—',
+    bids: [], asks: [], trades: [], last: null, symbol: '—',
     pending: {}, orderState: {},
   };
 }
@@ -615,7 +633,8 @@ function renderMarketsContainer() {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const ge  = id => document.getElementById(id);
-const fmt = v  => parseFloat(v).toFixed(4);
+const fmt = v  => parseFloat(v).toFixed(1);
+const fmtQty = v => Math.round(Number(v) || 0).toLocaleString();
 const esc = s  => String(s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
@@ -798,11 +817,17 @@ function handleServerEvent(msg, marketName) {
         handleStatus(msg.connected);
       }
       renderMarketsContainer();
+      Object.keys(markets).forEach(name => {
+        renderMarketBook(name);
+      });
       break;
     case 'player_state':
       if (normalizeMarketName(marketName) === getPrimaryMarketName()) {
         schedulePlayerState(msg);
       }
+      break;
+    case 'order_book':
+      applyOrderBookSnapshot(msg, marketName);
       break;
     case 'fix_message':
       // md events are high-frequency market data — only update the book, never log them
@@ -812,12 +837,27 @@ function handleServerEvent(msg, marketName) {
           resetClientMarketView(marketName);
         }
       }
-      // parse the FIX message to update order book for this market
-      updateBookFromFix(msg.body, msg.tag, marketName);
       break;
     default:
       console.warn('Unknown server event:', msg);
   }
+}
+
+function applyOrderBookSnapshot(msg, marketName) {
+  const mn = normalizeMarketName(marketName || getPrimaryMarketName());
+  const market = markets[mn];
+  if (!market) return;
+
+  market.book.symbol = msg.symbol || market.book.symbol;
+  market.book.bids = Array.isArray(msg.bids) ? msg.bids : [];
+  market.book.asks = Array.isArray(msg.asks) ? msg.asks : [];
+
+  if (mn === getPrimaryMarketName()) {
+    Object.assign(book, market.book);
+    renderBook(true);
+  }
+
+  renderMarketBook(mn);
 }
 
 // ── send to server ────────────────────────────────────────────────────────────
@@ -934,7 +974,10 @@ function bumpField(id, step) {
   let value = parseFloat(input.value);
   if (isNaN(value)) value = 0;
 
-  value += step;
+  const multInput = id === 'o-qty' ? ge('o-qty-mult') : ge('o-price-mult');
+  const multiplier = multInput ? Math.max(0, parseInt(multInput.value || '1', 10)) : 1;
+
+  value += (step * multiplier);
 
   if (id === 'o-qty') {
     value = Math.max(1, Math.round(value));
@@ -1013,8 +1056,8 @@ function resetClientMarketView(marketName) {
   // Otherwise reset primary market (backward compatibility)
   Object.keys(orderTimeouts).forEach(id => clearPendingTimeout(id));
 
-  book.bids = {};
-  book.asks = {};
+  book.bids = [];
+  book.asks = [];
   book.trades = [];
   book.last = null;
   book.pending = {};
@@ -1407,18 +1450,19 @@ function renderBook(immediate = false) {
   ge('book-sym').textContent  = 'ORDER BOOK  ' + book.symbol;
   ge('book-last').textContent = book.last != null ? 'last: ' + fmt(book.last) : 'last: —';
 
-  const bids = Object.entries(book.bids).map(([p,q])=>[+p,q])
-                     .sort((a,b)=>b[0]-a[0]).slice(0, LEVELS);
-  const asks = Object.entries(book.asks).map(([p,q])=>[+p,q])
-                     .sort((a,b)=>a[0]-b[0]).slice(0, LEVELS);
+  const bids = [...(book.bids || [])]
+    .sort((a,b)=>Number(b.price)-Number(a.price));
+  const asks = [...(book.asks || [])]
+    .sort((a,b)=>Number(a.price)-Number(b.price));
 
-  const allQ = [...bids,...asks].map(r=>r[1]);
+  const allQ = [...bids,...asks].map(r=>Number(r.quantity) || 0);
   const maxQ = allQ.length ? Math.max(...allQ) : 1;
 
   renderLevels('asks', [...asks].reverse(), 'ask', maxQ);
 
   if (bids.length && asks.length) {
-    const sp = asks[0][0] - bids[0][0], mid = (asks[0][0] + bids[0][0]) / 2;
+    const sp = Number(asks[0].price) - Number(bids[0].price);
+    const mid = (Number(asks[0].price) + Number(bids[0].price)) / 2;
     ge('spread-row').textContent = 'spread: '+fmt(sp)+'   mid: '+fmt(mid);
   } else {
     ge('spread-row').textContent = 'spread: —';
@@ -1451,13 +1495,13 @@ function renderBook(immediate = false) {
 }
 
 function renderLevels(id, levels, cls, maxQ) {
-  while (levels.length < LEVELS) levels.push(null);
   ge(id).innerHTML = levels.map(row => {
-    if (!row) return `<div class="bk-level ${cls}-lv"></div>`;
-    const [px, qty] = row, pct = (qty / maxQ * 100).toFixed(1);
+    const px = Number(row.price) || 0;
+    const qty = Number(row.quantity) || 0;
+    const pct = (qty / maxQ * 100).toFixed(1);
     return `<div class="bk-level ${cls}-lv">
       <div class="bar" style="width:${pct}%"></div>
-      <span class="lv-qty">${Math.round(qty).toLocaleString()}</span>
+      <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   }).join('');
 }
@@ -1471,38 +1515,44 @@ function renderMarketBook(marketName) {
   if (!container) return;
   
   const b = market.book;
-  const bids = Object.entries(b.bids).map(([p,q])=>[+p,q])
-                     .sort((a,b)=>b[0]-a[0]).slice(0, 4);
-  const asks = Object.entries(b.asks).map(([p,q])=>[+p,q])
-                     .sort((a,b)=>a[0]-b[0]).slice(0, 4);
+  const bids = [...(b.bids || [])]
+                     .sort((a,b)=>Number(b.price)-Number(a.price));
+  const asks = [...(b.asks || [])]
+                     .sort((a,b)=>Number(a.price)-Number(b.price));
   
-  const allQ = [...bids,...asks].map(r=>r[1]);
+  const allQ = [...bids,...asks].map(r=>Number(r.quantity) || 0);
   const maxQ = allQ.length ? Math.max(...allQ) : 1;
   
   let html = '';
+  html += `<div class="book-cols compact"><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>`;
   
   // Asks
-  [...asks].reverse().forEach(([px, qty]) => {
+  [...asks].reverse().forEach((order) => {
+    const px = Number(order.price) || 0;
+    const qty = Number(order.quantity) || 0;
     const pct = (qty / maxQ * 100).toFixed(1);
     html += `<div class="bk-level ask-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
-      <span class="lv-qty">${Math.round(qty).toLocaleString()}</span>
+      <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   });
   
   // Spread
   if (bids.length && asks.length) {
-    const sp = asks[0][0] - bids[0][0], mid = (asks[0][0] + bids[0][0]) / 2;
+    const sp = Number(asks[0].price) - Number(bids[0].price);
+    const mid = (Number(asks[0].price) + Number(bids[0].price)) / 2;
     html += `<div style="background:var(--border);padding:2px 4px;font-size:9px;text-align:center;color:var(--muted)">
       spread: ${fmt(sp)} / mid: ${fmt(mid)}</div>`;
   }
   
   // Bids
-  bids.forEach(([px, qty]) => {
+  bids.forEach((order) => {
+    const px = Number(order.price) || 0;
+    const qty = Number(order.quantity) || 0;
     const pct = (qty / maxQ * 100).toFixed(1);
     html += `<div class="bk-level bid-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
-      <span class="lv-qty">${Math.round(qty).toLocaleString()}</span>
+      <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   });
   

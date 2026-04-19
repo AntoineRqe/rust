@@ -12,7 +12,7 @@ pub mod proto {
 
 use proto::{
     market_control_server::{MarketControl, MarketControlServer},
-    ResetRequest, ResetResponse,
+    DumpOrderBookRequest, DumpOrderBookResponse, PendingOrder, ResetRequest, ResetResponse,
 };
 
 /// gRPC service that exposes market-control operations.
@@ -67,6 +67,52 @@ impl MarketControl for MarketControlService {
             success: true,
             message: "Market reset completed successfully".to_string(),
         }))
+    }
+
+    /// Returns all currently pending orders persisted in the database.
+    async fn dump_order_book(
+        &self,
+        _request: Request<DumpOrderBookRequest>,
+    ) -> Result<Response<DumpOrderBookResponse>, Status> {
+        tracing::info!("gRPC DumpOrderBook called");
+
+        match db::collect_all_pending_orders(&self.db_pool).await {
+            Ok(pending_orders) => {
+                let orders = pending_orders
+                    .into_iter()
+                    .map(|order| PendingOrder {
+                        price: order.price.to_f64(),
+                        quantity: order.quantity.to_f64(),
+                        side: order.side.to_string(),
+                        symbol: order.symbol.to_string(),
+                        order_type: order.order_type.to_string(),
+                        cl_ord_id: order.cl_ord_id.to_string(),
+                        orig_cl_ord_id: order
+                            .orig_cl_ord_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_default(),
+                        sender_id: order.sender_id.to_string(),
+                        target_id: order.target_id.to_string(),
+                        timestamp: order.timestamp,
+                    })
+                    .collect();
+
+                Ok(Response::new(DumpOrderBookResponse {
+                    success: true,
+                    message: "Pending orders retrieved successfully".to_string(),
+                    orders,
+                }))
+            }
+            Err(e) => {
+                let msg = format!("Failed to fetch pending orders: {e}");
+                tracing::error!("{msg}");
+                Ok(Response::new(DumpOrderBookResponse {
+                    success: false,
+                    message: msg,
+                    orders: Vec::new(),
+                }))
+            }
+        }
     }
 }
 
