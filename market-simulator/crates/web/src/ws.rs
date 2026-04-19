@@ -234,6 +234,7 @@ async fn send_player_state(
             tokens: player.tokens,
             pending_orders: player.pending_orders.clone(),
             holdings: player.holdings.clone(),
+            order_owners: state.player_store.get_order_owners(),
             is_admin,
             id_suffix,
         }
@@ -243,6 +244,7 @@ async fn send_player_state(
             tokens: 0.0,
             pending_orders: Vec::new(),
             holdings: std::collections::HashMap::new(),
+            order_owners: state.player_store.get_order_owners(),
             is_admin,
             id_suffix: String::new(),
         }

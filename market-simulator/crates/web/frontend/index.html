@@ -56,11 +56,12 @@
   
   /* ── markets container (CSS Grid for multiple markets) ── */
   #markets-container{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
-                     gap:8px;padding:8px;overflow-y:auto;flex:1;
+           gap:8px;padding:8px;overflow-y:auto;flex:1;
+           grid-auto-rows:1fr;align-content:stretch;
                      background:var(--bg);min-height:0}
   .market-card{display:flex;flex-direction:column;background:var(--panel2);
                border:1px solid var(--border);border-radius:4px;overflow:hidden;
-               min-height:400px;max-height:600px}
+         min-height:0;height:100%}
   .market-card-header{background:var(--panel);padding:10px 12px;border-bottom:1px solid var(--border);
                       display:flex;justify-content:space-between;align-items:center}
   .market-card-header h3{color:var(--teal);font-size:12px;font-weight:bold;margin:0;flex:1}
@@ -70,6 +71,14 @@
   .market-chart{border-top:1px solid var(--border);padding:6px 8px 8px;background:#0a0c10}
   .market-chart-title{font-size:8px;color:var(--muted);letter-spacing:.1em;margin-bottom:4px}
   .market-chart svg{display:block;width:100%;height:58px}
+  #bottom-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;
+                 padding:8px;border-top:1px solid var(--border);background:var(--panel2);
+           flex-shrink:0;height:33vh;min-height:220px;max-height:none;position:static;
+                 margin-left:0;width:calc(100% - 290px)}
+  .bottom-chart-card{border:1px solid var(--border);background:#0a0c10;border-radius:4px;
+             padding:6px 8px;display:flex;flex-direction:column;min-height:0}
+  .bottom-chart-title{font-size:9px;color:var(--muted);letter-spacing:.08em;margin-bottom:4px}
+    .bottom-chart-card svg{display:block;width:100%;height:100%;flex:1;min-height:0}
 
   /* ── panels ── */
   .panel{display:flex;flex-direction:column;overflow:hidden;min-height:0}
@@ -135,15 +144,19 @@
     .book-cols{display:flex;align-items:center;justify-content:space-between;
          margin:0 6px 4px;padding:0 4px;font-size:9px;color:var(--muted);
          letter-spacing:.08em;text-transform:uppercase}
+      .book-cols .col-maker{width:70px;text-align:left;padding-left:2px}
     .book-cols .col-qty{flex:1;text-align:right;padding-right:6px}
     .book-cols .col-px{width:126px;text-align:right;padding-right:4px}
     .book-cols.compact{margin:2px 0 4px;padding:0 4px;font-size:8px}
+      .book-cols.compact .col-maker{width:62px}
     .book-cols.compact .col-px{width:124px}
   .bk-level{display:flex;align-items:center;height:22px;margin:1px 6px;
              position:relative;overflow:hidden}
   .bk-level .bar{position:absolute;top:0;bottom:0;left:0}
   .bid-lv{background:var(--bid-bg)}.bid-lv .bar{background:var(--bid-bar)}
   .ask-lv{background:var(--ask-bg)}.ask-lv .bar{background:var(--ask-bar)}
+    .lv-maker{width:70px;text-align:left;font-size:9px;color:var(--muted);
+      padding-left:2px;position:relative;z-index:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .lv-qty{flex:1;text-align:right;font-size:11px;font-weight:600;
       color:var(--text);padding-right:6px;position:relative;z-index:1}
       .lv-qty-num{display:inline-block;min-width:88px;text-align:right;
@@ -219,6 +232,7 @@
     #body{flex-direction:column}
     #col-left {width:100%;min-width:0;border-right:none;border-bottom:1px solid var(--border);
            max-height:38vh;overflow-y:auto;flex-shrink:0}
+    #bottom-charts{margin-left:0;width:100%}
   }
 
   /* ════════════════════════════════════
@@ -240,6 +254,7 @@
     .dlg-row{flex-direction:column;align-items:flex-start}
     .dlg-row label{width:auto;margin-bottom:3px}
     .dlg-row input,.dlg-row select{width:100%}
+    #bottom-charts{display:none}
   }
 </style>
 </head>
@@ -335,7 +350,7 @@
     <span id="book-last">last: &#8212;</span>
   </div>
   <div style="height:1px;background:var(--border);margin:0 6px 4px"></div>
-  <div id="book-cols-main" class="book-cols"><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>
+  <div id="book-cols-main" class="book-cols"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>
   <div id="asks"></div>
   <div id="spread-row">spread: &#8212;</div>
   <div id="bids"></div>
@@ -353,6 +368,8 @@
 </div>
 
 </div><!-- #body -->
+
+<div id="bottom-charts"></div>
 
 <!-- DIALOG -->
 <div id="dlg-ov">
@@ -414,6 +431,7 @@ let currentIsAdmin = sessionStorage.getItem('auth_is_admin') === 'true';
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
 let lastTokenBalance = null;
 const currentHoldings = {}; // symbol -> quantity
+const orderOwners = {}; // cl_ord_id -> username
 let playerStateTimer = null;    // debounce handle for handlePlayerState
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
@@ -661,6 +679,8 @@ function renderMarketsContainer() {
   } else {
     container.innerHTML = html;
   }
+
+  renderBottomCharts();
 }
 
 
@@ -670,6 +690,16 @@ const fmt = v  => parseFloat(v).toFixed(1);
 const fmtQty = v => Math.round(Number(v) || 0).toLocaleString();
 const esc = s  => String(s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function makerFromClOrdId(clOrdId) {
+  const owner = orderOwners[String(clOrdId || '').trim()];
+  if (owner) return owner;
+
+  const normalized = String(clOrdId || '').toUpperCase();
+  if (!normalized) return '—';
+  const match = normalized.match(/^[A-Z0-9]{1,6}/);
+  return (match && match[0]) ? match[0] : '—';
+}
 
 updateMarketSwitchButton();
 setAdminControlsEnabled(currentIsAdmin);
@@ -1046,6 +1076,16 @@ function handlePlayerState(msg) {
     if (!normalizedSymbol || !(qty > 0)) return;
     currentHoldings[normalizedSymbol] = qty;
   });
+
+  Object.keys(orderOwners).forEach(clOrdId => delete orderOwners[clOrdId]);
+  const owners = msg && typeof msg.order_owners === 'object' && msg.order_owners ? msg.order_owners : {};
+  Object.keys(owners).forEach(clOrdId => {
+    const key = String(clOrdId || '').trim();
+    const username = String(owners[clOrdId] || '').trim();
+    if (!key || !username) return;
+    orderOwners[key] = username;
+  });
+
   renderHoldings();
   renderOrderCostPreview();
 
@@ -1222,12 +1262,15 @@ function renderOrderCostPreview() {
   const marketName = getSelectedOrderMarketName();
   const buyCapacity = computeBuyCapacityForMarket(marketName);
   const canBuy = !buyCapacity || (buyCapacity.available + 1e-9 >= notional);
-  const buyAvailText = buyCapacity ? buyCapacity.available.toFixed(2) : '—';
+  const remainingTokens = buyCapacity ? (buyCapacity.available - notional) : null;
+  const buyRemainingText = buyCapacity && Number.isFinite(remainingTokens)
+    ? remainingTokens.toFixed(2)
+    : '—';
   buyEl.style.color = canBuy ? 'var(--green)' : 'var(--red)';
   buyEl.style.borderColor = canBuy ? 'var(--green)' : 'var(--red)';
   buyEl.style.background = canBuy ? 'var(--bid-bg)' : 'var(--ask-bg)';
   buyEl.style.fontWeight = 'bold';
-  buyEl.textContent = `BUY cost: ${Number.isFinite(notional) ? notional.toFixed(2) : '—'} (avail ${buyAvailText})`;
+  buyEl.textContent = `BUY cost: ${Number.isFinite(notional) ? notional.toFixed(2) : '—'} (remaining ${buyRemainingText})`;
 
   const sellCapacity = computeSellCapacity(symbol);
   const canSell = sellCapacity.available + 1e-9 >= qty;
@@ -1783,9 +1826,11 @@ function renderLevels(id, levels, cls, maxQ) {
   ge(id).innerHTML = levels.map(row => {
     const px = Number(row.price) || 0;
     const qty = Number(row.quantity) || 0;
+    const maker = makerFromClOrdId(row.cl_ord_id);
     const pct = (qty / maxQ * 100).toFixed(1);
     return `<div class="bk-level ${cls}-lv">
       <div class="bar" style="width:${pct}%"></div>
+      <span class="lv-maker">${esc(maker)}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   }).join('');
@@ -1809,15 +1854,17 @@ function renderMarketBook(marketName) {
   const maxQ = allQ.length ? Math.max(...allQ) : 1;
   
   let html = '';
-  html += `<div class="book-cols compact"><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>`;
+  html += `<div class="book-cols compact"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>`;
   
   // Asks
   [...asks].reverse().forEach((order) => {
     const px = Number(order.price) || 0;
     const qty = Number(order.quantity) || 0;
+    const maker = makerFromClOrdId(order.cl_ord_id);
     const pct = (qty / maxQ * 100).toFixed(1);
     html += `<div class="bk-level ask-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
+      <span class="lv-maker">${esc(maker)}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   });
@@ -1834,9 +1881,11 @@ function renderMarketBook(marketName) {
   bids.forEach((order) => {
     const px = Number(order.price) || 0;
     const qty = Number(order.quantity) || 0;
+    const maker = makerFromClOrdId(order.cl_ord_id);
     const pct = (qty / maxQ * 100).toFixed(1);
     html += `<div class="bk-level bid-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
+      <span class="lv-maker">${esc(maker)}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   });
@@ -1850,12 +1899,33 @@ function renderMarketBook(marketName) {
     });
   }
 
-  html += `<div class="market-chart">
-    <div class="market-chart-title">PRICE CHART</div>
-    ${renderMarketMiniChartSvg(b.trades)}
-  </div>`;
-  
   container.innerHTML = html;
+
+  renderBottomCharts();
+}
+
+function renderBottomCharts() {
+  const container = ge('bottom-charts');
+  if (!container) return;
+
+  const marketNames = resolveSplitMarketConfigs()
+    .map(market => normalizeMarketName(market.name))
+    .filter(name => markets[name]);
+
+  if (marketNames.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  container.innerHTML = marketNames
+    .map(name => {
+      const market = markets[name];
+      return `<div class="bottom-chart-card">
+        <div class="bottom-chart-title">${esc(name)} PRICE CHART</div>
+        ${renderMarketMiniChartSvg((market && market.book && market.book.trades) || [])}
+      </div>`;
+    })
+    .join('');
 }
 
 function renderMarketMiniChartSvg(trades) {

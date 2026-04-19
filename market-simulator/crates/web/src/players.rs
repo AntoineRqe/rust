@@ -52,6 +52,8 @@ impl Player {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StorageData {
     players: HashMap<String, Player>,
+    #[serde(default)]
+    order_owners: HashMap<String, String>,
 }
 
 // ── PlayerStore ───────────────────────────────────────────────────────────────
@@ -65,6 +67,7 @@ pub struct PlayerStore {
 
 struct StoreInner {
     players: HashMap<String, Player>,
+    order_owners: HashMap<String, String>,
     processed_exec_ids: HashSet<String>,
     path: PathBuf,
 }
@@ -73,14 +76,15 @@ impl PlayerStore {
     /// Load the store from `path`, creating an empty one if the file does not exist yet.
     pub fn load(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_path_buf();
-        let players = if path.exists() {
+        let storage = if path.exists() {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             serde_json::from_str::<StorageData>(&text)
                 .unwrap_or_default()
-                .players
         } else {
-            HashMap::new()
+            StorageData::default()
         };
+        let players = storage.players;
+        let order_owners = storage.order_owners;
         tracing::info!(
             "[{}] Player store: {} player(s) loaded from {:?}",
             market_name(),
@@ -90,6 +94,7 @@ impl PlayerStore {
         PlayerStore {
             inner: Arc::new(Mutex::new(StoreInner {
                 players,
+                order_owners,
                 processed_exec_ids: HashSet::new(),
                 path,
             })),
@@ -155,8 +160,15 @@ impl PlayerStore {
     /// transactions (fills) occur via execution reports.
     pub fn add_pending_order(&self, username: &str, order: PendingOrder) {
         let mut inner = self.inner.lock().unwrap();
+        let cl_ord_id = order.cl_ord_id.clone();
+        let mut inserted = false;
         if let Some(player) = inner.players.get_mut(username) {
             player.pending_orders.push(order);
+            inserted = true;
+        }
+
+        if inserted {
+            inner.order_owners.insert(cl_ord_id, username.to_string());
         }
         drop(inner);
         self.flush();
@@ -176,8 +188,15 @@ impl PlayerStore {
                 player.pending_orders.remove(pos);
             }
         }
+
+        inner.order_owners.remove(cl_ord_id);
         drop(inner);
         self.flush();
+    }
+
+    /// Return a snapshot of all known cl_ord_id -> username associations.
+    pub fn get_order_owners(&self) -> HashMap<String, String> {
+        self.inner.lock().unwrap().order_owners.clone()
     }
 
     /// Reset a player's token balance to the initial amount.
@@ -243,6 +262,8 @@ impl PlayerStore {
             }
         }
 
+        inner.order_owners.clear();
+
         inner.processed_exec_ids.clear();
         drop(inner);
 
@@ -294,6 +315,7 @@ impl PlayerStore {
             return false;
         }
 
+        let mut remove_owner_mapping = false;
         for player in inner.players.values_mut() {
             if let Some(pos) = player
                 .pending_orders
@@ -323,6 +345,7 @@ impl PlayerStore {
 
                 match ord_status {
                     "2" | "3" | "4" | "8" | "C" => {
+                        remove_owner_mapping = true;
                         player.pending_orders.remove(pos);
                         changed = true;
                     }
@@ -343,6 +366,10 @@ impl PlayerStore {
             }
         }
 
+        if remove_owner_mapping {
+            inner.order_owners.remove(cl_ord_id);
+        }
+
         drop(inner);
         if changed {
             self.flush();
@@ -356,6 +383,7 @@ impl PlayerStore {
         let inner = self.inner.lock().unwrap();
         let data = StorageData {
             players: inner.players.clone(),
+            order_owners: inner.order_owners.clone(),
         };
         match serde_json::to_string_pretty(&data) {
             Ok(json) => {
