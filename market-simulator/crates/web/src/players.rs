@@ -28,7 +28,11 @@ pub struct Player {
     /// Remaining token balance.
     pub tokens: f64,
     /// Orders currently resting in the order book (not yet filled or cancelled).
+    #[serde(default)]
     pub pending_orders: Vec<PendingOrder>,
+    /// Equity inventory held by the player (symbol -> quantity).
+    #[serde(default)]
+    pub holdings: HashMap<String, f64>,
 }
 
 impl Player {
@@ -38,6 +42,7 @@ impl Player {
             password: password_hash,
             tokens: INITIAL_TOKENS,
             pending_orders: Vec::new(),
+            holdings: HashMap::new(),
         }
     }
 }
@@ -209,20 +214,32 @@ impl PlayerStore {
 
     /// Reset player-side market state after a global market reset.
     ///
-    /// Clears all pending orders for every player and drops execution-report
+    /// Clears all pending orders and holdings for every player and drops execution-report
     /// deduplication state so future reports are processed normally.
     ///
-    /// Returns `(players_touched, orders_removed)`.
-    pub fn reset_market_state(&self) -> (usize, usize) {
+    /// Returns `(players_touched, orders_removed, holdings_cleared)`.
+    pub fn reset_market_state(&self) -> (usize, usize, usize) {
         let mut inner = self.inner.lock().unwrap();
         let mut players_touched = 0usize;
         let mut orders_removed = 0usize;
+        let mut holdings_cleared = 0usize;
 
         for player in inner.players.values_mut() {
+            let had_pending = !player.pending_orders.is_empty();
+            let had_holdings = !player.holdings.is_empty();
+
             if !player.pending_orders.is_empty() {
-                players_touched += 1;
                 orders_removed += player.pending_orders.len();
                 player.pending_orders.clear();
+            }
+
+            if !player.holdings.is_empty() {
+                holdings_cleared += player.holdings.len();
+                player.holdings.clear();
+            }
+
+            if had_pending || had_holdings {
+                players_touched += 1;
             }
         }
 
@@ -231,7 +248,7 @@ impl PlayerStore {
 
         // Always persist to keep on-disk state aligned with the market reset.
         self.flush();
-        (players_touched, orders_removed)
+        (players_touched, orders_removed, holdings_cleared)
     }
 
     /// Apply a FIX execution report to player balances and pending orders.
@@ -287,10 +304,19 @@ impl PlayerStore {
 
                 if (ord_status == "1" || ord_status == "2") && last_qty > 0.0 && last_px > 0.0 {
                     let traded_notional = last_qty * last_px;
+                    let symbol = player.pending_orders[pos].symbol.to_uppercase();
                     if side == "1" {
                         player.tokens -= traded_notional;
+                        let entry = player.holdings.entry(symbol).or_insert(0.0);
+                        *entry += last_qty;
                     } else if side == "2" {
                         player.tokens += traded_notional;
+                        if let Some(owned) = player.holdings.get_mut(&symbol) {
+                            *owned = (*owned - last_qty).max(0.0);
+                            if *owned <= 1e-9 {
+                                player.holdings.remove(&symbol);
+                            }
+                        }
                     }
                     changed = true;
                 }

@@ -298,6 +298,10 @@
       </div>
     </div>
   </div>
+  <div id="order-costs" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:2px 6px 4px">
+    <div id="buy-cost-hint" style="background:#1a1e2a;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:10px;color:var(--muted)">BUY cost: —</div>
+    <div id="sell-value-hint" style="background:#1a1e2a;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:10px;color:var(--muted)">SELL value: —</div>
+  </div>
   <div class="side-row">
     <label>Side</label>
     <button id="btn-buy"  class="sbtn" onclick="setSide('BUY')">BUY</button>
@@ -306,16 +310,21 @@
   <button id="btn-send" class="btn btn-send" onclick="sendOrder()" disabled>
     &#9654; &nbsp;BUY ORDER
   </button>
+  <div id="buy-capacity" style="padding:6px 6px 2px;color:var(--muted);font-size:10px">BUY available: —</div>
 
   <div class="stitle" style="margin-top:8px">OPEN ORDERS</div><div class="ssep"></div>
   <div id="orders-list" style="flex:1;overflow-y:auto;padding:0 6px 6px;min-height:40px">
     <span style="color:var(--muted);font-size:10px">No open orders</span>
   </div>
+  <div class="stitle" style="margin-top:8px">OWNED EQUITIES</div><div class="ssep"></div>
+  <div id="holdings-list" style="padding:0 6px 6px;min-height:28px">
+    <span style="color:var(--muted);font-size:10px">No holdings</span>
+  </div>
 
   <div class="footer-row">
     <button class="ghost" id="btn-clear-book" onclick="sendToSelectedMarket({action:'clear_book'})" disabled>clear book</button>
     <button class="ghost" id="btn-reset-seq" onclick="sendToSelectedMarket({action:'reset_seq'})" disabled>reset seq</button>
-    <button class="ghost" id="btn-reset-tokens" onclick="sendToSelectedMarket({action:'reset_tokens'})" disabled>reset tokens</button>
+    <button class="ghost" id="btn-reset-tokens" onclick="resetTokensAllMarkets()" disabled>reset tokens</button>
   </div>
 </div>
 
@@ -404,6 +413,7 @@ let currentPlayer = null;
 let currentIsAdmin = sessionStorage.getItem('auth_is_admin') === 'true';
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
 let lastTokenBalance = null;
+const currentHoldings = {}; // symbol -> quantity
 let playerStateTimer = null;    // debounce handle for handlePlayerState
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
@@ -449,11 +459,34 @@ function updateTargetMarketControls() {
   const selectedMarket = markets[getSelectedOrderMarketName()];
   const connected = !!(selectedMarket && selectedMarket.connected);
   ge('btn-send').disabled = !connected;
+  renderBuyCapacityHint();
+  renderOrderCostPreview();
   updateAdminControlAvailability();
 }
 
 function sendToSelectedMarket(obj) {
   send(obj, getSelectedOrderMarketName());
+}
+
+function resetTokensAllMarkets() {
+  const payload = { action: 'reset_tokens' };
+  let sent = 0;
+
+  Object.keys(markets).forEach(name => {
+    const market = markets[name];
+    if (!market || !market.ws || market.ws.readyState !== WebSocket.OPEN) return;
+    market.ws.send(JSON.stringify(payload));
+    sent += 1;
+  });
+
+  if (sent === 0) {
+    appendLog({
+      ts: now(),
+      label: 'ERROR',
+      body: 'No connected markets available for token reset',
+      tag: 'err',
+    });
+  }
 }
 
 function buildEndpoint(baseUrl, suffix) {
@@ -646,6 +679,13 @@ populateOrderMarketOptions();
 if (ge('o-market')) {
   ge('o-market').addEventListener('change', updateTargetMarketControls);
 }
+['o-sym', 'o-qty', 'o-price'].forEach(id => {
+  const input = ge(id);
+  if (!input) return;
+  input.addEventListener('input', renderOrderCostPreview);
+  input.addEventListener('change', renderOrderCostPreview);
+});
+renderOrderCostPreview();
 
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -956,7 +996,12 @@ function handleStatus(connected) {
 
   if (!connected) {
     ge('token-balance').textContent = 'TOKENS: —';
+    lastTokenBalance = null;
+    Object.keys(currentHoldings).forEach(symbol => delete currentHoldings[symbol]);
+    renderHoldings();
   }
+  renderBuyCapacityHint();
+  renderOrderCostPreview();
   
   console.log('[UI] Status updated to:', newText);
 }
@@ -980,6 +1025,7 @@ function schedulePlayerState(msg) {
   }
   lastTokenBalance = tokens;
   ge('token-balance').textContent = `TOKENS: ${tokens.toFixed(2)}`;
+  renderBuyCapacityHint();
 
   // Defer the orders-panel repaint so overlapping pushes coalesce.
   clearTimeout(playerStateTimer);
@@ -991,6 +1037,17 @@ function handlePlayerState(msg) {
   currentIsAdmin = !!msg.is_admin;
   setAdminControlsEnabled(currentIsAdmin);
   currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+
+  Object.keys(currentHoldings).forEach(symbol => delete currentHoldings[symbol]);
+  const holdings = msg && typeof msg.holdings === 'object' && msg.holdings ? msg.holdings : {};
+  Object.keys(holdings).forEach(symbol => {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    const qty = Number(holdings[symbol] || 0);
+    if (!normalizedSymbol || !(qty > 0)) return;
+    currentHoldings[normalizedSymbol] = qty;
+  });
+  renderHoldings();
+  renderOrderCostPreview();
 
   const primaryMarketName = getPrimaryMarketName();
 
@@ -1050,6 +1107,7 @@ function setSide(s) {
     ge('btn-send').textContent   = '▶  SELL ORDER';
     ge('btn-send').className     = 'btn btn-send sell';
   }
+  renderOrderCostPreview();
 }
 
 function bumpField(id, step) {
@@ -1065,11 +1123,119 @@ function bumpField(id, step) {
   if (id === 'o-qty') {
     value = Math.max(1, Math.round(value));
     input.value = String(value);
+    renderOrderCostPreview();
     return;
   }
 
   value = Math.max(0, Math.round(value * 10) / 10);
   input.value = value.toFixed(1);
+  renderOrderCostPreview();
+}
+
+function computeBuyCapacityForMarket(marketName) {
+  const primaryMarketName = getPrimaryMarketName();
+  const normalized = normalizeMarketName(marketName);
+
+  // Client token balance is driven by primary-market player_state.
+  // For non-primary markets, defer hard validation to server-side guard.
+  if (normalized !== primaryMarketName || lastTokenBalance === null || !Number.isFinite(lastTokenBalance)) {
+    return null;
+  }
+
+  const reserved = Object.keys(openOrders).reduce((sum, id) => {
+    const order = openOrders[id];
+    if (!order) return sum;
+    if (normalizeMarketName(order.market) !== normalized) return sum;
+    if (String(order.side) !== '1') return sum;
+    const notional = Number(order.qty || 0) * Number(order.price || 0);
+    if (!Number.isFinite(notional) || notional <= 0) return sum;
+    return sum + notional;
+  }, 0);
+
+  return {
+    available: Math.max(0, Number(lastTokenBalance) - reserved),
+  };
+}
+
+function computeSellCapacity(symbol) {
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  if (!normalizedSymbol) return { available: 0 };
+
+  const ownedQty = Number(currentHoldings[normalizedSymbol] || 0);
+  const reservedSellQty = Object.keys(openOrders).reduce((sum, id) => {
+    const order = openOrders[id];
+    if (!order) return sum;
+    if (String(order.side) !== '2') return sum;
+    if (String(order.symbol || '').trim().toUpperCase() !== normalizedSymbol) return sum;
+    const qty = Number(order.qty || 0);
+    if (!Number.isFinite(qty) || qty <= 0) return sum;
+    return sum + qty;
+  }, 0);
+
+  return {
+    available: Math.max(0, ownedQty - reservedSellQty),
+  };
+}
+
+function renderHoldings() {
+  const list = ge('holdings-list');
+  if (!list) return;
+
+  const entries = Object.entries(currentHoldings)
+    .filter(([, qty]) => Number(qty) > 0)
+    .sort((a, b) => a[0].localeCompare(b[0]));
+
+  if (entries.length === 0) {
+    list.innerHTML = '<span style="color:var(--muted);font-size:10px">No holdings</span>';
+    return;
+  }
+
+  list.innerHTML = entries
+    .map(([symbol, qty]) => `<div class="order-row"><div class="order-info"><span class="sym">${esc(symbol)}</span><span class="qty">${Math.round(Number(qty) || 0).toLocaleString()}</span></div></div>`)
+    .join('');
+}
+
+function renderBuyCapacityHint() {
+  const el = ge('buy-capacity');
+  if (!el) return;
+
+  const marketName = getSelectedOrderMarketName();
+  const capacity = computeBuyCapacityForMarket(marketName);
+  if (!capacity) {
+    el.textContent = `BUY available (${marketName || '—'}): —`;
+    return;
+  }
+
+  el.textContent = `BUY available (${marketName}): ${capacity.available.toFixed(2)}`;
+}
+
+function renderOrderCostPreview() {
+  const buyEl = ge('buy-cost-hint');
+  const sellEl = ge('sell-value-hint');
+  if (!buyEl || !sellEl) return;
+
+  const symbol = ge('o-sym') ? ge('o-sym').value.trim().toUpperCase() : '';
+  const qty = ge('o-qty') ? Number(ge('o-qty').value) : 0;
+  const price = ge('o-price') ? Number(ge('o-price').value) : 0;
+  const notional = (Number.isFinite(qty) && Number.isFinite(price)) ? (qty * price) : 0;
+
+  const marketName = getSelectedOrderMarketName();
+  const buyCapacity = computeBuyCapacityForMarket(marketName);
+  const canBuy = !buyCapacity || (buyCapacity.available + 1e-9 >= notional);
+  const buyAvailText = buyCapacity ? buyCapacity.available.toFixed(2) : '—';
+  buyEl.style.color = canBuy ? 'var(--green)' : 'var(--red)';
+  buyEl.style.borderColor = canBuy ? 'var(--green)' : 'var(--red)';
+  buyEl.style.background = canBuy ? 'var(--bid-bg)' : 'var(--ask-bg)';
+  buyEl.style.fontWeight = 'bold';
+  buyEl.textContent = `BUY cost: ${Number.isFinite(notional) ? notional.toFixed(2) : '—'} (avail ${buyAvailText})`;
+
+  const sellCapacity = computeSellCapacity(symbol);
+  const canSell = sellCapacity.available + 1e-9 >= qty;
+  sellEl.style.color = canSell ? 'var(--green)' : 'var(--red)';
+  sellEl.style.borderColor = canSell ? 'var(--green)' : 'var(--red)';
+  sellEl.style.background = canSell ? 'var(--bid-bg)' : 'var(--ask-bg)';
+  sellEl.style.fontWeight = 'bold';
+  sellEl.textContent = `SELL value: ${Number.isFinite(notional) ? notional.toFixed(2) : '—'} (${symbol || '—'} avail ${Math.round(sellCapacity.available)})`;
 }
 
 // ── send order ────────────────────────────────────────────────────────────────
@@ -1084,6 +1250,38 @@ function sendOrder() {
   if (!targetMarket || !targetMarket.connected) {
     appendLog({ ts: now(), label: 'ERROR', body: `Target market "${targetMarketName}" is not connected`, tag: 'err' });
     return;
+  }
+
+  if (s === '1') {
+    const required = qty * price;
+    if (!Number.isFinite(required) || required <= 0) {
+      appendLog({ ts: now(), label: 'ERROR', body: 'Invalid BUY order notional', tag: 'err' });
+      return;
+    }
+
+    const capacity = computeBuyCapacityForMarket(targetMarketName);
+    if (capacity && (capacity.available + 1e-9) < required) {
+      appendLog({
+        ts: now(),
+        label: 'REJECTED',
+        body: `Insufficient tokens for BUY order: required ${required.toFixed(2)}, available ${capacity.available.toFixed(2)}`,
+        tag: 'err',
+      });
+      return;
+    }
+  }
+
+  if (s === '2') {
+    const sellCapacity = computeSellCapacity(symbol);
+    if (sellCapacity.available + 1e-9 < qty) {
+      appendLog({
+        ts: now(),
+        label: 'REJECTED',
+        body: `Insufficient equity inventory for SELL ${symbol}: required ${Math.round(qty)}, available ${Math.round(sellCapacity.available)}`,
+        tag: 'err',
+      });
+      return;
+    }
   }
 
   // FIX OrderId in this project is fixed-size (20 chars); keep ClOrdID <= 20
@@ -1204,6 +1402,8 @@ function renderOrders(marketName, immediate = false) {
   
   if (orderIds.length === 0) {
     list.innerHTML = '<span style="color:var(--muted);font-size:10px">No open orders</span>';
+    renderBuyCapacityHint();
+    renderOrderCostPreview();
     return;
   }
   
@@ -1222,6 +1422,8 @@ function renderOrders(marketName, immediate = false) {
       <button class="order-cancel" onclick="cancelOrder('${esc(clordId)}', '${esc(o.symbol)}', ${o.qty}, '${esc(o.market || getPrimaryMarketName())}')">✕</button>
     </div>`;
   }).join('');
+  renderBuyCapacityHint();
+  renderOrderCostPreview();
 }
 
 function cancelOrder(clordId, symbol, qty, marketName) {

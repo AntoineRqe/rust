@@ -233,6 +233,7 @@ async fn send_player_state(
             username: player.username.clone(),
             tokens: player.tokens,
             pending_orders: player.pending_orders.clone(),
+            holdings: player.holdings.clone(),
             is_admin,
             id_suffix,
         }
@@ -241,6 +242,7 @@ async fn send_player_state(
             username: username.to_string(),
             tokens: 0.0,
             pending_orders: Vec::new(),
+            holdings: std::collections::HashMap::new(),
             is_admin,
             id_suffix: String::new(),
         }
@@ -321,6 +323,70 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 market_name(),
                 if side == "1" { "BUY" } else { "SELL" },
                 qty as u32, symbol, price);
+
+            if side == "1" {
+                let required_notional = qty * price;
+                if required_notional.is_finite() && required_notional > 0.0 {
+                    if let Some(player) = state.player_store.get_player(username) {
+                        let reserved_notional: f64 = player
+                            .pending_orders
+                            .iter()
+                            .filter(|order| order.side == "1")
+                            .map(|order| order.qty * order.price)
+                            .sum();
+
+                        let available_tokens = player.tokens - reserved_notional;
+                        if available_tokens + 1e-9 < required_notional {
+                            state.bus.publish(WsEvent::FixMessage {
+                                label: "REJECTED ✕".into(),
+                                body: format!(
+                                    "Insufficient tokens for BUY order: required {:.2}, available {:.2}.",
+                                    required_notional,
+                                    available_tokens.max(0.0)
+                                ),
+                                tag: "err".into(),
+                                recipient: Some(username.to_string()),
+                            });
+                            return;
+                        }
+                    }
+                }
+            } else if side == "2" {
+                if qty.is_finite() && qty > 0.0 {
+                    if let Some(player) = state.player_store.get_player(username) {
+                        let normalized_symbol = symbol.to_uppercase();
+                        let owned_qty = player
+                            .holdings
+                            .get(&normalized_symbol)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let reserved_sell_qty: f64 = player
+                            .pending_orders
+                            .iter()
+                            .filter(|order| {
+                                order.side == "2" && order.symbol.eq_ignore_ascii_case(&normalized_symbol)
+                            })
+                            .map(|order| order.qty)
+                            .sum();
+
+                        let available_qty = (owned_qty - reserved_sell_qty).max(0.0);
+                        if available_qty + 1e-9 < qty {
+                            state.bus.publish(WsEvent::FixMessage {
+                                label: "REJECTED ✕".into(),
+                                body: format!(
+                                    "Insufficient equity inventory for SELL {}: required {:.0}, available {:.0}.",
+                                    normalized_symbol,
+                                    qty,
+                                    available_qty
+                                ),
+                                tag: "err".into(),
+                                recipient: Some(username.to_string()),
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
 
             let sender_id = sender.unwrap_or_else(|| "BROWSER".into());
             let target_id = target.unwrap_or_else(|| "SERVER1".into());
@@ -420,14 +486,15 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                         Ok(resp) => {
                             let r = resp.into_inner();
                             let (tag, label, body, recipient) = if r.success {
-                                let (players_touched, orders_removed) = state.player_store.reset_market_state();
+                                let (players_touched, orders_removed, holdings_cleared) = state.player_store.reset_market_state();
                                 (
                                     "info",
                                     "RESET ✓  Order book and database cleared.".to_string(),
                                     format!(
-                                        "{} Player state cleared: {} pending order(s) removed across {} player(s).",
+                                        "{} Player state cleared: {} pending order(s) and {} holding(s) removed across {} player(s).",
                                         r.message,
                                         orders_removed,
+                                        holdings_cleared,
                                         players_touched
                                     ),
                                     None,
