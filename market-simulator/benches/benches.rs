@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use crossbeam::channel;
-use order_book::book::OrderBookEngine;
+use order_book::engine::OrderBookEngine;
 use market_feed::engine::MarketDataFeedEngine;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::atomic::AtomicBool;

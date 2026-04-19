@@ -11,6 +11,7 @@ types = { path = "../types" }
 utils = { path = "../utils" }
 snapshot = { path = "../snapshot" }
 crossbeam-channel.workspace = true
+arc-swap = "1.9.1"
 
 # Dev dependencies for testing
 [dev-dependencies]

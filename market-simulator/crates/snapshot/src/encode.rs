@@ -32,19 +32,21 @@ pub fn encode_snapshot(snapshot: &Snapshot) -> Vec<u8> {
     bytes.extend_from_slice(&(snapshot.symbol.len() as u32).to_be_bytes());
     bytes.extend_from_slice(snapshot.symbol.as_bytes());
     bytes.extend_from_slice(&(snapshot.id as u32).to_be_bytes());
-    bytes.extend_from_slice(&(snapshot.order_book.bids.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&(snapshot.order_book.bids_len as u32).to_be_bytes());
 
     // Encode bids
-    for bid in &snapshot.order_book.bids {
+    for i in 0..snapshot.order_book.bids_len {
+        let bid = &snapshot.order_book.bids[i];
         bytes.extend_from_slice(&bid.price.to_fix_bytes());
         bytes.extend_from_slice(&bid.quantity.to_fix_bytes());
         bytes.push(0); // Side: 0 for bid
     }
 
-    bytes.extend_from_slice(&(snapshot.order_book.asks.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&(snapshot.order_book.asks_len as u32).to_be_bytes());
 
     // Encode asks
-    for ask in &snapshot.order_book.asks {
+    for i in 0..snapshot.order_book.asks_len {
+        let ask = &snapshot.order_book.asks[i];
         bytes.extend_from_slice(&ask.price.to_fix_bytes());
         bytes.extend_from_slice(&ask.quantity.to_fix_bytes());
         bytes.push(1); // Side: 1 for ask
@@ -67,8 +69,6 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
     snapshot.id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64;
     offset += 4;
 
-    snapshot.order_book.bids = Vec::new(); // Populate bids from bytes
-    snapshot.order_book.asks = Vec::new(); // Populate asks from bytes
 
     let bids_len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
     offset += 4;
@@ -79,7 +79,8 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
         offset += 20;
         let quantity = FixedPointArithmetic::from_fix_bytes(&bytes[offset..offset + 20]).unwrap();
         offset += 20;
-        snapshot.order_book.bids.push(OrderEvent {
+
+        let _ = snapshot.order_book.add_bid(OrderEvent {
             price,
             quantity,
             side: Side::Buy,
@@ -103,7 +104,8 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
         offset += 20;
         let quantity = FixedPointArithmetic::from_fix_bytes(&bytes[offset..offset + 20]).unwrap();
         offset += 20;
-        snapshot.order_book.asks.push(OrderEvent {
+        
+        let _ = snapshot.order_book.add_ask(OrderEvent {
             price,
             quantity,
             side: Side::Sell,
@@ -132,41 +134,40 @@ mod tests {
 
     #[test]
     fn test_encode_snapshot() {
-        let snapshot = Snapshot {
+        let order1 = OrderEvent {
+            price: FixedPointArithmetic::from_f64(100.0),
+            quantity: FixedPointArithmetic::from_f64(10.0),
+            side: Side::Buy,
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: OrderId::from_ascii("bid1"),
+            orig_cl_ord_id: None,
+            sender_id: EntityId::from_ascii("trader1"),
+            target_id: EntityId::from_ascii("exchange"),
+            symbol: SymbolId::from_ascii("TEST"),
+            timestamp: 1627846267000,
+        };
+        let order2 = OrderEvent {
+            price: FixedPointArithmetic::from_f64(102.0),
+            quantity: FixedPointArithmetic::from_f64(5.0),
+            side: Side::Sell,
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: OrderId::from_ascii("ask1"),
+            orig_cl_ord_id: None,
+            sender_id: EntityId::from_ascii("trader2"),
+            target_id: EntityId::from_ascii("exchange"),
+            symbol: SymbolId::from_ascii("TEST"),
+            timestamp: 1627846267000,
+        };
+
+        let mut snapshot = Snapshot {
             timestamp: 1627846267000,
             symbol: "TEST".to_string(),
             id: 1,
-            order_book: OrderBookSnapshot {
-                bids: vec![
-                    OrderEvent {
-                        price: FixedPointArithmetic(12345678900),
-                        quantity: FixedPointArithmetic(100000000),
-                        side: Side::Buy,
-                        order_type: OrderType::LimitOrder,
-                        cl_ord_id: OrderId::from_ascii("bid1"),
-                        orig_cl_ord_id: None,
-                        sender_id: EntityId::from_ascii("trader1"),
-                        target_id: EntityId::from_ascii("exchange"),
-                        symbol: SymbolId::from_ascii("TEST"),
-                        timestamp: 1627846267000,
-                    },
-                ],
-                asks: vec![
-                    OrderEvent {
-                        price: FixedPointArithmetic(12345679000),
-                        quantity: FixedPointArithmetic(200000000),
-                        side: Side::Sell,
-                        order_type: OrderType::LimitOrder,
-                        cl_ord_id: OrderId::from_ascii("ask1"),
-                        orig_cl_ord_id: None,
-                        sender_id: EntityId::from_ascii("trader2"),
-                        target_id: EntityId::from_ascii("exchange"),
-                        symbol: SymbolId::from_ascii("TEST"),
-                        timestamp: 1627846267000,
-                    },
-                ],
-            },
+            order_book: OrderBookSnapshot::default(),
         };
+
+        let _ = snapshot.order_book.add_bid(order1);
+        let _ = snapshot.order_book.add_ask(order2);
 
         let encoded = encode_snapshot(&snapshot);
         assert!(!encoded.is_empty());
@@ -176,8 +177,8 @@ mod tests {
         assert_eq!(decoded.timestamp, snapshot.timestamp);
         assert_eq!(decoded.symbol, snapshot.symbol);
         assert_eq!(decoded.id, snapshot.id);
-        assert_eq!(decoded.order_book.bids.len(), snapshot.order_book.bids.len());
-        assert_eq!(decoded.order_book.asks.len(), snapshot.order_book.asks.len());
+        assert_eq!(decoded.order_book.bids_len, snapshot.order_book.bids_len);
+        assert_eq!(decoded.order_book.asks_len, snapshot.order_book.asks_len);
         assert_eq!(decoded.order_book.bids[0].price, snapshot.order_book.bids[0].price);
         assert_eq!(decoded.order_book.bids[0].quantity, snapshot.order_book.bids[0].quantity);
         assert_eq!(decoded.order_book.asks[0].price, snapshot.order_book.asks[0].price);

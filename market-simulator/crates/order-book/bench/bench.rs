@@ -13,7 +13,6 @@ use spsc::spsc_lock_free::RingBuffer;
 use types::{OrderEvent, OrderResult};
 use types::macros::{EntityId, OrderId, SymbolId};
 use std::sync::Arc;
-use std::sync::RwLock;
 
 const PRODUCER_CORE_OFFSET: usize = 0;
 const CONSUMER_CORE_OFFSET: usize = 2;
@@ -93,10 +92,14 @@ fn run_latency(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
         let inbound_tx_clone = Arc::clone(&inbound_tx);
 
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
-        let order_book = Arc::new(RwLock::new(order_book::book::OrderBook::new("TEST".into())));
+        let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
-            inbound_rx, [Some(outbound_tx), None, None],
-            control_rx.1, order_book, Arc::clone(&shutdown),
+            inbound_rx,
+             [Some(outbound_tx), None, None],
+            control_rx.1,
+            order_book,
+            None, // No snapshot producer for this benchmark
+            Arc::clone(&shutdown),
         );
 
         let engine_handle = s.spawn(move || {
@@ -176,10 +179,10 @@ fn run_throughput(iters: u64) -> Duration {
         let inbound_tx_clone = Arc::clone(&inbound_tx);
 
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
-        let order_book = Arc::new(RwLock::new(order_book::book::OrderBook::new("TEST".into())));
+        let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
             inbound_rx, [Some(outbound_tx), None, None],
-            control_rx.1, order_book, Arc::clone(&shutdown),
+            control_rx.1, order_book, None, Arc::clone(&shutdown),
         );
 
         let engine_handle = s.spawn(move || {
