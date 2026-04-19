@@ -82,6 +82,18 @@ fn stable_u64_from_fixed_20(bytes: &[u8; 20]) -> u64 {
     hash
 }
 
+impl std::fmt::Display for MarketEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MarketEvent::Add(_header, _add_order) => write!(f, "MarketEvent::Add"),
+            MarketEvent::Modify(_header, _modify_order) => write!(f, "MarketEvent::Modify"),
+            MarketEvent::Delete(_header, _delete_order) => write!(f, "MarketEvent::Delete"),
+            MarketEvent::Trade(_header, _trade) => write!(f, "MarketEvent::Trade"),
+            MarketEvent::Snapshot(_header, _snapshot) => write!(f, "MarketEvent::Snapshot"),
+        }
+    }
+}
+
 impl MarketEvent {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {

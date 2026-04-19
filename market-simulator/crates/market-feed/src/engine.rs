@@ -147,11 +147,10 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
             if let Some((order_event, order_result)) = self.fifo_in.pop() {
                 // Process incoming order events and results from the order book engine
                 // Transform the order event and result into a market data feed event
-                tracing::debug!("[{}] Received order event: {}, result: {:?}", market_name(), order_event, order_result);
                 if let Some(market_data_feed_events) = self.build_market_data_feed_events(&order_event, &order_result) {
                     for market_data_feed_event in market_data_feed_events {
                         let bytes = market_data_feed_event.to_bytes();
-                        tracing::info!("[{}] Broadcasting market data feed event: header={:?}, event={:?}", market_name(), market_data_feed_event, market_data_feed_event);
+                        tracing::info!("[{}] Broadcasting market data feed event: header={}, event={}", market_name(), market_data_feed_event, market_data_feed_event);
                         let _ = self.source.socket.send_to(&bytes, &self.source.source.address);
                     }
                 }

@@ -57,17 +57,27 @@ impl std::fmt::Display for OrderEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "\nOrderEvent {{ price: {}
-            \nquantity: {}
-            \nside: {}
-            \norder_type: {:?}
-            \ncl_ord_id: {}
-            \norig_cl_ord_id: {:?}
-            \nsender_id: {:?}
-            \ntarget_id: {:?}
-            \nsymbol: {:?}
-            \ntimestamp: {:?} }}",
-            self.price.raw(), self.quantity, self.side, self.order_type, self.cl_ord_id, self.orig_cl_ord_id, self.sender_id, self.target_id, self.symbol, self.timestamp
+            "\nOrderEvent:
+            \tprice: {}
+            \tquantity: {}
+            \tside: {}
+            \torder_type: {}
+            \tcl_ord_id: {}
+            \torig_cl_ord_id: {}
+            \tsender_id: {}
+            \ttarget_id: {}
+            \tsymbol: {}
+            \ttimestamp: {}",
+            self.price.raw(),
+            self.quantity,
+            self.side,
+            self.order_type,
+            self.cl_ord_id,
+            self.orig_cl_ord_id.map(|id| id.to_string()).unwrap_or("None".to_string()),
+            self.sender_id,
+            self.target_id,
+            self.symbol,
+            self.timestamp
         )
     }
 }
@@ -203,8 +213,13 @@ impl std::fmt::Display for OrderResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OrderResult {{ status: {:?} }}\n",
+            "\nOrderResult
+            \tinternal_order_id: {}
+             \tstatus: {}
+             \ttimestamp: {}",
+             self.internal_order_id,
             self.status,
+            self.timestamp
         )?;
         for i in 0..self.trades.len() {
             let trade = self.trades[i];
@@ -242,6 +257,16 @@ pub enum OrderType {
     CancelOrder,
 }
 
+impl std::fmt::Display for OrderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderType::LimitOrder => write!(f, "Limit Order"),
+            OrderType::MarketOrder => write!(f, "Market Order"),
+            OrderType::CancelOrder => write!(f, "Cancel Order"),
+        }
+    }
+}
+
 /// Represents the status of an order after processing.
 /// - `New`: The order is new and has not been processed yet.
 /// - `PartiallyFilled`: The order has been partially filled, meaning some quantity has been matched, but there is still remaining quantity in the order book.
@@ -256,4 +281,17 @@ pub enum OrderStatus {
     Cancelled,
     CancelRejected,
     Unmatched,
+}
+
+impl std::fmt::Display for OrderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderStatus::New => write!(f, "New"),
+            OrderStatus::PartiallyFilled => write!(f, "Partially Filled"),
+            OrderStatus::Filled => write!(f, "Filled"),
+            OrderStatus::Cancelled => write!(f, "Cancelled"),
+            OrderStatus::CancelRejected => write!(f, "Cancel Rejected"),
+            OrderStatus::Unmatched => write!(f, "Unmatched"),
+        }
+    }
 }
