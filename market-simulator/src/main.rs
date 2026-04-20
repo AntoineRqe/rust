@@ -398,7 +398,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let tcp_core = config.core_mapping.tcp_core;
     let _tcp_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: tcp_core });
-        server.accept_loop(listener);
+        server.accept_loop(listener, vec![tcp_core]);
     });
 
     {

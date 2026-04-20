@@ -1,6 +1,6 @@
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::TrySendError;
@@ -55,18 +55,42 @@ impl<'a, const N: usize> FixServer<N> {
     }
 
     /// Starts the TCP server and blocks the current thread until shutdown.
-    pub fn accept_loop(&self, listener: TcpListener) {
+    ///
+    /// `cpu_ids` controls runtime worker-thread CPU pinning. When empty,
+    /// no worker affinity is applied.
+    pub fn accept_loop(&self, listener: TcpListener, cpu_ids: Vec<usize>) {
         if let Err(e) = listener.set_nonblocking(true) {
             tracing::error!("[{}] Cannot set non-blocking on TCP listener: {e}", market_name());
             return;
         }
 
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder
             .worker_threads(tcp_runtime_worker_threads())
             .enable_all()
-            .thread_name("fix-tcp-async")
-            .build()
-        {
+            .thread_name("fix-tcp-async");
+
+        if !cpu_ids.is_empty() {
+            let bind_ids = Arc::new(cpu_ids);
+            let bind_cursor = Arc::new(AtomicUsize::new(0));
+            builder.on_thread_start({
+                let bind_ids = Arc::clone(&bind_ids);
+                let bind_cursor = Arc::clone(&bind_cursor);
+                move || {
+                    let idx = bind_cursor.fetch_add(1, Ordering::Relaxed);
+                    let core_id = bind_ids[idx % bind_ids.len()];
+                    if !core_affinity::set_for_current(core_affinity::CoreId { id: core_id }) {
+                        tracing::warn!(
+                            "[{}] Failed to pin fix-tcp-async worker to CPU {}",
+                            market_name(),
+                            core_id
+                        );
+                    }
+                }
+            });
+        }
+
+        let runtime = match builder.build() {
             Ok(rt) => rt,
             Err(e) => {
                 tracing::error!("[{}] Failed to build TCP Tokio runtime: {e}", market_name());
