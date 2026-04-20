@@ -207,6 +207,43 @@ impl PlayerStore {
         self.inner.lock().unwrap().order_owners.clone()
     }
 
+    /// Hydrate cl_ord_id -> username associations during startup.
+    ///
+    /// Each tuple is `(cl_ord_id, sender_id)` from persisted pending orders.
+    /// Only sender IDs matching known players are accepted.
+    ///
+    /// Returns the number of associations inserted or updated.
+    pub fn hydrate_order_owners_from_sender_ids(&self, entries: &[(String, String)]) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let mut updated = 0usize;
+
+        for (cl_ord_id, sender_id) in entries {
+            let cl_ord_id = cl_ord_id.trim();
+            let sender_id = sender_id.trim();
+            if cl_ord_id.is_empty() || sender_id.is_empty() {
+                continue;
+            }
+
+            if !inner.players.contains_key(sender_id) {
+                continue;
+            }
+
+            let replaced = inner
+                .order_owners
+                .insert(cl_ord_id.to_string(), sender_id.to_string());
+            if replaced.as_deref() != Some(sender_id) {
+                updated += 1;
+            }
+        }
+
+        drop(inner);
+        if updated > 0 {
+            self.flush();
+        }
+
+        updated
+    }
+
     /// Record a successful websocket connection for a player and persist
     /// associated client IP (if provided).
     pub fn record_connection(&self, username: &str, ip: Option<&str>) {

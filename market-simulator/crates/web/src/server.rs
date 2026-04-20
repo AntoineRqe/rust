@@ -122,8 +122,9 @@ async fn serve(
     {
         let grpc_addr_clone = state.grpc_addr.clone();
         let order_book_clone = Arc::clone(&state.order_book);
+        let player_store_clone = state.player_store.clone();
         
-        match load_initial_order_book(&grpc_addr_clone, order_book_clone).await {
+        match load_initial_order_book(&grpc_addr_clone, order_book_clone, &player_store_clone).await {
             Ok(count) => {
                 tracing::info!("[{}] Loaded {} pending orders from gRPC at startup", market_name(), count);
             }
@@ -275,6 +276,7 @@ async fn api_markets_handler(State(state): State<AppState>) -> impl IntoResponse
 async fn load_initial_order_book(
     grpc_addr: &str,
     order_book: Arc<Mutex<OrderBookState>>,
+    player_store: &PlayerStore,
 ) -> Result<usize, String> {
     use grpc::proto::market_control_client::MarketControlClient;
     use grpc::proto::DumpOrderBookRequest;
@@ -301,6 +303,7 @@ async fn load_initial_order_book(
 
     let mut book_state = order_book.lock().unwrap();
     let mut count = 0u64;
+    let mut owner_hydration_entries: Vec<(String, String)> = Vec::new();
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -343,14 +346,23 @@ async fn load_initial_order_book(
             timestamp_ms,
         );
 
+        owner_hydration_entries.push((
+            pending_order.cl_ord_id.clone(),
+            pending_order.sender_id.clone(),
+        ));
+
         count += 1;
     }
 
+    drop(book_state);
+
+    let hydrated = player_store.hydrate_order_owners_from_sender_ids(&owner_hydration_entries);
+
     tracing::info!(
-        "[{}] Successfully loaded {} pending orders into order book state ({} symbols)",
+        "[{}] Successfully loaded {} pending orders into order book state ({} owner mapping(s) hydrated)",
         market_name(),
         count,
-        book_state.books.len()
+        hydrated
     );
 
     Ok(count as usize)
