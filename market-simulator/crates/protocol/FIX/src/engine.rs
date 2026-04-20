@@ -135,6 +135,18 @@ impl <const N: usize> FixShared<N> {
         }
         self.pending.locked.store(false, Ordering::Release);
     }
+
+    fn prune_closed_pending(&self) -> usize {
+        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
+        let removed = unsafe {
+            let pending = &mut *self.pending.pending.get();
+            let before = pending.len();
+            pending.retain(|_, sender| !sender.is_closed());
+            before.saturating_sub(pending.len())
+        };
+        self.pending.locked.store(false, Ordering::Release);
+        removed
+    }
 }
 
 pub struct FixInboundEngine<'a, const N: usize> {
@@ -277,6 +289,8 @@ pub struct FixOutboundEngine<'a, const N: usize> {
 
 impl<'a, const N: usize> FixOutboundEngine<'a, N> {
     pub fn run(&mut self) {
+        let mut sweep_ticks = 0usize;
+
         while !self.shared.shutdown.load(Ordering::Relaxed) || !self.response_in.is_empty() {
             if let Some((key, _response)) = self.response_in.pop() {
                 if let Some(resp_queue) = self.shared.get_pending(&key) {
@@ -292,8 +306,18 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                     }
                 }
             }
+
+            // Periodically prune closed pending response queues to prevent memory leaks from clients that have disconnected without properly cleaning up their pending routes.
+            sweep_ticks = sweep_ticks.saturating_add(1);
+            if sweep_ticks >= 10_000 {
+                let removed = self.shared.prune_closed_pending();
+                if removed > 0 {
+                    tracing::debug!("[{}] Pruned {} stale pending FIX response route(s)", market_name(), removed);
+                }
+                sweep_ticks = 0;
+            }
         }
-        
+
         tracing::info!("[{}] Outbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
     }
 }

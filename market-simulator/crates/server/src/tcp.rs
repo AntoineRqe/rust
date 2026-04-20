@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::TrySendError;
+use tokio::sync::Semaphore;
 use fix::engine::FixRawMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -19,6 +20,18 @@ fn response_queue_capacity() -> usize {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(1024)
+    })
+}
+
+/// Determine the maximum number of concurrent client connections.
+fn tcp_max_connections() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("TCP_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(2048)
     })
 }
 
@@ -98,11 +111,12 @@ impl<'a, const N: usize> FixServer<N> {
             }
         };
 
-        runtime.block_on(self.accept_loop_async(listener));
+        let semaphore = Arc::new(Semaphore::new(tcp_max_connections()));
+        runtime.block_on(self.accept_loop_async(listener, semaphore));
     }
 
     /// Async accept loop: accept clients and spawn one Tokio task per connection.
-    async fn accept_loop_async(&self, listener: TcpListener) {
+    async fn accept_loop_async(&self, listener: TcpListener, semaphore: Arc<Semaphore>) {
         let listener = match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => listener,
             Err(e) => {
@@ -120,12 +134,25 @@ impl<'a, const N: usize> FixServer<N> {
                                 tracing::warn!("[{}] Failed to set TCP_NODELAY for {addr}: {e}", market_name());
                             }
 
+                            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "[{}] Connection limit reached ({} max), rejecting {addr}",
+                                        market_name(),
+                                        tcp_max_connections()
+                                    );
+                                    continue;
+                                }
+                            };
+
                             let queue = Arc::clone(&self.tcp_to_fix);
                             let shutdown = Arc::clone(&self.shutdown);
 
                             tracing::info!("[{}] New client connected from {}", market_name(), addr);
                             tokio::spawn(async move {
                                 Self::handle_client(stream, queue, shutdown).await;
+                                drop(permit); // returns the slot when the client disconnects
                             });
                         }
                         Err(e) => {
@@ -156,20 +183,18 @@ impl<'a, const N: usize> FixServer<N> {
         let (response_tx, response_rx) = mpsc::channel::<FixRawMsg<N>>(response_queue_capacity());
         let (mut read_stream, write_stream) = stream.into_split();
 
-        let client_alive = Arc::new(AtomicBool::new(true));
-        let writer_alive = Arc::clone(&client_alive);
-        let writer_shutdown = Arc::clone(&shutdown);
-
         let writer_task = tokio::spawn(async move {
-            Self::writer_loop(write_stream, response_rx, writer_alive, writer_shutdown).await;
+            Self::writer_loop(write_stream, response_rx).await;
         });
 
         let mut buf = [0u8; 4096];
-        while client_alive.load(Ordering::Relaxed) && !shutdown.load(Ordering::Relaxed) {
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             match tokio::time::timeout(Duration::from_millis(100), read_stream.read(&mut buf)).await {
                 Ok(Ok(0)) => {
                     tracing::info!("[{}] Client disconnected", market_name());
-                    client_alive.store(false, Ordering::Relaxed);
                     break;
                 }
                 Ok(Ok(n)) => {
@@ -180,7 +205,6 @@ impl<'a, const N: usize> FixServer<N> {
 
                     if let Err(e) = Self::enqueue_to_fix(&queue, msg, &shutdown).await {
                         tracing::error!("[{}] Failed to send message to FIX engine: {e}", market_name());
-                        client_alive.store(false, Ordering::Relaxed);
                         break;
                     }
 
@@ -188,7 +212,6 @@ impl<'a, const N: usize> FixServer<N> {
                 }
                 Ok(Err(e)) => {
                     tracing::error!("[{}] Error reading from client: {e}", market_name());
-                    client_alive.store(false, Ordering::Relaxed);
                     break;
                 }
                 Err(_) => continue,
@@ -202,32 +225,17 @@ impl<'a, const N: usize> FixServer<N> {
     }
 
     /// Async write loop: wait for FIX responses and write them back to the socket.
+    /// Exits automatically when all senders are dropped (client disconnected or server shutdown).
     async fn writer_loop(
         mut write_stream: tokio::net::tcp::OwnedWriteHalf,
         mut response_rx: mpsc::Receiver<FixRawMsg<N>>,
-        writer_alive: Arc<AtomicBool>,
-        writer_shutdown: Arc<AtomicBool>,
     ) {
-        while writer_alive.load(Ordering::Relaxed) && !writer_shutdown.load(Ordering::Relaxed) {
-            tokio::select! {
-                maybe_response = response_rx.recv() => {
-                    match maybe_response {
-                        Some(response) => {
-                            if let Err(e) = write_stream.write_all(&response.data[..response.len as usize]).await {
-                                tracing::error!("[{}] Failed to send response to client: {}", market_name(), e);
-                                writer_alive.store(false, Ordering::Relaxed);
-                                return;
-                            }
-                            tracing::debug!("[{}] Response from FIX engine sent back to client", market_name());
-                        }
-                        None => {
-                            tracing::warn!("[{}] Response channel disconnected", market_name());
-                            return;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        while let Some(response) = response_rx.recv().await {
+            if let Err(e) = write_stream.write_all(&response.data[..response.len as usize]).await {
+                tracing::error!("[{}] Failed to send response to client: {}", market_name(), e);
+                return;
             }
+            tracing::debug!("[{}] Response from FIX engine sent back to client", market_name());
         }
     }
 
