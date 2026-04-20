@@ -51,8 +51,11 @@ fn tcp_runtime_worker_threads() -> usize {
     })
 }
 
+/// The `FixServer` struct encapsulates the TCP server logic, including accepting client connections, handling communication with clients, and forwarding messages to the FIX engine. It uses Tokio for async I/O and supports graceful shutdown.
 pub struct FixServer<const N: usize> {
+    /// Channel to send messages from TCP handlers to the FIX engine.
     tcp_to_fix: Arc<crossbeam_channel::Sender<FixRawMsg<N>>>,
+    /// Atomic flag to signal shutdown across all tasks.
     shutdown: Arc<AtomicBool>,
 }
 
