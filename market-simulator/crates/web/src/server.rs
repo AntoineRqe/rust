@@ -155,7 +155,7 @@ async fn serve(
         .unwrap_or_else(|e| panic!("Cannot bind to port {port}: {e}"));
 
     tracing::info!("[{}] Web terminal → http://{}:{}", market_name(), ip, port);
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .expect("axum server error");

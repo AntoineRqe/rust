@@ -28,11 +28,17 @@ pub struct Player {
     /// Remaining token balance.
     pub tokens: f64,
     /// Orders currently resting in the order book (not yet filled or cancelled).
-    #[serde(default)]
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub pending_orders: Vec<PendingOrder>,
     /// Equity inventory held by the player (symbol -> quantity).
     #[serde(default)]
     pub holdings: HashMap<String, f64>,
+    /// Total number of authenticated websocket connections observed for this player.
+    #[serde(default)]
+    pub connection_count: u64,
+    /// Unique client IPs seen for this player.
+    #[serde(default)]
+    pub ips: Vec<String>,
 }
 
 impl Player {
@@ -43,6 +49,8 @@ impl Player {
             tokens: INITIAL_TOKENS,
             pending_orders: Vec::new(),
             holdings: HashMap::new(),
+            connection_count: 0,
+            ips: Vec::new(),
         }
     }
 }
@@ -199,6 +207,27 @@ impl PlayerStore {
         self.inner.lock().unwrap().order_owners.clone()
     }
 
+    /// Record a successful websocket connection for a player and persist
+    /// associated client IP (if provided).
+    pub fn record_connection(&self, username: &str, ip: Option<&str>) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(player) = inner.players.get_mut(username) else {
+            return;
+        };
+
+        player.connection_count = player.connection_count.saturating_add(1);
+
+        if let Some(raw_ip) = ip {
+            let value = raw_ip.trim();
+            if !value.is_empty() && !player.ips.iter().any(|existing| existing == value) {
+                player.ips.push(value.to_string());
+            }
+        }
+
+        drop(inner);
+        self.flush();
+    }
+
     /// Reset a player's token balance to the initial amount.
     ///
     /// Returns `true` if the player exists and was updated.
@@ -307,6 +336,11 @@ impl PlayerStore {
         let last_qty = parse_f64(fields.get("32").map(String::as_str));
         let last_px = parse_f64(fields.get("31").map(String::as_str));
         let leaves_qty = parse_f64(fields.get("151").map(String::as_str));
+        let side = fields.get("54").map(String::as_str).unwrap_or("");
+        let symbol = fields
+            .get("55")
+            .map(|s| s.trim().to_uppercase())
+            .unwrap_or_default();
 
         let mut changed = false;
         let mut inner = self.inner.lock().unwrap();
@@ -315,59 +349,60 @@ impl PlayerStore {
             return false;
         }
 
-        let mut remove_owner_mapping = false;
-        for player in inner.players.values_mut() {
-            if let Some(pos) = player
-                .pending_orders
-                .iter()
-                .position(|o| o.cl_ord_id == cl_ord_id)
-            {
-                let side = player.pending_orders[pos].side.clone();
-
+        let owner = inner.order_owners.get(cl_ord_id).cloned();
+        if let Some(owner_username) = owner {
+            if let Some(player) = inner.players.get_mut(&owner_username) {
                 if (ord_status == "1" || ord_status == "2") && last_qty > 0.0 && last_px > 0.0 {
                     let traded_notional = last_qty * last_px;
-                    let symbol = player.pending_orders[pos].symbol.to_uppercase();
                     if side == "1" {
                         player.tokens -= traded_notional;
-                        let entry = player.holdings.entry(symbol).or_insert(0.0);
-                        *entry += last_qty;
+                        if !symbol.is_empty() {
+                            let entry = player.holdings.entry(symbol.clone()).or_insert(0.0);
+                            *entry += last_qty;
+                        }
                     } else if side == "2" {
                         player.tokens += traded_notional;
-                        if let Some(owned) = player.holdings.get_mut(&symbol) {
-                            *owned = (*owned - last_qty).max(0.0);
-                            if *owned <= 1e-9 {
-                                player.holdings.remove(&symbol);
+                        if !symbol.is_empty() {
+                            if let Some(owned) = player.holdings.get_mut(&symbol) {
+                                *owned = (*owned - last_qty).max(0.0);
+                                if *owned <= 1e-9 {
+                                    player.holdings.remove(&symbol);
+                                }
                             }
                         }
                     }
                     changed = true;
                 }
 
-                match ord_status {
-                    "2" | "3" | "4" | "8" | "C" => {
-                        remove_owner_mapping = true;
-                        player.pending_orders.remove(pos);
-                        changed = true;
-                    }
-                    "1" => {
-                        if leaves_qty > 0.0 {
-                            player.pending_orders[pos].qty = leaves_qty;
-                            changed = true;
-                        } else if last_qty > 0.0 {
-                            let current = player.pending_orders[pos].qty;
-                            player.pending_orders[pos].qty = (current - last_qty).max(0.0);
+                if let Some(pos) = player
+                    .pending_orders
+                    .iter()
+                    .position(|o| o.cl_ord_id == cl_ord_id)
+                {
+                    match ord_status {
+                        "2" | "3" | "4" | "8" | "C" => {
+                            player.pending_orders.remove(pos);
                             changed = true;
                         }
+                        "1" => {
+                            if leaves_qty > 0.0 {
+                                player.pending_orders[pos].qty = leaves_qty;
+                                changed = true;
+                            } else if last_qty > 0.0 {
+                                let current = player.pending_orders[pos].qty;
+                                player.pending_orders[pos].qty = (current - last_qty).max(0.0);
+                                changed = true;
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-
-                break;
             }
-        }
 
-        if remove_owner_mapping {
-            inner.order_owners.remove(cl_ord_id);
+            if matches!(ord_status, "2" | "3" | "4" | "8" | "C") {
+                inner.order_owners.remove(cl_ord_id);
+                changed = true;
+            }
         }
 
         drop(inner);
@@ -445,4 +480,75 @@ fn verify_or_upgrade_password(stored: &str, provided: &str) -> Result<PasswordCh
     } else {
         Err("password mismatch".to_string())
     }
+}
+
+#[cfg(test)]
+mod tests {
+        use super::*;
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn unique_temp_path(prefix: &str) -> PathBuf {
+                let nanos = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+                std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.json", std::process::id()))
+        }
+
+        #[test]
+        fn trade_updates_both_participants_without_pending_orders_loaded() {
+                let path = unique_temp_path("market-sim-players");
+
+                let seed = r#"{
+    "players": {
+        "alice": {
+            "username": "alice",
+            "password": "pw",
+            "tokens": 10000.0,
+            "holdings": { "AAPL": 10.0 },
+            "connection_count": 0,
+            "ips": []
+        },
+        "bob": {
+            "username": "bob",
+            "password": "pw",
+            "tokens": 10000.0,
+            "holdings": {},
+            "connection_count": 0,
+            "ips": []
+        }
+    },
+    "order_owners": {
+        "ALICESELL1": "alice",
+        "BOBBUY1": "bob"
+    }
+}"#;
+                fs::write(&path, seed).expect("seed players.json");
+
+                let store = PlayerStore::load(&path);
+
+                // Buyer fill (bob buys 5 @ 100): tokens down, holdings up.
+                let buyer_fill = "35=8 │ 39=2 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-BUY-1";
+                assert!(store.apply_fix_execution_report(buyer_fill));
+
+                // Seller fill (alice sells 5 @ 100): tokens up, holdings down.
+                let seller_fill = "35=8 │ 39=2 │ 11=ALICESELL1 │ 54=2 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-SELL-1";
+                assert!(store.apply_fix_execution_report(seller_fill));
+
+                let alice = store.get_player("alice").expect("alice exists");
+                let bob = store.get_player("bob").expect("bob exists");
+
+                assert!((alice.tokens - 10500.0).abs() < 1e-9);
+                assert!((bob.tokens - 9500.0).abs() < 1e-9);
+                assert!((alice.holdings.get("AAPL").copied().unwrap_or(0.0) - 5.0).abs() < 1e-9);
+                assert!((bob.holdings.get("AAPL").copied().unwrap_or(0.0) - 5.0).abs() < 1e-9);
+
+                // Terminal fills should clear owner mappings.
+                let owners = store.get_order_owners();
+                assert!(!owners.contains_key("ALICESELL1"));
+                assert!(!owners.contains_key("BOBBUY1"));
+
+                let _ = fs::remove_file(path);
+        }
 }

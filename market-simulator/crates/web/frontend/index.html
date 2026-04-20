@@ -292,9 +292,9 @@
   <div class="frow"><label>Quantity</label>
     <div class="spin-wrap">
       <input id="o-qty" type="number" step="1" min="1" value="100">
-      <input id="o-qty-mult" type="range" min="0" max="20" step="1" value="1" style="width:68px;margin-left:6px"
-             oninput="ge('o-qty-mult-val').textContent='x'+this.value">
-      <span id="o-qty-mult-val" style="width:30px;text-align:right;color:var(--gold);font-size:10px">x1</span>
+      <input id="o-qty-range" type="range" min="1" max="1000" step="1" value="100" style="width:88px;margin-left:6px"
+             oninput="syncOrderInputFromSlider('o-qty')">
+      <span id="o-qty-range-val" style="width:44px;text-align:right;color:var(--gold);font-size:10px">100</span>
       <div class="spin-btns">
         <button class="spin-btn" onclick="bumpField('o-qty', 1)">&#9650;</button>
         <button class="spin-btn" onclick="bumpField('o-qty', -1)">&#9660;</button>
@@ -304,9 +304,9 @@
   <div class="frow"><label>Limit Price</label>
     <div class="spin-wrap">
       <input id="o-price" type="number" step="0.1" min="0" value="150.00">
-      <input id="o-price-mult" type="range" min="0" max="20" step="1" value="1" style="width:68px;margin-left:6px"
-             oninput="ge('o-price-mult-val').textContent='x'+this.value">
-      <span id="o-price-mult-val" style="width:30px;text-align:right;color:var(--gold);font-size:10px">x1</span>
+      <input id="o-price-range" type="range" min="0" max="500" step="0.1" value="150.0" style="width:88px;margin-left:6px"
+             oninput="syncOrderInputFromSlider('o-price')">
+      <span id="o-price-range-val" style="width:44px;text-align:right;color:var(--gold);font-size:10px">150.0</span>
       <div class="spin-btns">
         <button class="spin-btn" onclick="bumpField('o-price', 0.1)">&#9650;</button>
         <button class="spin-btn" onclick="bumpField('o-price', -0.1)">&#9660;</button>
@@ -432,6 +432,7 @@ let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdI
 let lastTokenBalance = null;
 const currentHoldings = {}; // symbol -> quantity
 const orderOwners = {}; // cl_ord_id -> username
+const orderOwnersByOrderId = {}; // order_id(string) -> username
 let playerStateTimer = null;    // debounce handle for handlePlayerState
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
@@ -701,6 +702,35 @@ function makerFromClOrdId(clOrdId) {
   return (match && match[0]) ? match[0] : '—';
 }
 
+function stableOrderIdFromClOrdId(clOrdId) {
+  const raw = String(clOrdId || '');
+  if (!raw) return null;
+
+  const fixed = new Uint8Array(20);
+  const bytes = new TextEncoder().encode(raw);
+  const len = Math.min(bytes.length, 20);
+  for (let i = 0; i < len; i += 1) fixed[i] = bytes[i];
+
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (let i = 0; i < fixed.length; i += 1) {
+    hash ^= BigInt(fixed[i]);
+    hash = (hash * prime) & 0xffffffffffffffffn;
+  }
+
+  return hash.toString();
+}
+
+function makerFromOrderRow(row) {
+  const fromClOrd = makerFromClOrdId(row && row.cl_ord_id);
+  if (fromClOrd !== '—') return fromClOrd;
+
+  const byOrderId = orderOwnersByOrderId[String((row && row.order_id) || '').trim()];
+  if (byOrderId) return byOrderId;
+
+  return '—';
+}
+
 updateMarketSwitchButton();
 setAdminControlsEnabled(currentIsAdmin);
 
@@ -712,9 +742,17 @@ if (ge('o-market')) {
 ['o-sym', 'o-qty', 'o-price'].forEach(id => {
   const input = ge(id);
   if (!input) return;
-  input.addEventListener('input', renderOrderCostPreview);
-  input.addEventListener('change', renderOrderCostPreview);
+  input.addEventListener('input', () => {
+    if (id === 'o-qty' || id === 'o-price') syncOrderSliderFromInput(id);
+    renderOrderCostPreview();
+  });
+  input.addEventListener('change', () => {
+    if (id === 'o-qty' || id === 'o-price') syncOrderSliderFromInput(id);
+    renderOrderCostPreview();
+  });
 });
+syncOrderSliderFromInput('o-qty');
+syncOrderSliderFromInput('o-price');
 renderOrderCostPreview();
 
 
@@ -1078,12 +1116,18 @@ function handlePlayerState(msg) {
   });
 
   Object.keys(orderOwners).forEach(clOrdId => delete orderOwners[clOrdId]);
+  Object.keys(orderOwnersByOrderId).forEach(orderId => delete orderOwnersByOrderId[orderId]);
   const owners = msg && typeof msg.order_owners === 'object' && msg.order_owners ? msg.order_owners : {};
   Object.keys(owners).forEach(clOrdId => {
     const key = String(clOrdId || '').trim();
     const username = String(owners[clOrdId] || '').trim();
     if (!key || !username) return;
     orderOwners[key] = username;
+
+    const orderId = stableOrderIdFromClOrdId(key);
+    if (orderId) {
+      orderOwnersByOrderId[orderId] = username;
+    }
   });
 
   renderHoldings();
@@ -1150,25 +1194,70 @@ function setSide(s) {
   renderOrderCostPreview();
 }
 
+function syncOrderInputFromSlider(id) {
+  const input = ge(id);
+  const slider = ge(id === 'o-qty' ? 'o-qty-range' : 'o-price-range');
+  const valueLabel = ge(id === 'o-qty' ? 'o-qty-range-val' : 'o-price-range-val');
+  if (!input || !slider || !valueLabel) return;
+
+  const raw = Number(slider.value || 0);
+  if (id === 'o-qty') {
+    const qty = Math.max(1, Math.round(raw));
+    input.value = String(qty);
+    valueLabel.textContent = String(qty);
+  } else {
+    const price = Math.max(0, Math.round(raw * 10) / 10);
+    input.value = price.toFixed(1);
+    valueLabel.textContent = price.toFixed(1);
+  }
+
+  renderOrderCostPreview();
+}
+
+function syncOrderSliderFromInput(id) {
+  const input = ge(id);
+  const slider = ge(id === 'o-qty' ? 'o-qty-range' : 'o-price-range');
+  const valueLabel = ge(id === 'o-qty' ? 'o-qty-range-val' : 'o-price-range-val');
+  if (!input || !slider || !valueLabel) return;
+
+  let value = Number(input.value || 0);
+  if (!Number.isFinite(value)) value = id === 'o-qty' ? 1 : 0;
+
+  const min = Number(slider.min || 0);
+  const max = Number(slider.max || value);
+  value = Math.min(max, Math.max(min, value));
+
+  if (id === 'o-qty') {
+    value = Math.round(value);
+    input.value = String(value);
+    slider.value = String(value);
+    valueLabel.textContent = String(value);
+  } else {
+    value = Math.round(value * 10) / 10;
+    input.value = value.toFixed(1);
+    slider.value = value.toFixed(1);
+    valueLabel.textContent = value.toFixed(1);
+  }
+}
+
 function bumpField(id, step) {
   const input = ge(id);
   let value = parseFloat(input.value);
   if (isNaN(value)) value = 0;
 
-  const multInput = id === 'o-qty' ? ge('o-qty-mult') : ge('o-price-mult');
-  const multiplier = multInput ? Math.max(0, parseInt(multInput.value || '1', 10)) : 1;
-
-  value += (step * multiplier);
+  value += step;
 
   if (id === 'o-qty') {
     value = Math.max(1, Math.round(value));
     input.value = String(value);
+    syncOrderSliderFromInput(id);
     renderOrderCostPreview();
     return;
   }
 
   value = Math.max(0, Math.round(value * 10) / 10);
   input.value = value.toFixed(1);
+  syncOrderSliderFromInput(id);
   renderOrderCostPreview();
 }
 
@@ -1826,7 +1915,7 @@ function renderLevels(id, levels, cls, maxQ) {
   ge(id).innerHTML = levels.map(row => {
     const px = Number(row.price) || 0;
     const qty = Number(row.quantity) || 0;
-    const maker = makerFromClOrdId(row.cl_ord_id);
+    const maker = makerFromOrderRow(row);
     const pct = (qty / maxQ * 100).toFixed(1);
     return `<div class="bk-level ${cls}-lv">
       <div class="bar" style="width:${pct}%"></div>
@@ -1860,7 +1949,7 @@ function renderMarketBook(marketName) {
   [...asks].reverse().forEach((order) => {
     const px = Number(order.price) || 0;
     const qty = Number(order.quantity) || 0;
-    const maker = makerFromClOrdId(order.cl_ord_id);
+    const maker = makerFromOrderRow(order);
     const pct = (qty / maxQ * 100).toFixed(1);
     html += `<div class="bk-level ask-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
@@ -1881,7 +1970,7 @@ function renderMarketBook(marketName) {
   bids.forEach((order) => {
     const px = Number(order.price) || 0;
     const qty = Number(order.quantity) || 0;
-    const maker = makerFromClOrdId(order.cl_ord_id);
+    const maker = makerFromOrderRow(order);
     const pct = (qty / maxQ * 100).toFixed(1);
     html += `<div class="bk-level bid-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>

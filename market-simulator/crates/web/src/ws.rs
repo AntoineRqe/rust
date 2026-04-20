@@ -1,11 +1,11 @@
 use axum::{
-    extract::{ws::{WebSocket, Message}, WebSocketUpgrade, State, Query},
+    extract::{ws::{WebSocket, Message}, WebSocketUpgrade, State, Query, ConnectInfo},
     response::IntoResponse,
     http::StatusCode,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpStream, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Deserialize;
@@ -28,22 +28,27 @@ pub async fn ws_handler(
     ws:           WebSocketUpgrade,
     State(state): State<AppState>,
     Query(params): Query<WsParams>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let token = params.token.unwrap_or_default();
     let Some(session) = authenticate_token(&state, &token) else {
         return (StatusCode::UNAUTHORIZED, "Invalid or missing session token").into_response();
     };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, session))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, session, addr))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo) {
+async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo, addr: SocketAddr) {
     // Split into sender and receiver so we can use both concurrently
     // in the select! loop without borrow issues.
     let (mut sender, mut receiver) = socket.split();
     let mut rx: tokio::sync::broadcast::Receiver<WsEvent> = state.bus.subscribe();
     let username = session.username.clone();
     let is_admin = session.is_admin;
+
+    state
+        .player_store
+        .record_connection(&username, Some(&addr.ip().to_string()));
 
     let tcp_stream = match TcpStream::connect(&state.fix_tcp_addr) {
         Ok(stream) => stream,
