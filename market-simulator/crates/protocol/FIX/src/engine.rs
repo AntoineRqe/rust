@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 use crossbeam::queue::{ArrayQueue};
 use std::cell::UnsafeCell;
 use serde::Serialize;
+use tokio::sync::mpsc;
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
@@ -50,7 +51,7 @@ pub fn kill_fix_outbound_engine<const N: usize>(er_to_fix_tx: &Producer<(EntityI
 pub struct FixRawMsg<const N: usize> {
     pub len: u16,
     pub data: [u8; N],
-    pub resp_queue: Option<crossbeam_channel::Sender<FixRawMsg<N>>>, // Optional queue for sending responses back to the network layer, added for potential future use
+    pub resp_queue: Option<mpsc::Sender<FixRawMsg<N>>>, // Optional queue for sending responses back to the network layer, added for potential future use
 }
 
 impl<const N: usize> Serialize for FixRawMsg<N> {
@@ -76,7 +77,7 @@ impl<const N: usize> Default for FixRawMsg<N> {
 }
 
 impl <const N: usize> FixRawMsg<N> {
-    pub fn new(data: &[u8], resp_queue: Option<crossbeam_channel::Sender<FixRawMsg<N>>>) -> Self {
+    pub fn new(data: &[u8], resp_queue: Option<mpsc::Sender<FixRawMsg<N>>>) -> Self {
         let mut msg = FixRawMsg::default();
         msg.len = data.len() as u16;
         msg.data[..data.len()].copy_from_slice(data);
@@ -109,7 +110,7 @@ struct FixShared<const N: usize> {
 
 impl <const N: usize> FixShared<N> {
 
-    fn update_pending(&self, key: EntityId, resp_queue: crossbeam_channel::Sender<FixRawMsg<N>>) {
+    fn update_pending(&self, key: EntityId, resp_queue: mpsc::Sender<FixRawMsg<N>>) {
         // loop while locked is true, then set locked to true and update the pending queue, then set locked to false. This is a very basic spinlock implementation, in a real implementation you would want to use a more robust locking mechanism or a lock-free data structure to avoid contention and improve performance.
         while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
         unsafe {
@@ -118,13 +119,21 @@ impl <const N: usize> FixShared<N> {
         self.pending.locked.store(false, Ordering::Release);
     }
 
-    fn get_pending(&self, key: &EntityId) -> Option<crossbeam_channel::Sender<FixRawMsg<N>>> {
+    fn get_pending(&self, key: &EntityId) -> Option<mpsc::Sender<FixRawMsg<N>>> {
         while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
         let result = unsafe {
             (*self.pending.pending.get()).get(key).cloned()
         };
         self.pending.locked.store(false, Ordering::Release);
         result
+    }
+
+    fn remove_pending(&self, key: &EntityId) {
+        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
+        unsafe {
+            (*self.pending.pending.get()).remove(key);
+        }
+        self.pending.locked.store(false, Ordering::Release);
     }
 }
 
@@ -271,9 +280,15 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
         while !self.shared.shutdown.load(Ordering::Relaxed) || !self.response_in.is_empty() {
             if let Some((key, _response)) = self.response_in.pop() {
                 if let Some(resp_queue) = self.shared.get_pending(&key) {
-                    match resp_queue.send(_response) {
+                    match resp_queue.try_send(_response) {
                         Ok(_) => {self.counter += 1;},
-                        Err(_) => { tracing::error!("[{}] Failed to push response back to client, dropping response", market_name()); },
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            self.shared.remove_pending(&key);
+                            tracing::warn!("[{}] Client response channel closed, removing pending route", market_name());
+                        },
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            tracing::error!("[{}] Client response channel full, dropping response", market_name());
+                        },
                     }
                 }
             }
@@ -285,7 +300,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
 
 struct FixPendingConnection<const N: usize> {
     locked: AtomicBool,
-    pending: UnsafeCell<HashMap<EntityId, crossbeam_channel::Sender<FixRawMsg<N>>>>,
+    pending: UnsafeCell<HashMap<EntityId, mpsc::Sender<FixRawMsg<N>>>>,
 }
 
 unsafe impl<const N: usize> Send for FixPendingConnection<N> {}
