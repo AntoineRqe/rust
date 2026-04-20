@@ -14,3 +14,4 @@ market-feed = { path = "../market-feed" }
 utils = { path = "../utils" }
 tracing.workspace = true
 socket2 = "0.6"
+tokio.workspace = true
