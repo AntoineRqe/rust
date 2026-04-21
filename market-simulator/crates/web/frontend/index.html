@@ -1533,15 +1533,18 @@ function sendOrder() {
   }
 
   if (s === '2') {
-    const sellCapacity = computeSellCapacity(symbol);
-    if (sellCapacity.available + 1e-9 < qty) {
-      appendLog({
-        ts: now(),
-        label: 'REJECTED',
-        body: `Insufficient equity inventory for SELL ${symbol}: required ${Math.round(qty)}, available ${Math.round(sellCapacity.available)}`,
-        tag: 'err',
-      });
-      return;
+    // Admin bypass: admins can generate SELL orders without owning inventory
+    if (!currentIsAdmin) {
+      const sellCapacity = computeSellCapacity(symbol);
+      if (sellCapacity.available + 1e-9 < qty) {
+        appendLog({
+          ts: now(),
+          label: 'REJECTED',
+          body: `Insufficient equity inventory for SELL ${symbol}: required ${Math.round(qty)}, available ${Math.round(sellCapacity.available)}`,
+          tag: 'err',
+        });
+        return;
+      }
     }
   }
 

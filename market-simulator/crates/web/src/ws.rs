@@ -373,36 +373,39 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 }
             } else if side == "2" {
                 if qty.is_finite() && qty > 0.0 {
-                    if let Some(player) = state.player_store.get_player(username) {
-                        let normalized_symbol = symbol.to_uppercase();
-                        let owned_qty = player
-                            .holdings
-                            .get(&normalized_symbol)
-                            .copied()
-                            .unwrap_or(0.0);
-                        let reserved_sell_qty: f64 = player
-                            .pending_orders
-                            .iter()
-                            .filter(|order| {
-                                order.side == "2" && order.symbol.eq_ignore_ascii_case(&normalized_symbol)
-                            })
-                            .map(|order| order.qty)
-                            .sum();
+                    // Admin bypass: admins can generate SELL orders without owning inventory
+                    if !is_admin {
+                        if let Some(player) = state.player_store.get_player(username) {
+                            let normalized_symbol = symbol.to_uppercase();
+                            let owned_qty = player
+                                .holdings
+                                .get(&normalized_symbol)
+                                .copied()
+                                .unwrap_or(0.0);
+                            let reserved_sell_qty: f64 = player
+                                .pending_orders
+                                .iter()
+                                .filter(|order| {
+                                    order.side == "2" && order.symbol.eq_ignore_ascii_case(&normalized_symbol)
+                                })
+                                .map(|order| order.qty)
+                                .sum();
 
-                        let available_qty = (owned_qty - reserved_sell_qty).max(0.0);
-                        if available_qty + 1e-9 < qty {
-                            state.bus.publish(WsEvent::FixMessage {
-                                label: "REJECTED ✕".into(),
-                                body: format!(
-                                    "Insufficient equity inventory for SELL {}: required {:.0}, available {:.0}.",
-                                    normalized_symbol,
-                                    qty,
-                                    available_qty
-                                ),
-                                tag: "err".into(),
-                                recipient: Some(username.to_string()),
-                            });
-                            return;
+                            let available_qty = (owned_qty - reserved_sell_qty).max(0.0);
+                            if available_qty + 1e-9 < qty {
+                                state.bus.publish(WsEvent::FixMessage {
+                                    label: "REJECTED ✕".into(),
+                                    body: format!(
+                                        "Insufficient equity inventory for SELL {}: required {:.0}, available {:.0}.",
+                                        normalized_symbol,
+                                        qty,
+                                        available_qty
+                                    ),
+                                    tag: "err".into(),
+                                    recipient: Some(username.to_string()),
+                                });
+                                return;
+                            }
                         }
                     }
                 }
