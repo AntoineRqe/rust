@@ -217,6 +217,32 @@ impl PlayerStore {
         }
     }
 
+    /// Ensure a player record exists for the given username.
+    ///
+    /// Returns `true` if a new record was created.
+    pub fn ensure_player_exists(&self, username: &str) -> bool {
+        let username = username.trim();
+        if username.is_empty() {
+            return false;
+        }
+
+        let mut inner = self.inner.lock().unwrap();
+        if inner.players.contains_key(username) {
+            return false;
+        }
+
+        let password_hash = hash_password("admin-session-placeholder")
+            .unwrap_or_else(|_| "admin-session-placeholder".to_string());
+        inner.players.insert(
+            username.to_string(),
+            Player::new(username.to_string(), password_hash),
+        );
+
+        drop(inner);
+        self.flush();
+        true
+    }
+
     /// Return a snapshot of the player's current state, or `None` if unknown.
     pub fn get_player(&self, username: &str) -> Option<Player> {
         self.inner.lock().unwrap().players.get(username).cloned()
@@ -414,11 +440,6 @@ impl PlayerStore {
             .or_else(|| fields.get("11"))
             .map(String::as_str)
             .unwrap_or("");
-        let candidate_sender = fields
-            .get("56")
-            .or_else(|| fields.get("49"))
-            .map(String::as_str)
-            .unwrap_or("");
 
         if cl_ord_id.is_empty() {
             return false;
@@ -449,17 +470,6 @@ impl PlayerStore {
 
         if !inner.processed_exec_ids.insert(exec_id) {
             return false;
-        }
-
-        if !cl_ord_id.is_empty() {
-            if let Some(owner_username) = Self::resolve_username_from_sender_id(&inner, candidate_sender) {
-                let replaced = inner
-                    .order_owners
-                    .insert(cl_ord_id.to_string(), owner_username.clone());
-                if replaced.as_deref() != Some(owner_username.as_str()) {
-                    changed = true;
-                }
-            }
         }
 
         let owner = inner.order_owners.get(cl_ord_id).cloned();

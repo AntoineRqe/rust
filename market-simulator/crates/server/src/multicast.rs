@@ -301,6 +301,7 @@ pub fn spawn_market_feed_receiver(
                                     }
                                     x if x == MessageType::Trade as u8 => {
                                         if let Some(msg) = Trade::from_bytes(body) {
+                                            book.apply_trade(msg.side, msg.price.to_f64(), msg.quantity.to_f64(), timestamp_ms);
                                             book.record_trade(msg.side, msg.price.to_f64(), msg.quantity.to_f64(), timestamp_ms);
                                         }
                                     }

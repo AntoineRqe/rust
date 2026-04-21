@@ -202,6 +202,83 @@ impl SymbolOrderBook {
         self.last_update_ms = timestamp_ms;
     }
 
+    /// Apply a trade to the passive side of the book at the traded price.
+    ///
+    /// `aggressor_side`: 1=buy, 2=sell.
+    /// A buy aggressor consumes asks, a sell aggressor consumes bids.
+    pub fn apply_trade(&mut self, aggressor_side: u8, trade_price: f64, trade_qty: f64, timestamp_ms: u64) {
+        if !(trade_qty.is_finite() && trade_qty > 0.0 && trade_price.is_finite()) {
+            self.last_update_ms = timestamp_ms;
+            return;
+        }
+
+        let passive_side = if aggressor_side == 1 { 2 } else { 1 };
+        let mut remaining = trade_qty;
+        let mut to_remove: Vec<u64> = Vec::new();
+
+        let mut candidates: Vec<(u64, u64)> = match passive_side {
+            1 => self
+                .bids
+                .iter()
+                .filter_map(|(order_id, order)| {
+                    if (order.price - trade_price).abs() <= 1e-9 {
+                        Some((*order_id, order.time_priority))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            _ => self
+                .asks
+                .iter()
+                .filter_map(|(order_id, order)| {
+                    if (order.price - trade_price).abs() <= 1e-9 {
+                        Some((*order_id, order.time_priority))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        };
+
+        candidates.sort_by_key(|(order_id, time_priority)| (*time_priority, *order_id));
+
+        for (order_id, _) in candidates {
+            if remaining <= 1e-9 {
+                break;
+            }
+
+            let maybe_order = if passive_side == 1 {
+                self.bids.get_mut(&order_id)
+            } else {
+                self.asks.get_mut(&order_id)
+            };
+
+            let Some(order) = maybe_order else {
+                continue;
+            };
+
+            let consumed = order.quantity.min(remaining);
+            order.quantity -= consumed;
+            remaining -= consumed;
+
+            if order.quantity <= 1e-9 {
+                to_remove.push(order_id);
+            }
+        }
+
+        for order_id in to_remove {
+            if passive_side == 1 {
+                self.bids.remove(&order_id);
+            } else {
+                self.asks.remove(&order_id);
+            }
+            self.order_side.remove(&order_id);
+        }
+
+        self.last_update_ms = timestamp_ms;
+    }
+
     pub fn l3_bids_sorted(&self) -> Vec<L3OrderView> {
         let mut orders: Vec<&L3Order> = self.bids.values().collect();
 

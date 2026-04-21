@@ -314,6 +314,11 @@ async fn api_login_handler(
         && admin_password().as_deref() == Some(body.password.as_str());
 
     if admin_login {
+        let created = state.player_store.ensure_player_exists("admin");
+        if created {
+            tracing::info!("[{}] Admin player profile initialized", market_name());
+        }
+
         let token = generate_token();
         state.sessions.lock().unwrap().insert(
             token.clone(),

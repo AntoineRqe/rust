@@ -73,14 +73,25 @@
   .market-chart{border-top:1px solid var(--border);padding:6px 8px 8px;background:#0a0c10}
   .market-chart-title{font-size:8px;color:var(--muted);letter-spacing:.1em;margin-bottom:4px}
   .market-chart svg{display:block;width:100%;height:58px}
-  #bottom-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;
+  #bottom-panels{display:grid;grid-template-columns:1fr 1fr;gap:8px;
                  padding:8px;border-top:1px solid var(--border);background:var(--panel2);
-           flex-shrink:0;height:33vh;min-height:220px;max-height:none;position:static;
+                 flex-shrink:0;height:33vh;min-height:220px;max-height:none;position:static;
                  margin-left:0;width:calc(100% - 290px)}
+  #bottom-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-height:0}
+  #bottom-logs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-height:0}
   .bottom-chart-card{border:1px solid var(--border);background:#0a0c10;border-radius:4px;
              padding:6px 8px;display:flex;flex-direction:column;min-height:0}
   .bottom-chart-title{font-size:9px;color:var(--muted);letter-spacing:.08em;margin-bottom:4px}
     .bottom-chart-card svg{display:block;width:100%;height:100%;flex:1;min-height:0}
+  .bottom-log-card{border:1px solid var(--border);background:#0a0c10;border-radius:4px;
+                   padding:6px 8px;display:flex;flex-direction:column;min-height:0}
+  .bottom-log-title{display:flex;align-items:center;justify-content:space-between;
+                    font-size:9px;color:var(--muted);letter-spacing:.08em;margin-bottom:4px}
+  .bottom-log-box{flex:1;overflow-y:auto;font-size:9px;line-height:1.35;min-height:0}
+  .bottom-log-entry{margin-bottom:6px}
+  .bottom-log-entry .ts{color:var(--muted)}
+  .bottom-log-entry .lbl{font-weight:bold}
+  .bottom-log-entry .body{color:#9e9e9e;word-break:break-all}
 
   /* ── panels ── */
   .panel{display:flex;flex-direction:column;overflow:hidden;min-height:0}
@@ -232,7 +243,7 @@
     #body{flex-direction:column}
     #col-left {width:100%;min-width:0;border-right:none;border-bottom:1px solid var(--border);
            max-height:38vh;overflow-y:auto;flex-shrink:0}
-    #bottom-charts{margin-left:0;width:100%}
+    #bottom-panels{margin-left:0;width:100%}
   }
 
   /* ════════════════════════════════════
@@ -254,7 +265,7 @@
     .dlg-row{flex-direction:column;align-items:flex-start}
     .dlg-row label{width:auto;margin-bottom:3px}
     .dlg-row input,.dlg-row select{width:100%}
-    #bottom-charts{display:none}
+    #bottom-panels{display:none}
   }
 </style>
 </head>
@@ -361,7 +372,25 @@
 
 </div><!-- #body -->
 
-<div id="bottom-charts"></div>
+<div id="bottom-panels">
+  <div id="bottom-charts"></div>
+  <div id="bottom-logs">
+    <div class="bottom-log-card">
+      <div class="bottom-log-title">
+        <span>FIX LOG</span>
+        <button class="ghost" onclick="ge('bottom-fix-log').innerHTML=''">CLEAR</button>
+      </div>
+      <div id="bottom-fix-log" class="bottom-log-box"></div>
+    </div>
+    <div class="bottom-log-card">
+      <div class="bottom-log-title">
+        <span>MD LOG</span>
+        <button class="ghost" onclick="ge('bottom-md-log').innerHTML=''">CLEAR</button>
+      </div>
+      <div id="bottom-md-log" class="bottom-log-box"></div>
+    </div>
+  </div>
+</div>
 
 <!-- DIALOG -->
 <div id="dlg-ov">
@@ -1059,12 +1088,10 @@ function handleServerEvent(msg, marketName) {
       applyOrderBookSnapshot(msg, marketName);
       break;
     case 'fix_message':
-      // md events are high-frequency market data — only update the book, never log them
-      if (msg.tag !== 'md') {
-        appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
-        if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
-          resetClientMarketView(marketName);
-        }
+      updateBookFromFix(msg.body, msg.tag, marketName);
+      appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
+      if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
+        resetClientMarketView(marketName);
       }
       break;
     default:
@@ -1116,29 +1143,62 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
   if (!market) return;
 
   const presentOwnedIds = new Set();
+  const knownOwnedOrderIds = new Set();
+  const currentUser = String(currentPlayer || '').trim().toLowerCase();
+
+  Object.keys(openOrders).forEach(existingKey => {
+    const existing = openOrders[existingKey];
+    if (!existing) return;
+    if (normalizeMarketName(existing.market) !== mn) return;
+
+    const clOrdCandidate = String(existing.cl_ord_id || existingKey || '').trim();
+    if (!clOrdCandidate || clOrdCandidate.startsWith('OID:')) return;
+
+    const linkedOrderId = stableOrderIdFromClOrdId(clOrdCandidate);
+    if (linkedOrderId) {
+      knownOwnedOrderIds.add(linkedOrderId);
+    }
+  });
 
   const mergeRows = (rows, side) => {
     (rows || []).forEach(row => {
-      const clOrdId = row && row.cl_ord_id;
-      if (!isOrderOwnedByCurrentUser(clOrdId)) return;
+      const clOrdId = String((row && row.cl_ord_id) || '').trim();
+      const orderId = String((row && row.order_id) || '').trim();
+      const ownerMeta = makerMetaFromOrderRow(row);
+      const isOwnedByCurrentUser = !!currentUser && String(ownerMeta.maker || '').trim().toLowerCase() === currentUser;
+      if (!isOwnedByCurrentUser) return;
 
-      presentOwnedIds.add(clOrdId);
+      // Avoid duplicate display for the same live order when player_state/local already
+      // tracks it by ClOrdID and the book fallback would add a synthetic OID key.
+      if (!clOrdId && orderId && knownOwnedOrderIds.has(orderId)) return;
+
+      const openOrderKey = clOrdId || (orderId ? `OID:${mn}:${orderId}` : '');
+      if (!openOrderKey) return;
+
+      presentOwnedIds.add(openOrderKey);
+
+      const linkedOrderId = stableOrderIdFromClOrdId(clOrdId);
+      if (linkedOrderId) {
+        knownOwnedOrderIds.add(linkedOrderId);
+      }
 
       const qty = Number(row.quantity || 0);
       const price = Number(row.price || 0);
       if (!(qty > 0) || !(price >= 0)) return;
 
-      openOrders[clOrdId] = {
+      openOrders[openOrderKey] = {
         symbol: symbol || 'AAPL',
         qty,
         price,
         side,
         market: mn,
         source: 'book',
+        cl_ord_id: clOrdId || null,
+        cancelable: !!clOrdId,
       };
 
-      if (!openOrderFirstSeen[clOrdId]) {
-        openOrderFirstSeen[clOrdId] = Date.now();
+      if (!openOrderFirstSeen[openOrderKey]) {
+        openOrderFirstSeen[openOrderKey] = Date.now();
       }
     });
   };
@@ -1151,7 +1211,6 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
     if (!order) return;
     if (normalizeMarketName(order.market) !== mn) return;
     if (order.source !== 'book') return;
-    if (!isOrderOwnedByCurrentUser(clOrdId)) return;
     if (presentOwnedIds.has(clOrdId)) return;
 
     delete openOrders[clOrdId];
@@ -1270,6 +1329,7 @@ function handlePlayerState(msg) {
   const pending = Array.isArray(msg.pending_orders) ? msg.pending_orders : [];
   pending.forEach(o => {
     if (!o || !o.cl_ord_id) return;
+    clearPendingTimeout(o.cl_ord_id);
     nextOpenOrders[o.cl_ord_id] = {
       symbol: o.symbol || '',
       qty: Number(o.qty || 0),
@@ -1287,12 +1347,26 @@ function handlePlayerState(msg) {
   Object.keys(openOrders).forEach(id => {
     const existing = openOrders[id];
     if (normalizeMarketName(existing?.market) !== primaryMarketName) return;
-    const firstSeen = openOrderFirstSeen[id] || 0;
-    const isRecentLocal = existing?.source === 'local' && ((Date.now() - firstSeen) < ORDER_PENDING_TIMEOUT_MS);
     const marketForOrder = markets[normalizeMarketName(existing?.market)] || null;
     const isStillPendingLocally = !!(marketForOrder && marketForOrder.book && marketForOrder.book.pending && marketForOrder.book.pending[id]);
-    if (isRecentLocal || isStillPendingLocally) return;
     if (!nextOpenOrders[id]) {
+      // Do not aggressively remove confirmed/book-derived orders when a single
+      // player_state snapshot is temporarily missing this id.
+      const source = String(existing?.source || '');
+      const isLocalOnly = !source || source === 'local';
+
+      if (!isLocalOnly) {
+        if (isStillPendingLocally && marketForOrder && marketForOrder.book && marketForOrder.book.pending) {
+          delete marketForOrder.book.pending[id];
+        }
+        clearPendingTimeout(id);
+        return;
+      }
+
+      if (isStillPendingLocally && marketForOrder && marketForOrder.book && marketForOrder.book.pending) {
+        delete marketForOrder.book.pending[id];
+      }
+      clearPendingTimeout(id);
       delete openOrders[id];
       delete openOrderFirstSeen[id];
     }
@@ -1640,15 +1714,14 @@ function resetClientMarketView(marketName) {
 function schedulePendingTimeout(clordId, marketName) {
   clearPendingTimeout(clordId);
   orderTimeouts[clordId] = setTimeout(() => {
+    delete orderTimeouts[clordId];
     const targetMarket = markets[normalizeMarketName(marketName)] || { book };
     if (!targetMarket.book.pending[clordId]) return;
     delete targetMarket.book.pending[clordId];
-    cleanupOrderState(clordId);
-    renderOrders(null, true);
     appendLog({
       ts: now(),
       label: 'INFO',
-      body: `Order timeout cleanup (${clordId})`,
+      body: `Order pending timeout (${clordId})`,
       tag: 'info',
     });
   }, ORDER_PENDING_TIMEOUT_MS);
@@ -1703,6 +1776,8 @@ function renderOrders(marketName, immediate = false) {
     const isSell = o.side === '2';
     const market = markets[normalizeMarketName(o.market)] || null;
     const leaves = (market && market.book.orderState[clordId]?.leaves) || o.qty;
+    const cancelClOrdId = o.cl_ord_id || clordId;
+    const canCancel = o.cancelable !== false;
     return `<div class="order-row ${isSell ? 'sell' : ''}">
       <div class="order-info">
         <span class="sym">${esc(o.market || '')}</span>
@@ -1710,7 +1785,9 @@ function renderOrders(marketName, immediate = false) {
         <span class="qty">${Math.round(leaves).toLocaleString()}</span>
         <span class="px">@ ${fmt(o.price)}</span>
       </div>
-      <button class="order-cancel" onclick="cancelOrder('${esc(clordId)}', '${esc(o.symbol)}', ${o.qty}, '${esc(o.market || getPrimaryMarketName())}')">✕</button>
+      ${canCancel
+        ? `<button class="order-cancel" onclick="cancelOrder('${esc(cancelClOrdId)}', '${esc(o.symbol)}', ${o.qty}, '${esc(o.market || getPrimaryMarketName())}')">✕</button>`
+        : ''}
     </div>`;
   }).join('');
   renderBuyCapacityHint();
@@ -1797,6 +1874,22 @@ function appendLog(entry) {
   box.appendChild(el);
   while (box.children.length > 300) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
+
+  appendBottomLog(entry);
+}
+
+function appendBottomLog(entry) {
+  const isMd = String(entry.tag || '').toLowerCase() === 'md';
+  const box = ge(isMd ? 'bottom-md-log' : 'bottom-fix-log');
+  if (!box) return;
+
+  const el = document.createElement('div');
+  el.className = 'bottom-log-entry';
+  el.innerHTML = `<div><span class="ts">[${esc(entry.ts)}]</span> <span class="lbl t${esc(entry.tag)}">${esc(entry.label)}</span></div>
+    <div class="body">${esc(entry.body)}</div>`;
+  box.appendChild(el);
+  while (box.children.length > 220) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
 }
 
 function now() {
@@ -1824,22 +1917,28 @@ function sf(v) {
 }
 
 function rmQty(side, price, qty) {
-  if (side === '1') {
-    if (book.bids[price] !== undefined) {
-      book.bids[price] = Math.max(0, book.bids[price] - qty);
-      if (book.bids[price] === 0) delete book.bids[price];
-    }
+  const levels = side === '1' ? (book.bids || []) : (book.asks || []);
+  const idx = levels.findIndex(level => Number(level.price) === Number(price));
+  if (idx < 0) return;
+
+  const currentQty = Number(levels[idx].quantity) || 0;
+  const nextQty = Math.max(0, currentQty - qty);
+  if (nextQty <= 0) {
+    levels.splice(idx, 1);
   } else {
-    if (book.asks[price] !== undefined) {
-      book.asks[price] = Math.max(0, book.asks[price] - qty);
-      if (book.asks[price] === 0) delete book.asks[price];
-    }
+    levels[idx] = { ...levels[idx], quantity: nextQty };
   }
 }
 
 function addQty(side, price, qty) {
-  if (side === '1') book.bids[price] = (book.bids[price] || 0) + qty;
-  else              book.asks[price] = (book.asks[price] || 0) + qty;
+  const levels = side === '1' ? (book.bids || []) : (book.asks || []);
+  const idx = levels.findIndex(level => Number(level.price) === Number(price));
+  if (idx >= 0) {
+    const currentQty = Number(levels[idx].quantity) || 0;
+    levels[idx] = { ...levels[idx], quantity: currentQty + qty };
+  } else {
+    levels.push({ price: Number(price), quantity: Number(qty), cl_ord_id: null });
+  }
 }
 
 function applyOrderLeaves(clordId, side, price, newLeaves) {
@@ -1866,22 +1965,28 @@ function applyOrderLeaves(clordId, side, price, newLeaves) {
 
 // ── Market-specific versions of book helpers ──────────────────────────────────
 function rmQtyForMarket(market, side, price, qty) {
-  if (side === '1') {
-    if (market.book.bids[price] !== undefined) {
-      market.book.bids[price] = Math.max(0, market.book.bids[price] - qty);
-      if (market.book.bids[price] === 0) delete market.book.bids[price];
-    }
+  const levels = side === '1' ? (market.book.bids || []) : (market.book.asks || []);
+  const idx = levels.findIndex(level => Number(level.price) === Number(price));
+  if (idx < 0) return;
+
+  const currentQty = Number(levels[idx].quantity) || 0;
+  const nextQty = Math.max(0, currentQty - qty);
+  if (nextQty <= 0) {
+    levels.splice(idx, 1);
   } else {
-    if (market.book.asks[price] !== undefined) {
-      market.book.asks[price] = Math.max(0, market.book.asks[price] - qty);
-      if (market.book.asks[price] === 0) delete market.book.asks[price];
-    }
+    levels[idx] = { ...levels[idx], quantity: nextQty };
   }
 }
 
 function addQtyForMarket(market, side, price, qty) {
-  if (side === '1') market.book.bids[price] = (market.book.bids[price] || 0) + qty;
-  else              market.book.asks[price] = (market.book.asks[price] || 0) + qty;
+  const levels = side === '1' ? (market.book.bids || []) : (market.book.asks || []);
+  const idx = levels.findIndex(level => Number(level.price) === Number(price));
+  if (idx >= 0) {
+    const currentQty = Number(levels[idx].quantity) || 0;
+    levels[idx] = { ...levels[idx], quantity: currentQty + qty };
+  } else {
+    levels.push({ price: Number(price), quantity: Number(qty), cl_ord_id: null });
+  }
 }
 
 function applyOrderLeavesForMarket(market, clordId, side, price, newLeaves) {
@@ -2008,8 +2113,8 @@ function updateBookFromFix(body, tag, marketName) {
   } else if (status === '3' && f['9000'] === 'SNAPSHOT') {
     // Market-data snapshot refresh marker: reset local displayed book and wait
     // for subsequent incremental/add events.
-    b.bids = {};
-    b.asks = {};
+    b.bids = [];
+    b.asks = [];
     b.trades = [];
     b.last = null;
     b.orderState = {};
