@@ -351,7 +351,7 @@
   </div>
   <div id="stale-badge-holdings" class="stale-badge" style="margin:0 6px 6px">Using last known data</div>
 
-  <div class="footer-row">
+  <div class="footer-row" id="admin-footer-row" style="display:none">
     <button class="ghost" id="btn-clear-book" onclick="clearBookAllMarkets()" disabled>clear book</button>
     <button class="ghost" id="btn-reset-seq" onclick="sendToSelectedMarket({action:'reset_seq'})" disabled>reset seq</button>
     <button class="ghost" id="btn-reset-tokens" onclick="resetTokensAllMarkets()" disabled>reset tokens</button>
@@ -648,6 +648,8 @@ function getCurrentAppBaseUrl() {
 }
 
 function updateAdminControlAvailability() {
+  const footerRow = ge('admin-footer-row');
+  if (footerRow) footerRow.style.display = currentIsAdmin ? '' : 'none';
   ['btn-clear-book', 'btn-reset-seq', 'btn-reset-tokens'].forEach(id => {
     const btn = ge(id);
     if (!btn) return;
