@@ -68,6 +68,12 @@
                       display:flex;justify-content:space-between;align-items:center}
   .market-card-header h3{color:var(--teal);font-size:12px;font-weight:bold;margin:0;flex:1}
   .market-book{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}
+  .market-book-layout{display:flex;flex-direction:column;height:100%;min-height:0}
+  .market-book-section{flex:2;display:flex;flex-direction:column;min-height:0}
+  .market-levels{flex:1;overflow-y:auto;min-height:0}
+  .market-trades-section{flex:1;display:flex;flex-direction:column;min-height:0;
+                         border-top:2px solid var(--border);margin-top:8px;padding-top:6px}
+  .market-trades-list{flex:1;overflow-y:auto;min-height:0;padding-top:2px}
   .market-controls{padding:8px;border-top:1px solid var(--border);background:var(--panel);}
   .market-subtitle{font-size:10px;color:var(--muted);letter-spacing:.04em;margin-top:2px}
   .market-chart{border-top:1px solid var(--border);padding:6px 8px 8px;background:#0a0c10}
@@ -179,6 +185,10 @@
               font-size:10px;color:var(--muted);
               border-top:1px solid var(--border);border-bottom:1px solid var(--border);
               margin:2px 0;flex-shrink:0}
+  #book-main{display:flex;flex-direction:column;flex:1;min-height:0}
+  #book-book-section{display:flex;flex-direction:column;flex:2;min-height:0}
+  #book-levels{flex:1;overflow-y:auto;min-height:0}
+  #book-trades-section{display:flex;flex-direction:column;flex:1;min-height:0;border-top:1px solid var(--border)}
   #trades-hdr{font-size:9px;color:var(--muted);letter-spacing:.1em;
               padding:5px 10px 2px;flex-shrink:0}
   #trades-list{flex:1;overflow-y:auto;padding:0 6px 6px;min-height:0}
@@ -348,17 +358,25 @@
 
 <!-- BOOK: order book + trades (now shows first market by default) -->
 <div id="col-book" class="panel">
-  <div id="book-hdr">
-    <span id="book-sym">ORDER BOOK &nbsp;&#8212;</span>
-    <span id="book-last">last: &#8212;</span>
+  <div id="book-main">
+    <div id="book-book-section">
+      <div id="book-hdr">
+        <span id="book-sym">ORDER BOOK &nbsp;&#8212;</span>
+        <span id="book-last">last: &#8212;</span>
+      </div>
+      <div style="height:1px;background:var(--border);margin:0 6px 4px"></div>
+      <div id="book-cols-main" class="book-cols"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>
+      <div id="book-levels">
+        <div id="asks"></div>
+        <div id="spread-row">spread: &#8212;</div>
+        <div id="bids"></div>
+      </div>
+    </div>
+    <div id="book-trades-section">
+      <div id="trades-hdr">LAST TRADES</div>
+      <div id="trades-list"></div>
+    </div>
   </div>
-  <div style="height:1px;background:var(--border);margin:0 6px 4px"></div>
-  <div id="book-cols-main" class="book-cols"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>
-  <div id="asks"></div>
-  <div id="spread-row">spread: &#8212;</div>
-  <div id="bids"></div>
-  <div id="trades-hdr">LAST TRADES</div>
-  <div id="trades-list"></div>
 </div>
 
 <!-- LOG: message log -->
@@ -448,7 +466,7 @@ const ORDER_PENDING_TIMEOUT_MS = 30000;
 const UI_RENDER_DELAY_MS = 120;
 const PENDING_VISIBILITY_DELAY_MS = 250;
 const LOG_DEDUPE_WINDOW_MS = 10000;
-let currentPlayer = null;
+let currentPlayer = sessionStorage.getItem('auth_username') || null;
 let currentIsAdmin = sessionStorage.getItem('auth_is_admin') === 'true';
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
 let lastTokenBalance = null;
@@ -850,6 +868,10 @@ function makerMetaFromOrderRow(row) {
   const ownerByOrderId = orderIdKey ? orderOwnersByOrderId[orderIdKey] : '';
   if (ownerByOrderId) return { maker: ownerByOrderId, resolved: true };
 
+  if (clOrdKeyRaw && currentPlayer && isOrderOwnedByCurrentUser(clOrdKeyRaw)) {
+    return { maker: currentPlayer, resolved: false };
+  }
+
   const fallback = makerFromClOrdId(clOrdKeyRaw);
   if (fallback !== '—') return { maker: fallback, resolved: false };
 
@@ -865,6 +887,10 @@ function ownerMetaFromClOrdId(clOrdId) {
     (keyRaw ? orderOwners[keyRaw] : '') ||
     (keyCanonical ? orderOwners[keyCanonical] : '');
   if (owner) return { owner, resolved: true };
+
+  if (keyRaw && currentPlayer && isOrderOwnedByCurrentUser(keyRaw)) {
+    return { owner: currentPlayer, resolved: false };
+  }
 
   const fallback = makerFromClOrdId(keyRaw);
   if (fallback !== '—') return { owner: fallback, resolved: false };
@@ -1165,7 +1191,17 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
       const clOrdId = String((row && row.cl_ord_id) || '').trim();
       const orderId = String((row && row.order_id) || '').trim();
       const ownerMeta = makerMetaFromOrderRow(row);
-      const isOwnedByCurrentUser = !!currentUser && String(ownerMeta.maker || '').trim().toLowerCase() === currentUser;
+      const ownerByOrderId = orderId ? String(orderOwnersByOrderId[orderId] || '').trim().toLowerCase() : '';
+      const ownerByClOrd = clOrdId
+        ? String(orderOwners[clOrdId] || orderOwners[canonicalClOrdId(clOrdId)] || '').trim().toLowerCase()
+        : '';
+      const inferredByPrefix = clOrdId ? isOrderOwnedByCurrentUser(clOrdId) : false;
+      const isOwnedByCurrentUser = !!currentUser && (
+        ownerByOrderId === currentUser ||
+        ownerByClOrd === currentUser ||
+        inferredByPrefix ||
+        String(ownerMeta.maker || '').trim().toLowerCase() === currentUser
+      );
       if (!isOwnedByCurrentUser) return;
 
       // Avoid duplicate display for the same live order when player_state/local already
@@ -1652,6 +1688,22 @@ function sendOrder() {
   const playerPrefix = (rawPlayer || 'WEB').slice(0, 6);
   const suffix = currentPlayerSuffix || '0000';
   const clordId = `${playerPrefix}${suffix}${ts}${seq}`.slice(0, 20);
+
+  // Seed ownership maps immediately so maker labels resolve without waiting
+  // for the next player_state/order_owner broadcast.
+  const ownerUsername = String(currentPlayer || sessionStorage.getItem('auth_username') || '').trim();
+  if (ownerUsername) {
+    const canonical = canonicalClOrdId(clordId);
+    orderOwners[clordId] = ownerUsername;
+    if (canonical) {
+      orderOwners[canonical] = ownerUsername;
+    }
+    const orderId = stableOrderIdFromClOrdId(clordId);
+    if (orderId) {
+      orderOwnersByOrderId[orderId] = ownerUsername;
+    }
+  }
+
   targetMarket.book.pending[clordId] = { price, qty, side: s };
   openOrders[clordId] = { symbol, qty, price, side: s, market: targetMarketName, source: 'local' };
   openOrderFirstSeen[clordId] = Date.now();
@@ -2179,6 +2231,15 @@ function renderBook(immediate = false) {
     </div>`;
   }).join('');
 
+  if (chartPts.length < 2 && (lastTradeCount === 0 || book.trades.length === 0)) {
+    const refPrice = referencePriceFromBook(book);
+    if (Number.isFinite(refPrice) && refPrice > 0) {
+      const ts = new Date().toTimeString().slice(0, 8);
+      chartPts = [{ price: refPrice, ts }, { price: refPrice, ts }];
+      drawChart();
+    }
+  }
+
   // update price chart
   if (book.trades.length !== lastTradeCount) {
     const newCount = book.trades.length - lastTradeCount;
@@ -2227,8 +2288,8 @@ function renderMarketBook(marketName) {
   const allQ = [...bids,...asks].map(r=>Number(r.quantity) || 0);
   const maxQ = allQ.length ? Math.max(...allQ) : 1;
   
-  let html = '';
-  html += `<div class="book-cols compact"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>`;
+  let bookLevelsHtml = '';
+  bookLevelsHtml += `<div class="book-cols compact"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>`;
   
   // Asks
   [...asks].reverse().forEach((order) => {
@@ -2237,7 +2298,7 @@ function renderMarketBook(marketName) {
     const maker = makerMetaFromOrderRow(order);
     const pct = (qty / maxQ * 100).toFixed(1);
     const makerBadge = maker.resolved ? '' : '<span class="lv-maker-badge" title="Owner unresolved">?</span>';
-    html += `<div class="bk-level ask-lv" style="font-size:9px;padding:2px 4px">
+    bookLevelsHtml += `<div class="bk-level ask-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
       <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
@@ -2248,7 +2309,7 @@ function renderMarketBook(marketName) {
   if (bids.length && asks.length) {
     const sp = Number(asks[0].price) - Number(bids[0].price);
     const mid = (Number(asks[0].price) + Number(bids[0].price)) / 2;
-    html += `<div style="background:var(--border);padding:2px 4px;font-size:9px;text-align:center;color:var(--muted)">
+    bookLevelsHtml += `<div style="background:var(--border);padding:2px 4px;font-size:9px;text-align:center;color:var(--muted)">
       spread: ${fmt(sp)} / mid: ${fmt(mid)}</div>`;
   }
   
@@ -2259,24 +2320,34 @@ function renderMarketBook(marketName) {
     const maker = makerMetaFromOrderRow(order);
     const pct = (qty / maxQ * 100).toFixed(1);
     const makerBadge = maker.resolved ? '' : '<span class="lv-maker-badge" title="Owner unresolved">?</span>';
-    html += `<div class="bk-level bid-lv" style="font-size:9px;padding:2px 4px">
+    bookLevelsHtml += `<div class="bk-level bid-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
       <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   });
-  
+  let tradesHtml = '';
   // Trades
   if (b.trades.length > 0) {
-    html += `<div style="border-top:1px solid var(--border);padding:4px;font-size:8px;color:var(--muted)">TRADES</div>`;
+    tradesHtml += `<div style="padding:0 4px 4px;font-size:8px;color:var(--muted)">TRADES</div>`;
     b.trades.slice(0, 5).forEach(([px,qty,s,ts,owner='—',resolved=true]) => {
       const ownerBadge = resolved ? '' : '<span class="tr-owner-badge" title="Owner unresolved">?</span>';
-      html += `<div style="padding:1px 4px;font-size:8px;color:${s==='B'?'var(--green)':'var(--red)'}">
+      tradesHtml += `<div style="padding:1px 4px;font-size:8px;color:${s==='B'?'var(--green)':'var(--red)'}">
         ${s} ${esc(owner)}${ownerBadge} ${Math.round(qty)}@${fmt(px)}</div>`;
     });
+  } else {
+    tradesHtml = `<div style="padding:2px 4px;font-size:8px;color:var(--muted)">TRADES</div>
+      <div style="padding:1px 4px;font-size:8px;color:var(--muted)">No recent trades</div>`;
   }
 
-  container.innerHTML = html;
+  container.innerHTML = `<div class="market-book-layout">
+    <div class="market-book-section">
+      <div class="market-levels">${bookLevelsHtml}</div>
+    </div>
+    <div class="market-trades-section">
+      <div class="market-trades-list">${tradesHtml}</div>
+    </div>
+  </div>`;
 
   renderBottomCharts();
 }
@@ -2299,14 +2370,42 @@ function renderBottomCharts() {
       const market = markets[name];
       return `<div class="bottom-chart-card">
         <div class="bottom-chart-title">${esc(name)} PRICE CHART</div>
-        ${renderMarketMiniChartSvg((market && market.book && market.book.trades) || [])}
+        ${renderMarketMiniChartSvg((market && market.book) || null)}
       </div>`;
     })
     .join('');
 }
 
-function renderMarketMiniChartSvg(trades) {
-  const points = [...(trades || [])].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
+function referencePriceFromBook(bookState) {
+  const b = bookState || {};
+  const last = Number(b.last);
+  if (Number.isFinite(last) && last > 0) return last;
+
+  const bids = Array.isArray(b.bids) ? b.bids : [];
+  const asks = Array.isArray(b.asks) ? b.asks : [];
+  const bestBid = bids.length ? Number(bids.reduce((max, row) => Number(row.price) > Number(max.price) ? row : max).price) : NaN;
+  const bestAsk = asks.length ? Number(asks.reduce((min, row) => Number(row.price) < Number(min.price) ? row : min).price) : NaN;
+
+  if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > 0 && bestAsk > 0) {
+    return (bestBid + bestAsk) / 2;
+  }
+  if (Number.isFinite(bestBid) && bestBid > 0) return bestBid;
+  if (Number.isFinite(bestAsk) && bestAsk > 0) return bestAsk;
+
+  return null;
+}
+
+function renderMarketMiniChartSvg(bookState) {
+  const trades = (bookState && Array.isArray(bookState.trades)) ? bookState.trades : [];
+  let points = [...trades].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
+
+  if (points.length < 2) {
+    const refPrice = referencePriceFromBook(bookState);
+    if (Number.isFinite(refPrice) && refPrice > 0) {
+      points = [refPrice, refPrice];
+    }
+  }
+
   const width = 260;
   const height = 58;
   const pad = 6;
