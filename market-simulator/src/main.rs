@@ -4,9 +4,10 @@ use types::macros::{EntityId};
 use clap::Parser;
 use axum::{
     Router,
-    routing::get,
+    routing::{get, post},
     extract::State,
-    response::Html,
+    response::{Html, IntoResponse},
+    http::StatusCode,
     Json,
 };
 use order_book::book::{OrderBook};
@@ -33,6 +34,8 @@ use web::server::run_web_server;
 use config::{MarketConfig, MarketsConfig};
 use market_feed::engine::MarketDataFeedEngine;
 use arc_swap::ArcSwap;
+use serde::Deserialize;
+use std::time::Duration;
 
 const RB_SIZE: usize = 1024;
 
@@ -76,6 +79,7 @@ fn run_login_gateway(markets: Vec<web::MarketInfo>, ip: &str, port: u16) {
             let app = Router::new()
                 .route("/", get(gateway_login_page_handler))
                 .route("/api/markets", get(gateway_markets_handler))
+                .route("/api/login", post(gateway_login_handler))
                 .with_state(state);
 
             let addr: SocketAddr = format!("0.0.0.0:{port}")
@@ -100,6 +104,99 @@ async fn gateway_login_page_handler() -> Html<&'static str> {
 
 async fn gateway_markets_handler(State(state): State<LoginGatewayState>) -> Json<Vec<web::MarketInfo>> {
     Json(web::server::advertised_markets(&state.markets))
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct GatewayLoginRequest {
+    username: String,
+    password: String,
+}
+
+async fn gateway_login_handler(
+    State(state): State<LoginGatewayState>,
+    Json(body): Json<GatewayLoginRequest>,
+) -> impl IntoResponse {
+    let markets = web::server::advertised_markets(&state.markets);
+    if markets.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "No market login endpoint is configured.",
+                "code": "NO_MARKET_LOGIN_ENDPOINT"
+            })),
+        )
+            .into_response();
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!("[gateway] Failed to build HTTP client for login proxy: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Gateway login service initialization failed.",
+                    "code": "GATEWAY_LOGIN_INIT_FAILED"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut last_unauthorized: Option<serde_json::Value> = None;
+
+    for market in markets {
+        let endpoint = format!("{}/api/login", market.url.trim_end_matches('/'));
+        let response = match client.post(&endpoint).json(&body).send().await {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!(
+                    "[gateway] Login proxy could not reach market '{}' at '{}': {}",
+                    market.name,
+                    endpoint,
+                    e
+                );
+                continue;
+            }
+        };
+
+        let status = response.status();
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_else(|_| serde_json::json!({}));
+
+        if status.is_success() {
+            return (StatusCode::OK, Json(payload)).into_response();
+        }
+
+        if status.as_u16() == StatusCode::UNAUTHORIZED.as_u16() {
+            last_unauthorized = Some(payload);
+            continue;
+        }
+
+        tracing::warn!(
+            "[gateway] Login proxy market '{}' returned status {}",
+            market.name,
+            status
+        );
+    }
+
+    if let Some(payload) = last_unauthorized {
+        return (StatusCode::UNAUTHORIZED, Json(payload)).into_response();
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "error": "Could not reach any market login endpoint.",
+            "code": "MARKET_LOGIN_UNREACHABLE"
+        })),
+    )
+        .into_response()
 }
 
 struct ThreadHandles {
