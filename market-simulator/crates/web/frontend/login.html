@@ -192,7 +192,7 @@ function authMessageFromResponse(data) {
 }
 
 async function loadMarketCandidates() {
-  const candidates = [location.origin];
+  const candidates = [];
 
   const currentUrl = new URL(location.href);
   const currentHost = currentUrl.hostname;
@@ -242,6 +242,12 @@ async function loadMarketCandidates() {
       }
     }
   } catch (_) {}
+
+  // Fallback for single-market deployments serving login + API on same origin.
+  if (shouldUseCandidate(location.origin) && !candidates.includes(location.origin)) {
+    candidates.push(location.origin);
+  }
+
   return candidates;
 }
 
@@ -260,6 +266,7 @@ async function doLogin() {
     const candidates = await loadMarketCandidates();
     let lastAuthError = null;
     let anyReachable = false;
+    let anyLoginEndpoint = false;
 
     for (const baseUrl of candidates) {
       try {
@@ -269,10 +276,17 @@ async function doLogin() {
           body: JSON.stringify({ username, password }),
         });
 
+        anyReachable = true;
+
+        // Some origins (e.g. login gateways) may not expose /api/login.
+        // Ignore these and continue with other advertised market URLs.
+        if (res.status === 404) {
+          continue;
+        }
+
         let data = {};
         try { data = await res.json(); } catch (_) {}
-
-        anyReachable = true;
+        anyLoginEndpoint = true;
 
         if (!res.ok) {
           lastAuthError = authMessageFromResponse(data);
@@ -294,9 +308,11 @@ async function doLogin() {
       }
     }
 
-    if (anyReachable && lastAuthError) {
+    if (anyLoginEndpoint && lastAuthError) {
       showError(lastAuthError);
       passEl.focus();
+    } else if (anyReachable) {
+      showError('No market login endpoint found. Check market URLs in /api/markets.');
     } else {
       showError('Could not reach market server.');
     }
