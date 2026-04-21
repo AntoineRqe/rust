@@ -19,6 +19,14 @@ fn market_name() -> &'static str {
         .as_str()
 }
 
+fn is_expected_ws_disconnect(err_text: &str) -> bool {
+    let text = err_text.to_ascii_lowercase();
+    text.contains("without closing handshake")
+        || text.contains("connection reset")
+        || text.contains("broken pipe")
+        || text.contains("connection closed")
+}
+
 #[derive(Deserialize)]
 pub struct WsParams {
     token: Option<String>,
@@ -209,7 +217,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo,
                         break;
                     }
                     Some(Err(e)) => {
-                        tracing::warn!("[{}] WebSocket error: {e}", market_name());
+                        let err_text = e.to_string();
+                        if is_expected_ws_disconnect(&err_text) {
+                            tracing::debug!("[{}] WebSocket disconnected: {}", market_name(), err_text);
+                        } else {
+                            tracing::warn!("[{}] WebSocket error: {}", market_name(), err_text);
+                        }
                         break;
                     }
                     _ => {}

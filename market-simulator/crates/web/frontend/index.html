@@ -28,6 +28,8 @@
   #ws-dot{font-size:10px;color:var(--muted);white-space:nowrap;flex-shrink:0}
   #ws-dot.on{color:var(--teal)}
   #token-balance{font-size:11px;color:var(--gold);white-space:nowrap;flex-shrink:0}
+  .stale-badge{font-size:9px;color:var(--muted);border:1px solid var(--border);
+               border-radius:3px;padding:2px 6px;display:none;white-space:nowrap}
   #market-switch{background:#0e1520;color:var(--teal);border:1px solid var(--border);
                  min-width:150px;height:30px;display:inline-flex;align-items:center;
                  justify-content:center;font-size:10px;font-weight:bold;
@@ -262,6 +264,7 @@
   <h1>&#x2B21; FIX 4.2 &nbsp;MULTI-MARKET TERMINAL</h1>
   <button id="market-switch" onclick="switchMarket()" title="Switch market" aria-label="Switch market">Switch market</button>
   <span id="token-balance">TOKENS: &#8212;</span>
+  <span id="stale-badge-top" class="stale-badge">STALE (DISCONNECTED)</span>
   <span id="ws-dot">&#9679; WS</span>
   <span id="status-dot">&#9679; DISCONNECTED</span>
   <button id="disconnect-btn" onclick="disconnect()" title="Disconnect and return to login" aria-label="Disconnect">Disconnect</button>
@@ -323,6 +326,7 @@
   <div id="holdings-list" style="padding:0 6px 6px;min-height:28px">
     <span style="color:var(--muted);font-size:10px">No holdings</span>
   </div>
+  <div id="stale-badge-holdings" class="stale-badge" style="margin:0 6px 6px">Using last known data</div>
 
   <div class="footer-row">
     <button class="ghost" id="btn-clear-book" onclick="sendToSelectedMarket({action:'clear_book'})" disabled>clear book</button>
@@ -414,6 +418,7 @@ let clordSeq  = 0;
 const ORDER_PENDING_TIMEOUT_MS = 30000;
 const UI_RENDER_DELAY_MS = 120;
 const PENDING_VISIBILITY_DELAY_MS = 250;
+const LOG_DEDUPE_WINDOW_MS = 10000;
 let currentPlayer = null;
 let currentIsAdmin = sessionStorage.getItem('auth_is_admin') === 'true';
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
@@ -424,6 +429,61 @@ const orderOwnersByOrderId = {}; // order_id(string) -> username
 let playerStateTimer = null;    // debounce handle for handlePlayerState
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
+const recentLogTimestamps = Object.create(null); // fingerprint -> last timestamp (ms)
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
+const RECONNECT_JITTER_MS = 600;
+let primaryReconnectAttempts = 0;
+let primaryReconnectTimer = null;
+const marketReconnectAttempts = {}; // marketName -> attempt count
+const marketReconnectTimers = {};   // marketName -> timeout id
+
+function nextReconnectDelay(attempt) {
+  const cappedAttempt = Math.max(0, Math.min(8, Number(attempt) || 0));
+  const exponential = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * (2 ** cappedAttempt));
+  const jitter = Math.floor(Math.random() * RECONNECT_JITTER_MS);
+  return exponential + jitter;
+}
+
+function schedulePrimaryReconnect() {
+  if (primaryReconnectTimer) clearTimeout(primaryReconnectTimer);
+  const delay = nextReconnectDelay(primaryReconnectAttempts);
+  primaryReconnectAttempts += 1;
+  primaryReconnectTimer = setTimeout(() => {
+    primaryReconnectTimer = null;
+    connectWS();
+  }, delay);
+  return delay;
+}
+
+function resetPrimaryReconnect() {
+  primaryReconnectAttempts = 0;
+  if (primaryReconnectTimer) {
+    clearTimeout(primaryReconnectTimer);
+    primaryReconnectTimer = null;
+  }
+}
+
+function scheduleMarketReconnect(marketName, market) {
+  if (!marketName) return 0;
+  if (marketReconnectTimers[marketName]) clearTimeout(marketReconnectTimers[marketName]);
+  const delay = nextReconnectDelay(marketReconnectAttempts[marketName] || 0);
+  marketReconnectAttempts[marketName] = (marketReconnectAttempts[marketName] || 0) + 1;
+  marketReconnectTimers[marketName] = setTimeout(() => {
+    marketReconnectTimers[marketName] = null;
+    connectMarketWS(market);
+  }, delay);
+  return delay;
+}
+
+function resetMarketReconnect(marketName) {
+  if (!marketName) return;
+  marketReconnectAttempts[marketName] = 0;
+  if (marketReconnectTimers[marketName]) {
+    clearTimeout(marketReconnectTimers[marketName]);
+    marketReconnectTimers[marketName] = null;
+  }
+}
 
 function getNextMarket() {
   if (!Array.isArray(KNOWN_MARKETS) || KNOWN_MARKETS.length < 2) return null;
@@ -791,9 +851,11 @@ renderOrderCostPreview();
 function connectWS() {
   const token = AUTH_TOKEN ? encodeURIComponent(AUTH_TOKEN) : '';
   const wsBase = buildWsEndpoint(getCurrentAppBaseUrl());
-  ws = new WebSocket(`${wsBase}?token=${token}`);
+  const market = encodeURIComponent(getPrimaryMarketName() || '');
+  ws = new WebSocket(`${wsBase}?token=${token}&market=${market}`);
 
   ws.onopen = () => {
+    resetPrimaryReconnect();
     ge('ws-dot').textContent = '● WS';
     ge('ws-dot').className   = 'on';
     appendLog({ ts: now(), label: 'INFO', body: 'WebSocket connected', tag: 'info' });
@@ -815,15 +877,14 @@ function connectWS() {
   ws.onclose = () => {
     ge('ws-dot').textContent = '● WS';
     ge('ws-dot').className   = '';
-    appendLog({ ts: now(), label: 'INFO', body: 'WebSocket disconnected — reconnecting…', tag: 'info' });
+    const delay = schedulePrimaryReconnect();
+    appendLog({ ts: now(), label: 'INFO', body: `WebSocket disconnected — reconnecting in ${Math.round(delay/1000)}s…`, tag: 'info' });
     handleStatus(false);
     const primaryMarket = getPrimaryMarketName();
     if (primaryMarket && markets[primaryMarket]) {
       markets[primaryMarket].connected = false;
       renderMarketsContainer();
     }
-    // auto-reconnect after 2s
-    setTimeout(connectWS, 2000);
   };
 
   ws.onerror = err => {
@@ -844,10 +905,11 @@ async function getMarketAuthToken(market) {
     throw new Error('Missing saved credentials for cross-market login');
   }
 
-  const res = await fetch(buildEndpoint(market.url, '/api/login'), {
+  const gatewayBase = getCurrentAppBaseUrl();
+  const res = await fetch(buildEndpoint(gatewayBase, '/api/login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, market: normalizedTarget }),
   });
   const data = await res.json();
   if (!res.ok || !data.token) {
@@ -871,14 +933,15 @@ async function connectMarketWS(market) {
 
   try {
     const token = encodeURIComponent(await getMarketAuthToken(market));
-    const wsBase = buildWsEndpoint(market.url);
-    const wsUrl = `${wsBase}?token=${token}`;
+    const wsBase = buildWsEndpoint(getCurrentAppBaseUrl());
+    const wsUrl = `${wsBase}?token=${token}&market=${encodeURIComponent(marketName)}`;
     
     console.log(`[Market] Connecting to ${market.name} at ${wsUrl}`);
     
     const marketWs = new WebSocket(wsUrl);
 
     marketWs.onopen = () => {
+      resetMarketReconnect(marketName);
       console.log(`[Market] ${marketName} WebSocket connected`);
       marketObj.ws = marketWs;
       marketObj.connected = true;
@@ -914,7 +977,13 @@ async function connectMarketWS(market) {
         tag: 'info'
       });
       if (resolveSplitMarketConfigs().some(candidate => normalizeMarketName(candidate.name) === marketName)) {
-        setTimeout(() => connectMarketWS(market), 2000);
+        const delay = scheduleMarketReconnect(marketName, market);
+        appendLog({
+          ts: now(),
+          label: 'INFO',
+          body: `Market "${marketName}" reconnecting in ${Math.round(delay/1000)}s…`,
+          tag: 'info'
+        });
       }
     };
 
@@ -929,7 +998,7 @@ async function connectMarketWS(market) {
     };
 
   } catch (e) {
-    console.error(`[Market] Failed to parse market URL: ${market.url}`, e);
+    console.error(`[Market] Failed to connect market "${market.name}"`, e);
     appendLog({
       ts: now(),
       label: 'ERROR',
@@ -1091,18 +1160,23 @@ function handleStatus(connected) {
   const newText = connected ? '● CONNECTED' : '● DISCONNECTED';
   dot.textContent = newText;
   dot.className   = connected ? 'on' : '';
+  setStaleDataMode(!connected);
   updateTargetMarketControls();
 
-  if (!connected) {
-    ge('token-balance').textContent = 'TOKENS: —';
-    lastTokenBalance = null;
-    Object.keys(currentHoldings).forEach(symbol => delete currentHoldings[symbol]);
-    renderHoldings();
-  }
+  // Keep last-known balance/holdings visible during transient disconnects.
+  // They are refreshed from fresh player_state after reconnect.
   renderBuyCapacityHint();
   renderOrderCostPreview();
   
   console.log('[UI] Status updated to:', newText);
+}
+
+function setStaleDataMode(stale) {
+  ['stale-badge-top', 'stale-badge-holdings'].forEach(id => {
+    const el = ge(id);
+    if (!el) return;
+    el.style.display = stale ? 'inline-block' : 'none';
+  });
 }
 
 // Debounce player_state updates so rapid server bursts (exec-report + player_state)
@@ -1132,6 +1206,7 @@ function schedulePlayerState(msg) {
 }
 
 function handlePlayerState(msg) {
+  setStaleDataMode(false);
   currentPlayer = msg.username || null;
   currentIsAdmin = !!msg.is_admin;
   setAdminControlsEnabled(currentIsAdmin);
@@ -1675,6 +1750,20 @@ function submitDlg() {
 
 // ── log ───────────────────────────────────────────────────────────────────────
 function appendLog(entry) {
+  const nowMs = Date.now();
+  const key = `${String(entry.tag||'')}|${String(entry.label||'')}|${String(entry.body||'')}`;
+  const lastTs = recentLogTimestamps[key] || 0;
+  if ((nowMs - lastTs) < LOG_DEDUPE_WINDOW_MS) {
+    return;
+  }
+  recentLogTimestamps[key] = nowMs;
+
+  if (Object.keys(recentLogTimestamps).length > 500) {
+    Object.keys(recentLogTimestamps).forEach(k => {
+      if ((nowMs - recentLogTimestamps[k]) > LOG_DEDUPE_WINDOW_MS) delete recentLogTimestamps[k];
+    });
+  }
+
   const box = ge('log-box');
   const el  = document.createElement('div');
   el.className = 'le';

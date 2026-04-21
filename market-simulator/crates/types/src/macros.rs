@@ -19,7 +19,7 @@ macro_rules! define_id {
                 let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
                 write!(f, "{}", s.trim_matches(char::from(0)))
             }
-        }
+        }   
 
         impl std::ops::Add for $name {
             type Output = Self;

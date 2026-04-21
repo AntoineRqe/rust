@@ -191,6 +191,29 @@ function authMessageFromResponse(data) {
   }
 }
 
+function normalizeAppBaseUrl(rawBaseUrl) {
+  try {
+    const candidate = new URL(String(rawBaseUrl || '').trim(), location.origin);
+    const sameHost = candidate.hostname === location.hostname;
+
+    if (sameHost) {
+      candidate.protocol = location.protocol;
+      candidate.port = location.port;
+    }
+
+    if (location.protocol === 'https:' && candidate.protocol === 'http:' && sameHost) {
+      candidate.protocol = 'https:';
+      candidate.port = location.port;
+    }
+
+    const cleanedPath = candidate.pathname.replace(/\/+$/, '');
+    const pathPrefix = cleanedPath && cleanedPath !== '/' ? cleanedPath : '';
+    return `${candidate.origin}${pathPrefix}`;
+  } catch (_) {
+    return location.origin;
+  }
+}
+
 async function loadMarketCandidates() {
   const candidates = [];
 
@@ -297,7 +320,7 @@ async function doLogin() {
           localStorage.setItem('last_username', data.username || username);
         } catch (_) {}
 
-        const appBaseUrl = String(data.market_url || baseUrl || '').trim() || baseUrl;
+        const appBaseUrl = normalizeAppBaseUrl(data.market_url || baseUrl || location.origin);
         const token = encodeURIComponent(data.token || '');
         const usernameSafe = encodeURIComponent(data.username || username);
         const passwordSafe = encodeURIComponent(password);

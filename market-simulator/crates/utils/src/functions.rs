@@ -68,7 +68,7 @@ where T: Into<u64> {
     }
 
     // Reverse the buffer to get the correct order of digits
-    // e.g. if number is 123, we write '3', then '2', then '1' into the buffer, so we need to reverse it to get "123".
+    // e.g. if number is 123, we write '3', then '2', then '1' into the buffer, so we need to reverse it to get "123".  
     buf[..i].reverse();
     NumBytes { buf, len: i }
 }
