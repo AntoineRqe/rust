@@ -170,7 +170,19 @@ async fn gateway_login_handler(
             .unwrap_or_else(|_| serde_json::json!({}));
 
         if status.is_success() {
-            return (StatusCode::OK, Json(payload)).into_response();
+            let mut out = match payload {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            out.insert(
+                "market_url".to_string(),
+                serde_json::Value::String(market.url.clone()),
+            );
+            out.insert(
+                "market_name".to_string(),
+                serde_json::Value::String(market.name.clone()),
+            );
+            return (StatusCode::OK, Json(serde_json::Value::Object(out))).into_response();
         }
 
         if status.as_u16() == StatusCode::UNAUTHORIZED.as_u16() {

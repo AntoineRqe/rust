@@ -297,11 +297,12 @@ async function doLogin() {
           localStorage.setItem('last_username', data.username || username);
         } catch (_) {}
 
+        const appBaseUrl = String(data.market_url || baseUrl || '').trim() || baseUrl;
         const token = encodeURIComponent(data.token || '');
         const usernameSafe = encodeURIComponent(data.username || username);
         const passwordSafe = encodeURIComponent(password);
         const adminSafe = encodeURIComponent(String(!!data.is_admin));
-        location.href = `${baseUrl}/app?token=${token}&username=${usernameSafe}&password=${passwordSafe}&is_admin=${adminSafe}`;
+        location.href = `${appBaseUrl}/app?token=${token}&username=${usernameSafe}&password=${passwordSafe}&is_admin=${adminSafe}`;
         return;
       } catch (_) {
         // try next candidate
