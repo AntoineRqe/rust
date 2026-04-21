@@ -259,7 +259,10 @@ async fn api_login_handler(
         }
         Err(e) => (
             StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({
+                "error": e.message(),
+                "code": e.code(),
+            })),
         )
             .into_response(),
     }

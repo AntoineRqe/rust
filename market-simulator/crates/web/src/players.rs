@@ -18,6 +18,38 @@ fn market_name() -> &'static str {
 /// Tokens each new player receives on registration.
 pub const INITIAL_TOKENS: f64 = 10_000.0;
 
+#[derive(Debug, Clone)]
+pub enum AuthError {
+    UsernameRequired,
+    PasswordRequired,
+    UserExistsWrongPassword { username: String },
+    PasswordHashFailed,
+}
+
+impl AuthError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            AuthError::UsernameRequired => "USERNAME_REQUIRED",
+            AuthError::PasswordRequired => "PASSWORD_REQUIRED",
+            AuthError::UserExistsWrongPassword { .. } => "USER_EXISTS_WRONG_PASSWORD",
+            AuthError::PasswordHashFailed => "PASSWORD_HASH_FAILED",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            AuthError::UsernameRequired => "Username is required".to_string(),
+            AuthError::PasswordRequired => "Password is required".to_string(),
+            AuthError::UserExistsWrongPassword { username } => format!(
+                "User '{username}' already exists, but the password is incorrect. If you intended to create a new account, choose a different username."
+            ),
+            AuthError::PasswordHashFailed => {
+                "Could not create account right now (password hashing failed)".to_string()
+            }
+        }
+    }
+}
+
 // ── Stored player record ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +113,24 @@ struct StoreInner {
 }
 
 impl PlayerStore {
+    fn resolve_username_from_sender_id(inner: &StoreInner, sender_id: &str) -> Option<String> {
+        let sender = sender_id.trim();
+        if sender.is_empty() {
+            return None;
+        }
+
+        if inner.players.contains_key(sender) {
+            return Some(sender.to_string());
+        }
+
+        let normalized_sender = sender.to_ascii_uppercase();
+        inner
+            .players
+            .keys()
+            .find(|username| username.trim().to_ascii_uppercase() == normalized_sender)
+            .cloned()
+    }
+
     /// Load the store from `path`, creating an empty one if the file does not exist yet.
     pub fn load(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_path_buf();
@@ -118,7 +168,15 @@ impl PlayerStore {
         &self,
         username: &str,
         password: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, AuthError> {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(AuthError::UsernameRequired);
+        }
+        if password.is_empty() {
+            return Err(AuthError::PasswordRequired);
+        }
+
         let mut inner = self.inner.lock().unwrap();
         match inner.players.get_mut(username) {
             Some(player) => {
@@ -136,7 +194,9 @@ impl PlayerStore {
                     }
                     Err(_) => {
                         tracing::warn!("[{}] Player '{username}': wrong password", market_name());
-                        Err("Wrong password".into())
+                        Err(AuthError::UserExistsWrongPassword {
+                            username: username.to_string(),
+                        })
                     }
                 }
             }
@@ -146,7 +206,7 @@ impl PlayerStore {
                     market_name()
                 );
                 let password_hash = hash_password(password)
-                    .map_err(|_| "Password hashing failed")?;
+                    .map_err(|_| AuthError::PasswordHashFailed)?;
                 inner
                     .players
                     .insert(username.to_string(), Player::new(username.to_string(), password_hash));
@@ -224,14 +284,14 @@ impl PlayerStore {
                 continue;
             }
 
-            if !inner.players.contains_key(sender_id) {
+            let Some(owner_username) = Self::resolve_username_from_sender_id(&inner, sender_id) else {
                 continue;
-            }
+            };
 
             let replaced = inner
                 .order_owners
-                .insert(cl_ord_id.to_string(), sender_id.to_string());
-            if replaced.as_deref() != Some(sender_id) {
+                .insert(cl_ord_id.to_string(), owner_username.clone());
+            if replaced.as_deref() != Some(owner_username.as_str()) {
                 updated += 1;
             }
         }
@@ -354,6 +414,11 @@ impl PlayerStore {
             .or_else(|| fields.get("11"))
             .map(String::as_str)
             .unwrap_or("");
+        let candidate_sender = fields
+            .get("56")
+            .or_else(|| fields.get("49"))
+            .map(String::as_str)
+            .unwrap_or("");
 
         if cl_ord_id.is_empty() {
             return false;
@@ -384,6 +449,17 @@ impl PlayerStore {
 
         if !inner.processed_exec_ids.insert(exec_id) {
             return false;
+        }
+
+        if !cl_ord_id.is_empty() {
+            if let Some(owner_username) = Self::resolve_username_from_sender_id(&inner, candidate_sender) {
+                let replaced = inner
+                    .order_owners
+                    .insert(cl_ord_id.to_string(), owner_username.clone());
+                if replaced.as_deref() != Some(owner_username.as_str()) {
+                    changed = true;
+                }
+            }
         }
 
         let owner = inner.order_owners.get(cl_ord_id).cloned();

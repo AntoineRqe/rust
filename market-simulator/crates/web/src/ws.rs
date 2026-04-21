@@ -395,8 +395,14 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 }
             }
 
-            let sender_id = sender.unwrap_or_else(|| "BROWSER".into());
-            let target_id = target.unwrap_or_else(|| "SERVER1".into());
+            let sender_id = sender
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("BROWSER"))
+                .unwrap_or_else(|| username.to_string());
+            let target_id = target
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "SERVER1".into());
 
             // Record the order in the player's pending list.
             // Token balance is updated only on transaction (execution reports).
@@ -445,7 +451,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
             state.player_store.remove_pending_order(username, &clord_id);
 
             let fix_bytes = build_order_cancel_request(
-                "BROWSER", "SERVER1",
+                username, "SERVER1",
                 &clord_id, &symbol, qty,
             );
 

@@ -175,6 +175,22 @@ function setLoading(on) {
     : 'Connect';
 }
 
+function authMessageFromResponse(data) {
+  const code = String((data && data.code) || '').trim();
+  switch (code) {
+    case 'USERNAME_REQUIRED':
+      return 'Username is required.';
+    case 'PASSWORD_REQUIRED':
+      return 'Password is required.';
+    case 'USER_EXISTS_WRONG_PASSWORD':
+      return 'This username already exists and the password is incorrect. Use the right password or choose another username.';
+    case 'PASSWORD_HASH_FAILED':
+      return 'Account creation is temporarily unavailable. Please try again.';
+    default:
+      return (data && data.error) ? String(data.error) : 'Authentication failed.';
+  }
+}
+
 async function loadMarketCandidates() {
   const candidates = [location.origin];
   try {
@@ -222,7 +238,7 @@ async function doLogin() {
         anyReachable = true;
 
         if (!res.ok) {
-          lastAuthError = data && data.error ? data.error : 'Authentication failed.';
+          lastAuthError = authMessageFromResponse(data);
           continue;
         }
 

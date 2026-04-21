@@ -157,6 +157,7 @@
   .ask-lv{background:var(--ask-bg)}.ask-lv .bar{background:var(--ask-bar)}
     .lv-maker{width:70px;text-align:left;font-size:9px;color:var(--muted);
       padding-left:2px;position:relative;z-index:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .lv-maker-badge{display:inline-block;margin-left:4px;color:var(--gold);font-size:8px;font-weight:bold}
     .lv-qty{flex:1;text-align:right;font-size:11px;font-weight:600;
       color:var(--text);padding-right:6px;position:relative;z-index:1}
       .lv-qty-num{display:inline-block;min-width:88px;text-align:right;
@@ -175,9 +176,11 @@
   #trades-list{flex:1;overflow-y:auto;padding:0 6px 6px;min-height:0}
   .tr-row{display:flex;gap:6px;font-size:11px;line-height:1.8}
   .tr-row .td{width:14px;font-weight:bold}
+  .tr-row .to{width:84px;color:var(--muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .tr-row .tp{width:86px;text-align:right;font-weight:bold}
   .tr-row .tq{width:66px;text-align:right;color:var(--muted)}
   .tr-row .tt{color:var(--muted);font-size:10px}
+  .tr-owner-badge{display:inline-block;margin-left:3px;color:var(--gold);font-size:8px;font-weight:bold}
   .tr-buy .td,.tr-buy .tp{color:var(--green)}
   .tr-sell .td,.tr-sell .tp{color:var(--red)}
 
@@ -291,26 +294,16 @@
   <div class="frow"><label>Symbol</label>     <input id="o-sym"   value="AAPL"></div>
   <div class="frow"><label>Quantity</label>
     <div class="spin-wrap">
-      <input id="o-qty" type="number" step="1" min="1" value="100">
-      <input id="o-qty-range" type="range" min="1" max="1000" step="1" value="100" style="width:88px;margin-left:6px"
+      <input id="o-qty" type="number" step="1" min="1" max="200" value="100">
+      <input id="o-qty-range" type="range" min="1" max="200" step="1" value="100" style="width:128px;margin-left:6px"
              oninput="syncOrderInputFromSlider('o-qty')">
-      <span id="o-qty-range-val" style="width:44px;text-align:right;color:var(--gold);font-size:10px">100</span>
-      <div class="spin-btns">
-        <button class="spin-btn" onclick="bumpField('o-qty', 1)">&#9650;</button>
-        <button class="spin-btn" onclick="bumpField('o-qty', -1)">&#9660;</button>
-      </div>
     </div>
   </div>
   <div class="frow"><label>Limit Price</label>
     <div class="spin-wrap">
       <input id="o-price" type="number" step="0.1" min="0" value="150.00">
-      <input id="o-price-range" type="range" min="0" max="500" step="0.1" value="150.0" style="width:88px;margin-left:6px"
+      <input id="o-price-range" type="range" min="0" max="500" step="0.1" value="150.0" style="width:128px;margin-left:6px"
              oninput="syncOrderInputFromSlider('o-price')">
-      <span id="o-price-range-val" style="width:44px;text-align:right;color:var(--gold);font-size:10px">150.0</span>
-      <div class="spin-btns">
-        <button class="spin-btn" onclick="bumpField('o-price', 0.1)">&#9650;</button>
-        <button class="spin-btn" onclick="bumpField('o-price', -0.1)">&#9660;</button>
-      </div>
     </div>
   </div>
   <div id="order-costs" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:2px 6px 4px">
@@ -693,13 +686,22 @@ const esc = s  => String(s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
 function makerFromClOrdId(clOrdId) {
-  const owner = orderOwners[String(clOrdId || '').trim()];
+  const rawKey = String(clOrdId || '').trim();
+  const canonicalKey = canonicalClOrdId(clOrdId);
+  const owner = orderOwners[rawKey] || (canonicalKey ? orderOwners[canonicalKey] : '');
   if (owner) return owner;
 
-  const normalized = String(clOrdId || '').toUpperCase();
+  const normalized = canonicalKey;
   if (!normalized) return '—';
   const match = normalized.match(/^[A-Z0-9]{1,6}/);
   return (match && match[0]) ? match[0] : '—';
+}
+
+function canonicalClOrdId(clOrdId) {
+  return String(clOrdId || '')
+    .replace(/\u0000/g, '')
+    .trim()
+    .toUpperCase();
 }
 
 function stableOrderIdFromClOrdId(clOrdId) {
@@ -729,6 +731,40 @@ function makerFromOrderRow(row) {
   if (byOrderId) return byOrderId;
 
   return '—';
+}
+
+function makerMetaFromOrderRow(row) {
+  const clOrdKeyRaw = String((row && row.cl_ord_id) || '').trim();
+  const clOrdKeyCanonical = canonicalClOrdId(row && row.cl_ord_id);
+  const ownerByClOrd =
+    (clOrdKeyRaw ? orderOwners[clOrdKeyRaw] : '') ||
+    (clOrdKeyCanonical ? orderOwners[clOrdKeyCanonical] : '');
+  if (ownerByClOrd) return { maker: ownerByClOrd, resolved: true };
+
+  const orderIdKey = String((row && row.order_id) || '').trim();
+  const ownerByOrderId = orderIdKey ? orderOwnersByOrderId[orderIdKey] : '';
+  if (ownerByOrderId) return { maker: ownerByOrderId, resolved: true };
+
+  const fallback = makerFromClOrdId(clOrdKeyRaw);
+  if (fallback !== '—') return { maker: fallback, resolved: false };
+
+  return { maker: '—', resolved: true };
+}
+
+function ownerMetaFromClOrdId(clOrdId) {
+  const keyRaw = String(clOrdId || '').trim();
+  const keyCanonical = canonicalClOrdId(clOrdId);
+  if (!keyRaw && !keyCanonical) return { owner: '—', resolved: true };
+
+  const owner =
+    (keyRaw ? orderOwners[keyRaw] : '') ||
+    (keyCanonical ? orderOwners[keyCanonical] : '');
+  if (owner) return { owner, resolved: true };
+
+  const fallback = makerFromClOrdId(keyRaw);
+  if (fallback !== '—') return { owner: fallback, resolved: false };
+
+  return { owner: '—', resolved: true };
 }
 
 updateMarketSwitchButton();
@@ -1115,14 +1151,16 @@ function handlePlayerState(msg) {
     currentHoldings[normalizedSymbol] = qty;
   });
 
-  Object.keys(orderOwners).forEach(clOrdId => delete orderOwners[clOrdId]);
-  Object.keys(orderOwnersByOrderId).forEach(orderId => delete orderOwnersByOrderId[orderId]);
   const owners = msg && typeof msg.order_owners === 'object' && msg.order_owners ? msg.order_owners : {};
   Object.keys(owners).forEach(clOrdId => {
     const key = String(clOrdId || '').trim();
+    const canonicalKey = canonicalClOrdId(clOrdId);
     const username = String(owners[clOrdId] || '').trim();
     if (!key || !username) return;
     orderOwners[key] = username;
+    if (canonicalKey) {
+      orderOwners[canonicalKey] = username;
+    }
 
     const orderId = stableOrderIdFromClOrdId(key);
     if (orderId) {
@@ -1198,17 +1236,17 @@ function syncOrderInputFromSlider(id) {
   const input = ge(id);
   const slider = ge(id === 'o-qty' ? 'o-qty-range' : 'o-price-range');
   const valueLabel = ge(id === 'o-qty' ? 'o-qty-range-val' : 'o-price-range-val');
-  if (!input || !slider || !valueLabel) return;
+  if (!input || !slider) return;
 
   const raw = Number(slider.value || 0);
   if (id === 'o-qty') {
     const qty = Math.max(1, Math.round(raw));
     input.value = String(qty);
-    valueLabel.textContent = String(qty);
+    if (valueLabel) valueLabel.textContent = String(qty);
   } else {
     const price = Math.max(0, Math.round(raw * 10) / 10);
     input.value = price.toFixed(1);
-    valueLabel.textContent = price.toFixed(1);
+    if (valueLabel) valueLabel.textContent = price.toFixed(1);
   }
 
   renderOrderCostPreview();
@@ -1218,7 +1256,7 @@ function syncOrderSliderFromInput(id) {
   const input = ge(id);
   const slider = ge(id === 'o-qty' ? 'o-qty-range' : 'o-price-range');
   const valueLabel = ge(id === 'o-qty' ? 'o-qty-range-val' : 'o-price-range-val');
-  if (!input || !slider || !valueLabel) return;
+  if (!input || !slider) return;
 
   let value = Number(input.value || 0);
   if (!Number.isFinite(value)) value = id === 'o-qty' ? 1 : 0;
@@ -1231,12 +1269,12 @@ function syncOrderSliderFromInput(id) {
     value = Math.round(value);
     input.value = String(value);
     slider.value = String(value);
-    valueLabel.textContent = String(value);
+    if (valueLabel) valueLabel.textContent = String(value);
   } else {
     value = Math.round(value * 10) / 10;
     input.value = value.toFixed(1);
     slider.value = value.toFixed(1);
-    valueLabel.textContent = value.toFixed(1);
+    if (valueLabel) valueLabel.textContent = value.toFixed(1);
   }
 }
 
@@ -1521,11 +1559,17 @@ function renderOrders(marketName, immediate = false) {
   const list = ge('orders-list');
   const nowMs = Date.now();
   const orderIds = Object.keys(openOrders).filter(id => {
+    const order = openOrders[id];
+    if (order?.source !== 'local') return true;
     const firstSeen = openOrderFirstSeen[id] || nowMs;
     return (nowMs - firstSeen) >= PENDING_VISIBILITY_DELAY_MS;
   });
 
-  const hiddenIds = Object.keys(openOrders).filter(id => !orderIds.includes(id));
+  const hiddenIds = Object.keys(openOrders).filter(id => {
+    if (orderIds.includes(id)) return false;
+    const order = openOrders[id];
+    return order?.source === 'local';
+  });
   if (hiddenIds.length > 0) {
     const maxAge = Math.max(...hiddenIds.map(id => nowMs - (openOrderFirstSeen[id] || nowMs)));
     const waitMs = Math.max(10, PENDING_VISIBILITY_DELAY_MS - maxAge);
@@ -1798,8 +1842,9 @@ function updateBookFromFix(body, tag, marketName) {
     // PartiallyFilled / Modify-like updates
     if (lastPx > 0 && lastQty > 0) {
       b.last = lastPx;
+      const ownerMeta = ownerMetaFromClOrdId(clordId);
       b.trades.unshift([lastPx, lastQty, side === '1' ? 'B' : 'S',
-                           new Date().toTimeString().slice(0,8)]);
+                           new Date().toTimeString().slice(0,8), ownerMeta.owner, ownerMeta.resolved]);
       b.trades = b.trades.slice(0, 20);
     }
     applyOrderLeavesForMarket(market, clordId, side, price, leavesQty);
@@ -1812,8 +1857,9 @@ function updateBookFromFix(body, tag, marketName) {
     const isSyntheticMdTrade = clordId.startsWith('T');
     if (fillPx > 0 && fillQty > 0) {
       b.last = fillPx;
+      const ownerMeta = ownerMetaFromClOrdId(clordId);
       b.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
-                           new Date().toTimeString().slice(0,8)]);
+                           new Date().toTimeString().slice(0,8), ownerMeta.owner, ownerMeta.resolved]);
       b.trades = b.trades.slice(0, 20);
 
       if (isSyntheticMdTrade) {
@@ -1887,13 +1933,17 @@ function renderBook(immediate = false) {
 
   renderLevels('bids', bids, 'bid', maxQ);
 
-  ge('trades-list').innerHTML = book.trades.map(([px,qty,s,ts]) => `
+  ge('trades-list').innerHTML = book.trades.map(([px,qty,s,ts,owner='—',resolved=true]) => {
+    const ownerBadge = resolved ? '' : '<span class="tr-owner-badge" title="Owner unresolved">?</span>';
+    return `
     <div class="tr-row tr-${s==='B'?'buy':'sell'}">
       <span class="td">${s==='B'?'▲':'▼'}</span>
+      <span class="to">${esc(owner)}${ownerBadge}</span>
       <span class="tp">${fmt(px)}</span>
       <span class="tq">${Math.round(qty).toLocaleString()}</span>
       <span class="tt">${esc(ts)}</span>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   // update price chart
   if (book.trades.length !== lastTradeCount) {
@@ -1915,11 +1965,12 @@ function renderLevels(id, levels, cls, maxQ) {
   ge(id).innerHTML = levels.map(row => {
     const px = Number(row.price) || 0;
     const qty = Number(row.quantity) || 0;
-    const maker = makerFromOrderRow(row);
+    const maker = makerMetaFromOrderRow(row);
     const pct = (qty / maxQ * 100).toFixed(1);
+    const makerBadge = maker.resolved ? '' : '<span class="lv-maker-badge" title="Owner unresolved">?</span>';
     return `<div class="bk-level ${cls}-lv">
       <div class="bar" style="width:${pct}%"></div>
-      <span class="lv-maker">${esc(maker)}</span>
+      <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   }).join('');
@@ -1949,11 +2000,12 @@ function renderMarketBook(marketName) {
   [...asks].reverse().forEach((order) => {
     const px = Number(order.price) || 0;
     const qty = Number(order.quantity) || 0;
-    const maker = makerFromOrderRow(order);
+    const maker = makerMetaFromOrderRow(order);
     const pct = (qty / maxQ * 100).toFixed(1);
+    const makerBadge = maker.resolved ? '' : '<span class="lv-maker-badge" title="Owner unresolved">?</span>';
     html += `<div class="bk-level ask-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
-      <span class="lv-maker">${esc(maker)}</span>
+      <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   });
@@ -1970,11 +2022,12 @@ function renderMarketBook(marketName) {
   bids.forEach((order) => {
     const px = Number(order.price) || 0;
     const qty = Number(order.quantity) || 0;
-    const maker = makerFromOrderRow(order);
+    const maker = makerMetaFromOrderRow(order);
     const pct = (qty / maxQ * 100).toFixed(1);
+    const makerBadge = maker.resolved ? '' : '<span class="lv-maker-badge" title="Owner unresolved">?</span>';
     html += `<div class="bk-level bid-lv" style="font-size:9px;padding:2px 4px">
       <div class="bar" style="width:${pct}%"></div>
-      <span class="lv-maker">${esc(maker)}</span>
+      <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
       <span class="lv-px">${fmt(px)}</span></div>`;
   });
@@ -1982,9 +2035,10 @@ function renderMarketBook(marketName) {
   // Trades
   if (b.trades.length > 0) {
     html += `<div style="border-top:1px solid var(--border);padding:4px;font-size:8px;color:var(--muted)">TRADES</div>`;
-    b.trades.slice(0, 5).forEach(([px,qty,s,ts]) => {
+    b.trades.slice(0, 5).forEach(([px,qty,s,ts,owner='—',resolved=true]) => {
+      const ownerBadge = resolved ? '' : '<span class="tr-owner-badge" title="Owner unresolved">?</span>';
       html += `<div style="padding:1px 4px;font-size:8px;color:${s==='B'?'var(--green)':'var(--red)'}">
-        ${s} ${Math.round(qty)}@${fmt(px)}</div>`;
+        ${s} ${esc(owner)}${ownerBadge} ${Math.round(qty)}@${fmt(px)}</div>`;
     });
   }
 
