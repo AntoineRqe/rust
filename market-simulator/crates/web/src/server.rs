@@ -77,6 +77,88 @@ fn admin_password() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+fn public_markets_only_enabled() -> bool {
+    std::env::var("MARKET_SIM_PUBLIC_MARKETS_ONLY")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_private_ipv4(host: &str) -> bool {
+    if host.starts_with("10.") || host.starts_with("192.168.") || host.starts_with("169.254.") {
+        return true;
+    }
+
+    if let Some(rest) = host.strip_prefix("172.") {
+        if let Some(octet_str) = rest.split('.').next() {
+            if let Ok(octet) = octet_str.parse::<u8>() {
+                return (16..=31).contains(&octet);
+            }
+        }
+    }
+
+    false
+}
+
+fn is_public_market_url(raw_url: &str) -> bool {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .unwrap_or(trimmed);
+
+    let host_port = without_scheme.split('/').next().unwrap_or_default().trim();
+    if host_port.is_empty() {
+        return false;
+    }
+
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        host_port.split(':').next().unwrap_or_default()
+    }
+    .trim()
+    .to_ascii_lowercase();
+
+    if host.is_empty() {
+        return false;
+    }
+
+    if matches!(
+        host.as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "host.docker.internal"
+    ) {
+        return false;
+    }
+
+    if is_private_ipv4(&host) {
+        return false;
+    }
+
+    true
+}
+
+pub fn advertised_markets(markets: &[MarketInfo]) -> Vec<MarketInfo> {
+    if !public_markets_only_enabled() {
+        return markets.to_vec();
+    }
+
+    markets
+        .iter()
+        .filter(|market| is_public_market_url(&market.url))
+        .cloned()
+        .collect()
+}
+
 pub fn run_web_server(
     bus: EventBus,
     fix_tcp_addr: String,
@@ -108,6 +190,22 @@ async fn serve(
     order_book: Arc<Mutex<OrderBookState>>,
 ) {
     let player_store = PlayerStore::load(players_file);
+    let advertised = advertised_markets(&known_markets);
+    if !known_markets.is_empty() {
+        if advertised.is_empty() {
+            tracing::warn!(
+                "[{}] MARKET_SIM_PUBLIC_MARKETS_ONLY=1 filtered out all configured markets; /api/markets will be empty",
+                market_name()
+            );
+        } else if advertised.len() != known_markets.len() {
+            tracing::info!(
+                "[{}] MARKET_SIM_PUBLIC_MARKETS_ONLY=1 filtered {} non-public market URL(s)",
+                market_name(),
+                known_markets.len().saturating_sub(advertised.len())
+            );
+        }
+    }
+
     let state = AppState {
         bus,
         fix_tcp_addr,
@@ -190,7 +288,7 @@ async fn app_handler(State(state): State<AppState>) -> impl IntoResponse {
     let market = market_name();
     let login_gateway_url = std::env::var("LOGIN_GATEWAY_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:9875".to_string());
-    let markets_json = serde_json::to_string(&state.known_markets)
+    let markets_json = serde_json::to_string(&advertised_markets(&state.known_markets))
         .unwrap_or_else(|_| "[]".to_string());
     let html = include_str!("../frontend/index.html")
         .replace("{{MARKET_NAME}}", market)
@@ -270,7 +368,7 @@ async fn api_login_handler(
 
 /// GET /api/markets — returns the list of all configured markets.
 async fn api_markets_handler(State(state): State<AppState>) -> impl IntoResponse {
-    Json(state.known_markets.clone())
+    Json(advertised_markets(&state.known_markets))
 }
 
 /// Load initial pending orders from gRPC DumpOrderBook RPC at startup.

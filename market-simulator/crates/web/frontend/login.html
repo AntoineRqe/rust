@@ -193,6 +193,41 @@ function authMessageFromResponse(data) {
 
 async function loadMarketCandidates() {
   const candidates = [location.origin];
+
+  const currentUrl = new URL(location.href);
+  const currentHost = currentUrl.hostname;
+  const currentIsLocal = (
+    currentHost === 'localhost' ||
+    currentHost === '127.0.0.1' ||
+    currentHost === '::1'
+  );
+
+  function isLoopbackHost(hostname) {
+    return hostname === 'localhost' ||
+           hostname === '127.0.0.1' ||
+           hostname === '::1';
+  }
+
+  function shouldUseCandidate(rawUrl) {
+    try {
+      const parsed = new URL(rawUrl, location.origin);
+
+      // Avoid mixed-content failures (https page trying to call http API).
+      if (currentUrl.protocol === 'https:' && parsed.protocol !== 'https:') {
+        return false;
+      }
+
+      // If user is not on a local page, never try loopback targets.
+      if (!currentIsLocal && isLoopbackHost(parsed.hostname)) {
+        return false;
+      }
+
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   try {
     const res = await fetch('/api/markets');
     if (res.ok) {
@@ -200,7 +235,9 @@ async function loadMarketCandidates() {
       if (Array.isArray(markets)) {
         markets.forEach(m => {
           const url = String((m && m.url) || '').trim();
-          if (url && !candidates.includes(url)) candidates.push(url);
+          if (!url) return;
+          if (!shouldUseCandidate(url)) return;
+          if (!candidates.includes(url)) candidates.push(url);
         });
       }
     }

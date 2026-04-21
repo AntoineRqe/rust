@@ -105,6 +105,18 @@ cargo run --release
 
 This will start the server and allow clients to connect and interact with the simulated market. The default IP address and port for the server can be configured in the `server` crate. (eg. `1127.0.0.1:9876`)
 
+### Production login URL filtering
+
+When exposing the login page publicly, configure market `web.ip` / `web.port` entries with reachable public hostnames/IPs.
+
+To prevent accidental advertisement of local/private URLs (for example `127.0.0.1`, `localhost`, `10.x.x.x`, `192.168.x.x`), enable:
+
+```bash
+export MARKET_SIM_PUBLIC_MARKETS_ONLY=1
+```
+
+With this enabled, both market and gateway `/api/markets` endpoints return only public market URLs.
+
 ## Running the Client
 
 Refer to the [Tools README](./tools/README.md) for instructions on how to run the client and connect to the server.
