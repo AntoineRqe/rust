@@ -99,11 +99,6 @@
               padding:5px 6px;flex:1;outline:none;min-width:0}
   .spin-wrap{display:flex;align-items:stretch;flex:1;min-width:0}
   .spin-wrap input{flex:1;min-width:0}
-  .spin-btns{display:flex;flex-direction:column;margin-left:4px}
-  .spin-btn{background:#1a1e2a;border:1px solid var(--border);color:var(--text);
-            width:22px;height:15px;line-height:12px;font-size:9px;padding:0}
-  .spin-btn + .spin-btn{border-top:none}
-  .spin-btn:hover{border-color:var(--blue)}
   .frow input:focus{border-color:var(--blue)}
   .frow input:disabled{opacity:.4;cursor:not-allowed}
   button{font-family:'Courier New',monospace;cursor:pointer;border:none;outline:none}
@@ -779,7 +774,7 @@ if (ge('o-market')) {
   const input = ge(id);
   if (!input) return;
   input.addEventListener('input', () => {
-    if (id === 'o-qty' || id === 'o-price') syncOrderSliderFromInput(id);
+    if (id === 'o-qty' || id === 'o-price') syncOrderSliderFromInputLive(id);
     renderOrderCostPreview();
   });
   input.addEventListener('change', () => {
@@ -1275,6 +1270,27 @@ function syncOrderSliderFromInput(id) {
     input.value = value.toFixed(1);
     slider.value = value.toFixed(1);
     if (valueLabel) valueLabel.textContent = value.toFixed(1);
+  }
+}
+
+function syncOrderSliderFromInputLive(id) {
+  const input = ge(id);
+  const slider = ge(id === 'o-qty' ? 'o-qty-range' : 'o-price-range');
+  if (!input || !slider) return;
+
+  if (id === 'o-qty' && /[.,]$/.test(input.value)) return;
+
+  let value = Number(input.value);
+  if (!Number.isFinite(value)) return;
+
+  const min = Number(slider.min || 0);
+  const max = Number(slider.max || value);
+  value = Math.min(max, Math.max(min, value));
+
+  if (id === 'o-qty') {
+    slider.value = String(Math.round(value));
+  } else {
+    slider.value = String(Math.round(value * 10) / 10);
   }
 }
 
