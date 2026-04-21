@@ -516,6 +516,27 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                             let r = resp.into_inner();
                             let (tag, label, body, recipient) = if r.success {
                                 let (players_touched, orders_removed, holdings_cleared) = state.player_store.reset_market_state();
+                                let cleared_symbols = {
+                                    let mut order_book = state.order_book.lock().unwrap();
+                                    let symbols: Vec<String> = order_book.books.keys().cloned().collect();
+                                    order_book.books.clear();
+                                    symbols
+                                };
+
+                                let timestamp_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|duration| duration.as_millis() as u64)
+                                    .unwrap_or(0);
+
+                                for symbol in cleared_symbols {
+                                    state.bus.publish(WsEvent::OrderBook {
+                                        symbol,
+                                        bids: Vec::new(),
+                                        asks: Vec::new(),
+                                        timestamp_ms,
+                                    });
+                                }
+
                                 (
                                     "info",
                                     "RESET ✓  Order book and database cleared.".to_string(),

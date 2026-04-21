@@ -139,11 +139,11 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 
         if let Some(snapshot_ptr) = &self.snapshot_ptr {
             snapshot_ptr.rcu(|current| {
-                    let mut next = Snapshot {
-                        timestamp: current.timestamp,
-                        symbol: if current.symbol.is_empty() { self.order_book.symbol.clone() } else { current.symbol.clone() },
-                        id: current.id,
-                        order_book: snapshot::types::OrderBookSnapshot::default(),
+                let mut next = Snapshot {
+                    timestamp: current.timestamp,
+                    symbol: if current.symbol.is_empty() { self.order_book.symbol.clone() } else { current.symbol.clone() },
+                    id: current.id,
+                    order_book: snapshot::types::OrderBookSnapshot::default(),
                 };
 
                 next.order_book.bids_len = current.order_book.bids_len;

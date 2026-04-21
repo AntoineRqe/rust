@@ -329,7 +329,7 @@
   <div id="stale-badge-holdings" class="stale-badge" style="margin:0 6px 6px">Using last known data</div>
 
   <div class="footer-row">
-    <button class="ghost" id="btn-clear-book" onclick="sendToSelectedMarket({action:'clear_book'})" disabled>clear book</button>
+    <button class="ghost" id="btn-clear-book" onclick="clearBookAllMarkets()" disabled>clear book</button>
     <button class="ghost" id="btn-reset-seq" onclick="sendToSelectedMarket({action:'reset_seq'})" disabled>reset seq</button>
     <button class="ghost" id="btn-reset-tokens" onclick="resetTokensAllMarkets()" disabled>reset tokens</button>
   </div>
@@ -551,6 +551,27 @@ function resetTokensAllMarkets() {
       ts: now(),
       label: 'ERROR',
       body: 'No connected markets available for token reset',
+      tag: 'err',
+    });
+  }
+}
+
+function clearBookAllMarkets() {
+  const payload = { action: 'clear_book' };
+  let sent = 0;
+
+  Object.keys(markets).forEach(name => {
+    const market = markets[name];
+    if (!market || !market.ws || market.ws.readyState !== WebSocket.OPEN) return;
+    market.ws.send(JSON.stringify(payload));
+    sent += 1;
+  });
+
+  if (sent === 0) {
+    appendLog({
+      ts: now(),
+      label: 'ERROR',
+      body: 'No connected markets available for clear book',
       tag: 'err',
     });
   }
