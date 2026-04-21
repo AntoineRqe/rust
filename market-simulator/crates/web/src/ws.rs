@@ -12,6 +12,23 @@ use serde::Deserialize;
 use crate::server::{AppState, SessionInfo, authenticate_token};
 use crate::state::{WsEvent, BrowserCommand, PendingOrder};
 
+struct VisitorCounterGuard {
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+    total_counter: Arc<std::sync::atomic::AtomicUsize>,
+    bus: crate::state::EventBus,
+}
+
+impl Drop for VisitorCounterGuard {
+    fn drop(&mut self) {
+        let after = self
+            .counter
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(1);
+        let total = self.total_counter.load(std::sync::atomic::Ordering::Relaxed);
+        self.bus.publish(WsEvent::VisitorCount { count: after, total_count: total });
+    }
+}
+
 fn market_name() -> &'static str {
     static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MARKET_NAME
@@ -53,6 +70,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo,
     let mut rx: tokio::sync::broadcast::Receiver<WsEvent> = state.bus.subscribe();
     let username = session.username.clone();
     let is_admin = session.is_admin;
+
+    let current_visitors = state
+        .active_visitors
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1);
+    let all_time_visitors = state.player_store.record_visit();
+    // Sync the in-memory AtomicUsize with the newly persisted total
+    state.total_visitors.store(all_time_visitors as usize, std::sync::atomic::Ordering::Relaxed);
+    state
+        .bus
+        .publish(WsEvent::VisitorCount { count: current_visitors, total_count: all_time_visitors as usize });
+    let _visitor_guard = VisitorCounterGuard {
+        counter: Arc::clone(&state.active_visitors),
+        total_counter: Arc::clone(&state.total_visitors),
+        bus: state.bus.clone(),
+    };
 
     state
         .player_store
@@ -254,6 +287,8 @@ async fn send_player_state(
             holdings: player.holdings.clone(),
             order_owners: state.player_store.get_order_owners(),
             is_admin,
+            visitor_count: state.active_visitors.load(std::sync::atomic::Ordering::Relaxed),
+            total_visitor_count: state.total_visitors.load(std::sync::atomic::Ordering::Relaxed),
             id_suffix,
         }
     } else {
@@ -264,6 +299,8 @@ async fn send_player_state(
             holdings: std::collections::HashMap::new(),
             order_owners: state.player_store.get_order_owners(),
             is_admin,
+            visitor_count: state.active_visitors.load(std::sync::atomic::Ordering::Relaxed),
+            total_visitor_count: state.total_visitors.load(std::sync::atomic::Ordering::Relaxed),
             id_suffix: String::new(),
         }
     };

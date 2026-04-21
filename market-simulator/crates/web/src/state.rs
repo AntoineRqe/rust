@@ -377,9 +377,17 @@ pub enum WsEvent {
         holdings: HashMap<String, f64>,
         order_owners: HashMap<String, String>,
         is_admin: bool,
+        visitor_count: usize,
+        total_visitor_count: usize,
         /// Last 4 characters of the stored password hash — used by the browser
         /// as a stable, unique suffix in ClOrdID generation.
         id_suffix: String,
+    },
+
+    /// Active number of websocket visitors currently connected.
+    VisitorCount {
+        count: usize,
+        total_count: usize,
     },
 
     /// Order book snapshot for a symbol (updated with market feed data).

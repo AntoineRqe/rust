@@ -94,6 +94,8 @@ struct StorageData {
     players: HashMap<String, Player>,
     #[serde(default)]
     order_owners: HashMap<String, String>,
+    #[serde(default)]
+    total_visitor_count: u64,
 }
 
 // ── PlayerStore ───────────────────────────────────────────────────────────────
@@ -109,6 +111,7 @@ struct StoreInner {
     players: HashMap<String, Player>,
     order_owners: HashMap<String, String>,
     processed_exec_ids: HashSet<String>,
+    total_visitor_count: u64,
     path: PathBuf,
 }
 
@@ -143,6 +146,7 @@ impl PlayerStore {
         };
         let players = storage.players;
         let order_owners = storage.order_owners;
+        let total_visitor_count = storage.total_visitor_count;
         tracing::info!(
             "[{}] Player store: {} player(s) loaded from {:?}",
             market_name(),
@@ -154,6 +158,7 @@ impl PlayerStore {
                 players,
                 order_owners,
                 processed_exec_ids: HashSet::new(),
+                total_visitor_count,
                 path,
             })),
         }
@@ -535,6 +540,23 @@ impl PlayerStore {
         changed
     }
 
+    /// Return the all-time total visitor count persisted across restarts.
+    pub fn total_visitors(&self) -> u64 {
+        self.inner.lock().unwrap().total_visitor_count
+    }
+
+    /// Increment the all-time visitor counter and persist immediately.
+    /// Returns the new total.
+    pub fn record_visit(&self) -> u64 {
+        let new_total = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.total_visitor_count = inner.total_visitor_count.saturating_add(1);
+            inner.total_visitor_count
+        };
+        self.flush();
+        new_total
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     fn flush(&self) {
@@ -542,6 +564,7 @@ impl PlayerStore {
         let data = StorageData {
             players: inner.players.clone(),
             order_owners: inner.order_owners.clone(),
+            total_visitor_count: inner.total_visitor_count,
         };
         match serde_json::to_string_pretty(&data) {
             Ok(json) => {

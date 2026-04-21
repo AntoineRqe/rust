@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -57,6 +57,10 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, SessionInfo>>>,
     /// Current order book state for all symbols (updated with market feed data).
     pub order_book: Arc<Mutex<OrderBookState>>,
+    /// Number of currently connected browser websocket sessions.
+    pub active_visitors: Arc<AtomicUsize>,
+    /// Total number of websocket sessions ever opened (all-time).
+    pub total_visitors: Arc<AtomicUsize>,
 }
 
 /// Generate a cryptographically random 128-bit hex token.
@@ -206,6 +210,7 @@ async fn serve(
         }
     }
 
+    let initial_total_visitors = player_store.total_visitors() as usize;
     let state = AppState {
         bus,
         fix_tcp_addr,
@@ -214,6 +219,8 @@ async fn serve(
         known_markets,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         order_book,
+        active_visitors: Arc::new(AtomicUsize::new(0)),
+        total_visitors: Arc::new(AtomicUsize::new(initial_total_visitors)),
     };
 
     // Load initial pending orders from gRPC at startup

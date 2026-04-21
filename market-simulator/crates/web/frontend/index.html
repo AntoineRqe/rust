@@ -28,6 +28,7 @@
   #ws-dot{font-size:10px;color:var(--muted);white-space:nowrap;flex-shrink:0}
   #ws-dot.on{color:var(--teal)}
   #token-balance{font-size:11px;color:var(--gold);white-space:nowrap;flex-shrink:0}
+  #visitor-count{font-size:10px;color:var(--teal);white-space:nowrap;flex-shrink:0;display:none}
   .stale-badge{font-size:9px;color:var(--muted);border:1px solid var(--border);
                border-radius:3px;padding:2px 6px;display:none;white-space:nowrap}
   #market-switch{background:#0e1520;color:var(--teal);border:1px solid var(--border);
@@ -285,6 +286,7 @@
   <h1>&#x2B21; FIX 4.2 &nbsp;MULTI-MARKET TERMINAL</h1>
   <button id="market-switch" onclick="switchMarket()" title="Switch market" aria-label="Switch market">Switch market</button>
   <span id="token-balance">TOKENS: &#8212;</span>
+  <span id="visitor-count">VISITORS: &#8212;</span>
   <span id="stale-badge-top" class="stale-badge">STALE (DISCONNECTED)</span>
   <span id="ws-dot">&#9679; WS</span>
   <span id="status-dot">&#9679; DISCONNECTED</span>
@@ -469,6 +471,8 @@ const LOG_DEDUPE_WINDOW_MS = 10000;
 let currentPlayer = sessionStorage.getItem('auth_username') || null;
 let currentIsAdmin = sessionStorage.getItem('auth_is_admin') === 'true';
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
+let currentVisitorCount = 0;
+let currentTotalVisitorCount = 0;
 let lastTokenBalance = null;
 const currentHoldings = {}; // symbol -> quantity
 const orderOwners = {}; // cl_ord_id -> username
@@ -659,6 +663,10 @@ function setAdminControlsEnabled(enabled) {
   } catch (_) {}
 
   updateAdminControlAvailability();
+  const visitorEl = ge('visitor-count');
+  if (visitorEl) {
+    visitorEl.style.display = currentIsAdmin ? 'inline' : 'none';
+  }
 }
 
 async function switchMarket() {
@@ -1110,6 +1118,13 @@ function handleServerEvent(msg, marketName) {
         schedulePlayerState(msg);
       }
       break;
+    case 'visitor_count':
+      currentVisitorCount = Number(msg.count || 0);
+      currentTotalVisitorCount = Number(msg.total_count || currentTotalVisitorCount);
+      if (currentIsAdmin && ge('visitor-count')) {
+        ge('visitor-count').textContent = `ACTIVE: ${currentVisitorCount} | TOTAL: ${currentTotalVisitorCount}`;
+      }
+      break;
     case 'order_book':
       applyOrderBookSnapshot(msg, marketName);
       break;
@@ -1326,6 +1341,11 @@ function handlePlayerState(msg) {
   currentPlayer = msg.username || null;
   currentIsAdmin = !!msg.is_admin;
   setAdminControlsEnabled(currentIsAdmin);
+  currentVisitorCount = Number(msg.visitor_count || 0);
+  currentTotalVisitorCount = Number(msg.total_visitor_count || currentTotalVisitorCount);
+  if (ge('visitor-count')) {
+    ge('visitor-count').textContent = `ACTIVE: ${currentVisitorCount} | TOTAL: ${currentTotalVisitorCount}`;
+  }
   currentPlayerSuffix = (msg.id_suffix || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
 
   Object.keys(currentHoldings).forEach(symbol => delete currentHoldings[symbol]);
