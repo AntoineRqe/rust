@@ -68,6 +68,11 @@ macro_rules! define_id {
                 $name(bytes)
             }
 
+            pub fn to_string(&self) -> String {
+                let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
+                s.trim_matches(char::from(0)).to_string()
+            }
+
             pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
                 if bytes.len() != $size {
                     return None;

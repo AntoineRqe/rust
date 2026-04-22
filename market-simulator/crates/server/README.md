@@ -32,6 +32,8 @@ Queue types:
 - `resp_queue`: `tokio::sync::mpsc` bounded per-client response queue
 - `fix_to_ob`, `ob_to_er`, `er_to_fix`: custom SPSC lock-free ring buffers
 
+Check the documentation for multicast for the market data feed architecture and flow : [Multicast](./src/multicast.md)
+
 ## TODO List
 
 - Implement secured connections using TLS to ensure the confidentiality and integrity of the communication between clients and the server. (To be discussed as TLS potentielly add significant complexity and overhead, and may not be necessary for a simulator depending on the use case.)

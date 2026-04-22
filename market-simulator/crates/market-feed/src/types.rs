@@ -1,5 +1,7 @@
 use types::{FixedPointArithmetic, macros::SymbolId};
 
+pub const MARKET_DATA_HEADER_SIZE: usize = 24;
+
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct MarketDataHeader {
