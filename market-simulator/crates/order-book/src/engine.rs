@@ -140,7 +140,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
         if let Some(snapshot_ptr) = &self.snapshot_ptr {
             snapshot_ptr.rcu(|current| {
                 let mut next = Snapshot {
-                    timestamp: current.timestamp,
+                    timestamp_ms: current.timestamp_ms,
                     symbol: if current.symbol.is_empty() { self.order_book.symbol.clone() } else { current.symbol.clone() },
                     id: current.id,
                     order_book: snapshot::types::OrderBookSnapshot::default(),
@@ -221,7 +221,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                     }
                 }
 
-                next.timestamp = order_result.timestamp;
+                next.timestamp_ms = order_result.timestamp_ms;
                 next.id = current.id.wrapping_add(1);
 
                 Arc::new(next)
@@ -403,7 +403,7 @@ mod tests {
         initial_book.add_bid(initial_bid).unwrap();
 
         let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot {
-            timestamp: 1,
+            timestamp_ms: 1,
             symbol: SYMBOL_STR.to_string(),
             id: 1,
             order_book: initial_book,
@@ -439,7 +439,7 @@ mod tests {
             OrderResult {
                 trades,
                 status: OrderStatus::PartiallyFilled,
-                timestamp: 2,
+                timestamp_ms: 2,
                 ..Default::default()
             },
         );
@@ -467,7 +467,7 @@ mod tests {
             cancel_order,
             OrderResult {
                 status: OrderStatus::Cancelled,
-                timestamp: 3,
+                timestamp_ms: 3,
                 ..Default::default()
             },
         );
@@ -515,7 +515,7 @@ mod tests {
         initial_book.add_ask(initial_ask).unwrap();
 
         let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot {
-            timestamp: 10,
+            timestamp_ms: 10,
             symbol: SYMBOL_STR.to_string(),
             id: 10,
             order_book: initial_book,
@@ -551,7 +551,7 @@ mod tests {
             OrderResult {
                 trades,
                 status: OrderStatus::PartiallyFilled,
-                timestamp: 11,
+                timestamp_ms: 11,
                 ..Default::default()
             },
         );
@@ -579,7 +579,7 @@ mod tests {
             cancel_order,
             OrderResult {
                 status: OrderStatus::Cancelled,
-                timestamp: 12,
+                timestamp_ms: 12,
                 ..Default::default()
             },
         );
@@ -619,7 +619,7 @@ mod tests {
         }
 
         let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot {
-            timestamp: 20,
+            timestamp_ms: 20,
             symbol: SYMBOL_STR.to_string(),
             id: 20,
             order_book: initial_book,
@@ -645,7 +645,7 @@ mod tests {
             },
             OrderResult {
                 status: OrderStatus::New,
-                timestamp: 21,
+                timestamp_ms: 21,
                 ..Default::default()
             },
         );
@@ -667,7 +667,7 @@ mod tests {
             },
             OrderResult {
                 status: OrderStatus::New,
-                timestamp: 22,
+                timestamp_ms: 22,
                 ..Default::default()
             },
         );

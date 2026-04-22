@@ -22,7 +22,7 @@ impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
     pub fn run(&mut self) {
         while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(snapshot) = self.fifo_in.pop() {
-                if snapshot.timestamp == 0 {
+                if snapshot.timestamp_ms == 0 {
                     tracing::info!("[{}] Received shutdown signal, stopping SnapshotMultiCastEngine", market_name());
                     continue;
                 }

@@ -28,7 +28,7 @@ pub fn encode_snapshot(snapshot: &Snapshot) -> Vec<u8> {
     let mut bytes = Vec::new();
 
     // Encode header
-    bytes.extend_from_slice(&snapshot.timestamp.to_be_bytes());
+    bytes.extend_from_slice(&snapshot.timestamp_ms.to_be_bytes());
     bytes.extend_from_slice(&(snapshot.symbol.len() as u32).to_be_bytes());
     bytes.extend_from_slice(snapshot.symbol.as_bytes());
     bytes.extend_from_slice(&(snapshot.id as u32).to_be_bytes());
@@ -60,7 +60,7 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
     let mut snapshot = Snapshot::default();
     let mut offset = 0;
     // Parse header and order entries from bytes to populate the snapshot struct
-    snapshot.timestamp = u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    snapshot.timestamp_ms = u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap());
     offset += 8;
     let symbol_len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
     offset += 4;
@@ -90,7 +90,7 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
             symbol: SymbolId::default(),
-            timestamp: snapshot.timestamp,
+            timestamp_ms: snapshot.timestamp_ms,
         });
         let _side = bytes[offset];
         offset += 1;
@@ -115,7 +115,7 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
             symbol: SymbolId::default(),
-            timestamp: snapshot.timestamp,
+            timestamp_ms: snapshot.timestamp_ms,
         });
         let _side = bytes[offset];
         offset += 1;
@@ -144,7 +144,7 @@ mod tests {
             sender_id: EntityId::from_ascii("trader1"),
             target_id: EntityId::from_ascii("exchange"),
             symbol: SymbolId::from_ascii("TEST"),
-            timestamp: 1627846267000,
+            timestamp_ms: 1627846267000,
         };
         let order2 = OrderEvent {
             price: FixedPointArithmetic::from_f64(102.0),
@@ -156,11 +156,11 @@ mod tests {
             sender_id: EntityId::from_ascii("trader2"),
             target_id: EntityId::from_ascii("exchange"),
             symbol: SymbolId::from_ascii("TEST"),
-            timestamp: 1627846267000,
+            timestamp_ms: 1627846267000,
         };
 
         let mut snapshot = Snapshot {
-            timestamp: 1627846267000,
+            timestamp_ms: 1627846267000,
             symbol: "TEST".to_string(),
             id: 1,
             order_book: OrderBookSnapshot::default(),
@@ -174,7 +174,7 @@ mod tests {
 
         // Decode the snapshot and verify it matches the original
         let decoded = decode_snapshot(&encoded);
-        assert_eq!(decoded.timestamp, snapshot.timestamp);
+        assert_eq!(decoded.timestamp_ms, snapshot.timestamp_ms);
         assert_eq!(decoded.symbol, snapshot.symbol);
         assert_eq!(decoded.id, snapshot.id);
         assert_eq!(decoded.order_book.bids_len, snapshot.order_book.bids_len);

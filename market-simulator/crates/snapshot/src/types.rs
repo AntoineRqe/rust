@@ -70,7 +70,7 @@ impl OrderBookSnapshot {
 /// Represents a market data feed event containing the current state of the order book for a specific symbol.
 pub struct Snapshot {
     /// The timestamp of the snapshot, represented as a Unix timestamp in nanoseconds.
-    pub timestamp: u64,
+    pub timestamp_ms: u64,
     /// The symbol for which the snapshot is taken (e.g., "BTCUSD").
     pub symbol: String,
     /// A unique identifier for the snapshot, which can be used for tracking and correlation purposes.
@@ -82,7 +82,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
-            timestamp: SystemTime::now()
+            timestamp_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64,
@@ -94,9 +94,9 @@ impl Default for Snapshot {
 }
 
 impl Snapshot {
-    pub fn new(timestamp: u64, symbol: &str, id: u64, order_book: OrderBookSnapshot) -> Self {
+    pub fn new(timestamp_ms: u64, symbol: &str, id: u64, order_book: OrderBookSnapshot) -> Self {
         Self {
-            timestamp,
+            timestamp_ms,
             symbol: symbol.to_string(),
             id,
             order_book,

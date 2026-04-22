@@ -606,7 +606,7 @@ pub async fn persist_order_update(
     .bind(order_event.orig_cl_ord_id.map(|id| id.to_string()))
     .bind(order_event.sender_id.to_string())
     .bind(order_event.target_id.to_string())
-    .bind(format!("{:?}", order_event.timestamp))
+    .bind(format!("{:?}", order_event.timestamp_ms))
     .bind(format!("{}", order_event))
     .execute(&mut *tx)
     .await?;
@@ -752,7 +752,7 @@ async fn sync_pending_orders(
             .bind(order_event.orig_cl_ord_id.map(|id| id.to_string()))
             .bind(order_event.sender_id.to_string())
             .bind(order_event.target_id.to_string())
-            .bind(format!("{:?}", order_event.timestamp))
+            .bind(format!("{:?}", order_event.timestamp_ms))
             .bind(format!("{}", order_event))
             .execute(&mut **tx)
             .await?;

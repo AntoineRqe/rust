@@ -35,7 +35,7 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
 
             let mut snapshot = self.snapshot_ptr.load_full();
 
-            tracing::debug!("[{}] Snapshot sent with ID: {}, timestamp: {}", market_name(), snapshot.id, snapshot.timestamp);
+            tracing::debug!("[{}] Snapshot sent with ID: {}, timestamp: {}", market_name(), snapshot.id, snapshot.timestamp_ms);
             
             while let Err(s) = self.producer.push(snapshot) {
                 snapshot = s;
@@ -80,7 +80,7 @@ mod tests {
         };
 
         let mut snapshot = Snapshot {
-            timestamp: 1627846267000,
+            timestamp_ms: 1627846267000,
             symbol: "TEST".to_string(),
             id: 1,
             order_book: OrderBookSnapshot::default(),

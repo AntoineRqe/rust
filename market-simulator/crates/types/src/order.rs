@@ -30,7 +30,7 @@ pub struct OrderEvent {
     pub orig_cl_ord_id: Option<OrderId>, // FIX OrigClOrdID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub sender_id: EntityId, // FIX SenderCompID can be up to 20 characters, we will use a fixed-size array for simplicity
     pub target_id: EntityId, // FIX TargetCompID can be up to 20 characters, we will use a fixed-size array for simplicity
-    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+    pub timestamp_ms: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
 impl Default for OrderEvent {
@@ -45,7 +45,7 @@ impl Default for OrderEvent {
             sender_id: EntityId::default(),
             target_id: EntityId::default(),
             symbol: SymbolId::default(),
-            timestamp: SystemTime::now()
+            timestamp_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64, // current time in milliseconds
@@ -77,7 +77,7 @@ impl std::fmt::Display for OrderEvent {
             self.sender_id,
             self.target_id,
             self.symbol,
-            self.timestamp
+            self.timestamp_ms
         )
     }
 }
@@ -93,7 +93,7 @@ impl OrderEvent {
         sender_id: EntityId,
         target_id: EntityId,
         symbol: SymbolId,
-        timestamp: u64,
+        timestamp_ms: u64,
     ) -> Self {
         Self {
             price,
@@ -105,7 +105,7 @@ impl OrderEvent {
             sender_id,
             target_id,
             symbol,
-            timestamp,
+            timestamp_ms,
         }
     }
 
@@ -192,7 +192,7 @@ pub struct OrderResult {
     pub internal_order_id: u64, // Internal order ID assigned by the engine, can be used for tracking and debugging
     pub trades: Trades<4>, // Fixed-size array for trades, adjust size as needed
     pub status: OrderStatus,
-    pub timestamp: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
+    pub timestamp_ms: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
 
 impl Default for OrderResult {
@@ -201,7 +201,7 @@ impl Default for OrderResult {
             internal_order_id: 0,
             trades: Trades::new(),
             status: OrderStatus::Unmatched,
-            timestamp: SystemTime::now()
+            timestamp_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64,
@@ -216,10 +216,10 @@ impl std::fmt::Display for OrderResult {
             "\nOrderResult
             \tinternal_order_id: {}
              \tstatus: {}
-             \ttimestamp: {}",
+             \ttimestamp_ms: {}",
              self.internal_order_id,
             self.status,
-            self.timestamp
+            self.timestamp_ms
         )?;
         for i in 0..self.trades.len() {
             let trade = self.trades[i];

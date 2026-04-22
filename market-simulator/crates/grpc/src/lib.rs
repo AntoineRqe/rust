@@ -93,7 +93,7 @@ impl MarketControl for MarketControlService {
                             .unwrap_or_default(),
                         sender_id: order.sender_id.to_string(),
                         target_id: order.target_id.to_string(),
-                        timestamp: order.timestamp,
+                        timestamp: order.timestamp_ms,
                     })
                     .collect();
 

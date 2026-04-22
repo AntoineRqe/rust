@@ -120,7 +120,7 @@ fn run_latency(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
                 let ts = UtcTimestamp::now().to_unix_ns();
                 loop { if ts_tx.push(ts).is_ok() { break; } std::hint::spin_loop(); }
-                ev.timestamp = ts;
+                ev.timestamp_ms = ts;
                 loop {
                     match inbound_tx.push(ev) {
                         Ok(()) => break,

@@ -267,7 +267,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 },
                 tags::SENDING_TIME => {
                     if let Some(timestamp) = utils::UtcTimestamp::from_fix_bytes(field.value) {
-                        order_event.timestamp = timestamp.to_unix_ms();
+                        order_event.timestamp_ms = timestamp.to_unix_ms();
                     } else {
                         return Err("Invalid timestamp format"); // Invalid timestamp format
                     }
