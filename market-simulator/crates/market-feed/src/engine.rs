@@ -1,4 +1,4 @@
-use spsc::spsc_lock_free::{Consumer};
+use spsc::spsc_lock_free::{Consumer, Producer};
 use types::{
     OrderEvent,
     OrderResult,
@@ -16,6 +16,12 @@ use crate::types::{
 
 use utils::market_name;
 use types::multicast::{SourceSocket};
+
+pub fn kill_market_feed_engine<const N: usize>(ob_to_md_tx: &Producer<(OrderEvent, OrderResult), N>) {
+    ob_to_md_tx
+        .push((OrderEvent::default(), OrderResult::default()))
+        .unwrap();
+}
 
 
 pub struct MarketDataFeedEngine<'a, const N: usize> {
@@ -142,11 +148,8 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
 
 
     pub fn run(&mut self) {
-        while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
-            // If shutdown is signaled and there are no more events to process, exit the loop
+        loop {
             if let Some((order_event, order_result)) = self.fifo_in.pop() {
-                // Process incoming order events and results from the order book engine
-                // Transform the order event and result into a market data feed event
                 if let Some(market_data_feed_events) = self.build_market_data_feed_events(&order_event, &order_result) {
                     for market_data_feed_event in market_data_feed_events {
                         let bytes = market_data_feed_event.to_bytes();
@@ -155,6 +158,12 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
                     }
                 }
             }
+
+            if self.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
+            std::hint::spin_loop();
         }
 
         tracing::info!("[{}] Market Data Feed Engine shutting down", market_name());
@@ -198,7 +207,7 @@ mod tests {
     }
 
     fn retrieve_market_data_feed_events(port: u16, multicast_ip: &str) -> Result<(MarketDataHeader, MarketEvent), Box<dyn std::error::Error>> {
-        let socket = SourceSocket::create_multicast_socket(port)?;
+        let socket = SourceSocket::create_multicast_receiver_socket(port)?;
         socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
 
         let group = multicast_ip.parse::<Ipv4Addr>()?;
@@ -256,7 +265,7 @@ mod tests {
         thread::scope(|s| {
             let (producer_in, consumer_in) = rb_in.split();
 
-            let multicast_ip = "239.0.0.1";
+            let multicast_ip = "127.0.0.1";
             let port = next_test_port();
             let shutdown_signal = Arc::new(AtomicBool::new(false));
 
@@ -279,8 +288,8 @@ mod tests {
 
             let received = recv_handle.join().unwrap();
 
-            shutdown_signal.store(true, Ordering::Relaxed);
-            producer_in.push((order_event, order_result)).unwrap();
+            shutdown_signal.store(true, Ordering::Release);
+            kill_market_feed_engine(&producer_in);
 
             engine_handle.join().unwrap();
 

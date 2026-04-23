@@ -247,7 +247,7 @@ pub fn spawn_market_feed_receiver(
 
         for source in sources {
             // Attempt to bind to the port to check if it's available
-            let socket = match SourceSocket::create_multicast_socket(source.port) {
+            let socket = match SourceSocket::create_multicast_receiver_socket(source.port) {
                 Ok(socket) => socket,
                 Err(e) => {
                     tracing::warn!(

@@ -35,6 +35,15 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             }
         }
         
+        // Send kill message to FIX outbound engine to signal it to shut down gracefully
+        let mut report = FixRawMsg::<N>::default();
+        let kill_entity_id = EntityId::from_ascii("");
+
+        while let Err((_, _report)) = self.fifo_out.push((kill_entity_id, report)) {
+            report = _report;
+            std::hint::spin_loop();
+        }
+
         tracing::info!("[{}] Execution report engine shutting down gracefully", market_name());
     }
 

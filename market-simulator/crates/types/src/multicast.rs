@@ -22,11 +22,21 @@ impl SourceSocket {
 
     pub fn new(ip: &str, port: u16, market: &str) -> std::io::Result<Self> {
         let source = MulticastSource::new(ip, port, market);
-        let socket = Self::create_multicast_socket(port)?;
+        let socket = Self::create_multicast_sender_socket()?;
         Ok(Self { source, socket })
     }
 
-    pub fn create_multicast_socket(port: u16) -> std::io::Result<UdpSocket> {
+    pub fn create_multicast_sender_socket() -> std::io::Result<UdpSocket> {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        let bind_addr = std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
+        socket.bind(&bind_addr.into())?;
+        let socket: UdpSocket = socket.into();
+        socket.set_multicast_loop_v4(true)?;
+        socket.set_multicast_ttl_v4(1)?;
+        Ok(socket)
+    }
+
+    pub fn create_multicast_receiver_socket(port: u16) -> std::io::Result<UdpSocket> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
 

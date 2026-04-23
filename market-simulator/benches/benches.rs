@@ -1,15 +1,14 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use crossbeam::channel;
 use order_book::engine::OrderBookEngine;
-use market_feed::engine::MarketDataFeedEngine;
-use std::net::{Ipv4Addr, UdpSocket};
+use market_feed::engine::{kill_market_feed_engine, MarketDataFeedEngine};
+use std::net::UdpSocket;
 use std::sync::atomic::AtomicBool;
 use std::{thread};
 use std::time::Instant;
 use hdrhistogram::Histogram;
 use std::sync::OnceLock;
 
-use utils::UtcTimestamp;
 use core_affinity::CoreId;
 use std::time::Duration;
 use std::sync::Mutex;
@@ -17,7 +16,7 @@ use execution_report::{ExecutionReportEngine};
 use spsc::spsc_lock_free::RingBuffer;
 use types::{OrderEvent, OrderResult, Trades};
 use types::macros::{EntityId, OrderId, SymbolId};
-use fix::engine::{FixEngine, FixRawMsg, kill_fix_inbound_engine};
+use fix::engine::{FixEngine, FixRawMsg, kill_fix_inbound_engine, kill_fix_outbound_engine};
 use std::sync::Arc;
 
 const PRODUCER_CORE_OFFSET: usize = 0; // Offset for producer core
@@ -75,7 +74,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
     let mut rb_rx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new(); // Size of the ring buffer
     let mut rb_tx = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new(); // Size of the ring buffer
-    let mut ts_rb = RingBuffer::<u64, RB_SIZE>::new();
+    let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
     thread::scope(|s| {
         
@@ -129,7 +128,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
     
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
 
-                let send_ts = UtcTimestamp::now().to_unix_ns();
+                let send_ts = Instant::now();
 
                 loop {
                     if ts_tx.push(send_ts).is_ok() {
@@ -138,7 +137,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                     std::hint::spin_loop();
                 }
 
-                order_event.timestamp_ms = send_ts;
+                order_event.timestamp_ms = 0;
 
                 er_inbound_tx.push((order_event, order_result)).unwrap();
             }
@@ -161,7 +160,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                 std::hint::spin_loop();
             };
 
-            let latency = (UtcTimestamp::now().to_unix_ns() - send_ts) as u64;
+            let latency = send_ts.elapsed().as_nanos() as u64;
 
             histogram.record(latency).unwrap();
 
@@ -170,6 +169,8 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
         
 
         // Send a dummy message to unblock the engine if it's waiting
+        shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
+
         er_inbound_tx_clone.push((OrderEvent {
             ..Default::default()
         },
@@ -200,7 +201,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new(); // Size of the ring buffer
     let mut rb_tx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new(); // Size of the ring buffer
-    let mut ts_rb = RingBuffer::<u64, RB_SIZE>::new(); // Use u64 for nanoseconds
+    let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new(); // Use Instant for homogeneous timing
 
     thread::scope(|s| {
         
@@ -259,7 +260,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
     
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
 
-                let send_ts = UtcTimestamp::now().to_unix_ns();
+                let send_ts = Instant::now();
 
                 loop {
                     if ts_tx.push(send_ts).is_ok() {
@@ -268,7 +269,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
                     std::hint::spin_loop();
                 }
 
-                order_event.timestamp_ms = send_ts;
+                order_event.timestamp_ms = 0;
                 loop {
                     if let Err(ev_err) = er_inbound_tx.push(order_event) {
                         order_event = ev_err;
@@ -297,7 +298,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
                 std::hint::spin_loop();
             };
 
-            let latency = (UtcTimestamp::now().to_unix_ns() - send_ts) as u64;
+            let latency = send_ts.elapsed().as_nanos() as u64;
 
             histogram.record(latency).unwrap();
 
@@ -307,6 +308,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
         // Send a dummy message to unblock the engine if it's waiting
         shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
+        
         er_inbound_tx_clone.push(OrderEvent {
             sender_id: EntityId::from_ascii(""),
             ..Default::default()
@@ -320,19 +322,16 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
 fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
     let ready = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(AtomicBool::new(false));
     let producer_core = get_cores()[(PRODUCER_CORE_OFFSET) % get_cores().len()];
     let consumer_core = get_cores()[(CONSUMER_CORE_OFFSET) % get_cores().len()];
-    let engine_core   = get_cores()[(ENGINE_CORE_OFFSET)   % get_cores().len()];
+    let engine_core = get_cores()[(ENGINE_CORE_OFFSET) % get_cores().len()];
 
     if get_cores().len() < 2 {
         panic!("Need at least 2 cores available.");
     }
 
-    let iters = iters / 100; // Reduce iterations for market feed benchmark since it's more expensive
-
-    const MULTICAST_IP: &str = "239.0.0.2";
-    const PORT: u16 = 18200;
-
+    let iters = (iters / 100).max(100); // Reduce iterations for market feed benchmark, ensure at least 100
     let start = Instant::now();
 
     let mut rb_in = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
@@ -345,12 +344,17 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
         let inbound_tx = Arc::new(inbound_tx);
         let inbound_tx_clone = Arc::clone(&inbound_tx);
 
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let recv_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        recv_socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let recv_port = recv_socket.local_addr().unwrap().port();
+
         let mut engine = MarketDataFeedEngine::new(
             inbound_rx,
             Arc::clone(&shutdown),
-            MULTICAST_IP,
-            PORT,
+            "127.0.0.1",
+            recv_port,
         )
         .unwrap();
 
@@ -381,7 +385,7 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
                 internal_order_id: 0,
                 trades: Trades::<4>::default(),
                 status: types::OrderStatus::New,
-                ..Default::default() // Current timestamp in milliseconds since epoch
+                ..Default::default()
             };
 
             for i in 0..iters {
@@ -401,61 +405,38 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
                     std::hint::spin_loop();
                 }
 
-                loop {
-                    if inbound_tx.push((order_event, order_result)).is_ok() {
-                        break;
-                    }
+                while let Err(_) = inbound_tx.push((order_event, order_result)) {
                     std::hint::spin_loop();
                 }
             }
         });
 
-        // Consumer: listen on the multicast UDP socket and measure latency
         core_affinity::set_for_current(consumer_core);
 
-        let recv_socket = UdpSocket::bind(format!("0.0.0.0:{}", PORT)).unwrap();
-        recv_socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        recv_socket
-            .join_multicast_v4(
-                &MULTICAST_IP.parse::<Ipv4Addr>().unwrap(),
-                &"0.0.0.0".parse::<Ipv4Addr>().unwrap(),
-            )
-            .unwrap();
-
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 2048];
 
         for _ in 0..iters {
             let send_ts = loop {
-                if let Some(ts) = ts_rx.try_pop() {
+                if let Some(ts) = ts_rx.pop() {
                     break ts;
                 }
                 std::hint::spin_loop();
             };
 
-            recv_socket.recv_from(&mut buf).unwrap();
+            let _ = recv_socket
+                .recv_from(&mut buf)
+                .expect("Expected market data UDP packet");
 
             let latency = send_ts.elapsed().as_nanos() as u64;
             histogram.record(latency).unwrap();
+
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
 
-        // Send shutdown sentinel to unblock the engine
-        inbound_tx_clone
-            .push((
-                OrderEvent {
-                    sender_id: EntityId::from_ascii(""),
-                    ..Default::default()
-                },
-                OrderResult {
-                    internal_order_id: 0,
-                    trades: Trades::<4>::default(),
-                    status: types::OrderStatus::New,
-                    ..Default::default()
-                },
-            ))
-            .unwrap();
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed); // Signal the engine to shut down gracefully
+        std::thread::sleep(Duration::from_millis(100)); // Give the engine some time to shut down gracefully before sending the kill signal
+
+        kill_market_feed_engine(&inbound_tx_clone);
 
         engine_handle.join().unwrap();
     });
@@ -463,7 +444,7 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
     start.elapsed()
 }
 
-fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
+fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
     let ready = Arc::new(AtomicBool::new(false));
     let shutdown = Arc::new(AtomicBool::new(false));
     let producer_core = get_cores()[(PRODUCER_CORE_OFFSET) % get_cores().len()];
@@ -471,7 +452,7 @@ fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration
     let engine_core = get_cores()[(ENGINE_CORE_OFFSET) % get_cores().len()];
 
     let cores = get_cores();
-    let iters = iters / 10; // Reduce iterations for FIX benchmark since it's more expensive
+    let iters = (iters / 10).max(100); // Reduce iterations for FIX benchmark, ensure at least 100
     
     if cores.len() < 2 {
         panic!("Need at least 2 cores available.");
@@ -479,13 +460,13 @@ fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration
          
     let start = Instant::now();
 
-    let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new(); // Size of the ring buffer
-    let mut rb_tx = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new(); // Size of the ring buffer
+    let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
+    let mut rb_tx = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
  
     thread::scope(|s| {
         
-        let (er_inbound_tx, er_rx) = rb_rx.split();
+        let (fix_inbound_tx, fix_inbound_rx) = rb_rx.split();
         let (_, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
         let (net_to_fix_tx, net_to_fix_rx) = channel::bounded::<FixRawMsg<RB_SIZE>>(RB_SIZE);
@@ -494,7 +475,11 @@ fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         let net_to_fix_tx = Arc::new(net_to_fix_tx);
         let net_to_fix_tx_clone = Arc::clone(&net_to_fix_tx);
 
-        let engine = FixEngine::new(net_to_fix_rx, er_inbound_tx, er_outbound_rx, Arc::clone(&shutdown));
+        let engine = FixEngine::new(
+            net_to_fix_rx,
+            fix_inbound_tx,
+            er_outbound_rx,
+            Arc::clone(&shutdown));
 
         let (mut inbound_engine, _) = engine.split();
 
@@ -543,7 +528,7 @@ fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 
         for _ in 0..iters {
             let send_ts = ts_rx.pop().unwrap();
-            er_rx.pop().unwrap();
+            fix_inbound_rx.pop().unwrap();
 
             let latency = send_ts.elapsed().as_nanos() as u64;
 
@@ -559,9 +544,139 @@ fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration
             resp_queue: None,
         };
     
+        shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
         net_to_fix_tx_clone.send(dummy_msg).unwrap(); // Send a dummy message to unblock the engine if it's waiting
 
         handle.join().unwrap();
+    });
+
+    start.elapsed()
+}
+
+fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
+    use tokio::sync::mpsc;
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let producer_core = get_cores()[(PRODUCER_CORE_OFFSET) % get_cores().len()];
+    let consumer_core = get_cores()[(CONSUMER_CORE_OFFSET) % get_cores().len()];
+    let engine_core = get_cores()[(ENGINE_CORE_OFFSET) % get_cores().len()];
+
+    if get_cores().len() < 2 {
+        panic!("Need at least 2 cores available.");
+    }
+
+    let iters = (iters / 10).max(100); // Reduce iterations for FIX outbound benchmark, ensure at least 100
+    let start = Instant::now();
+
+    let (net_to_fix_tx, net_to_fix_rx) = channel::bounded::<FixRawMsg<RB_SIZE>>(RB_SIZE);
+    let net_to_fix_rx = Arc::new(net_to_fix_rx);
+    let net_to_fix_tx = Arc::new(net_to_fix_tx);
+    let net_to_fix_tx_clone = Arc::clone(&net_to_fix_tx);
+
+    let mut fix_to_ob = RingBuffer::<OrderEvent, RB_SIZE>::new();
+    let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
+    let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
+
+    let (response_tx, mut response_rx) = mpsc::channel::<FixRawMsg<RB_SIZE>>(1024);
+
+    thread::scope(|s| {
+        let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
+        let (er_to_fix_tx, er_to_fix_rx) = er_to_fix.split();
+        let (ts_tx, ts_rx) = ts_rb.split();
+
+        let er_to_fix_tx = Arc::new(er_to_fix_tx);
+        let er_to_fix_tx_clone = Arc::clone(&er_to_fix_tx);
+
+        let engine = FixEngine::new(
+            Arc::clone(&net_to_fix_rx),
+            fix_to_ob_tx,
+            er_to_fix_rx,
+            Arc::clone(&shutdown),
+        );
+
+        let (mut inbound_engine, mut outbound_engine) = engine.split();
+
+        let inbound_handle = s.spawn(move || {
+            core_affinity::set_for_current(core_affinity::CoreId { id: engine_core.id });
+            inbound_engine.run();
+        });
+
+        let outbound_handle = s.spawn(move || {
+            core_affinity::set_for_current(core_affinity::CoreId { id: (engine_core.id + 1) % get_cores().len() });
+            outbound_engine.run();
+        });
+
+        // Prime pending routes in outbound engine by sending one inbound FIX message with response queue.
+        let setup_message = b"8=FIX.4.4\x019=0000\x0135=D\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0111=12345\x0154=1\x0138=1000000\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
+        let setup_raw = FixRawMsg {
+            len: setup_message.len() as u16,
+            data: {
+                let mut data = [0u8; 2048];
+                data[..setup_message.len()].copy_from_slice(setup_message);
+                data
+            },
+            resp_queue: Some(response_tx.clone()),
+        };
+
+        net_to_fix_tx.send(setup_raw).unwrap();
+        let _ = fix_to_ob_rx.pop().unwrap(); // ensure inbound processed and pending route is registered
+
+        let ready_prod = Arc::clone(&ready);
+
+        s.spawn(move || {
+            core_affinity::set_for_current(producer_core);
+
+            let response_msg = FixRawMsg {
+                len: 5,
+                data: {
+                    let mut data = [0u8; 2048];
+                    data[..5].copy_from_slice(b"8=FIX");
+                    data
+                },
+                resp_queue: None,
+            };
+
+            for i in 0..iters {
+                if i > 0 {
+                    while !ready_prod.load(std::sync::atomic::Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                }
+
+                ready_prod.store(false, std::sync::atomic::Ordering::Release);
+
+                let send_ts = Instant::now();
+                while let Err(_) = ts_tx.push(send_ts) {
+                    std::hint::spin_loop();
+                }
+
+                while let Err(_) = er_to_fix_tx.push((EntityId::from_ascii("SENDER"), response_msg.clone())) {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+
+        core_affinity::set_for_current(consumer_core);
+
+        for _ in 0..iters {
+            let send_ts = ts_rx.pop().unwrap();
+            let _ = response_rx
+                .blocking_recv()
+                .expect("Expected outbound FIX response in benchmark");
+
+            let latency = send_ts.elapsed().as_nanos() as u64;
+            histogram.record(latency).unwrap();
+
+            ready.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        shutdown.store(true, std::sync::atomic::Ordering::Release);
+        kill_fix_inbound_engine(&net_to_fix_tx_clone);
+        kill_fix_outbound_engine(&er_to_fix_tx_clone);
+
+        inbound_handle.join().unwrap();
+        outbound_handle.join().unwrap();
     });
 
     start.elapsed()
@@ -581,10 +696,10 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         panic!("Need at least 2 cores available.");
     }
 
-    let iters = iters / 4000; // Reduce iterations for overall benchmark since it's more expensive
+    let iters = (iters / 1).max(100); // Run at full rate like ER/OB to get better stats
     let start = Instant::now();
 
-    // inbound: network → fix engine → order book -> exection report
+    // inbound: network → fix engine → order book -> execution report
     let (net_to_fix_tx, net_to_fix_rx) = channel::bounded::<FixRawMsg<RB_SIZE>>(RB_SIZE);
     let net_to_fix_rx = Arc::new(net_to_fix_rx);
     let net_to_fix_tx = Arc::new(net_to_fix_tx);
@@ -661,11 +776,10 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
                     data[..fix_message.len()].copy_from_slice(fix_message);
                     data
                 },
-                resp_queue: Some(response_tx.clone()), // Not using the response queue in this test, but could be set here if needed for future tests
+                resp_queue: Some(response_tx.clone()),
             };
         
             for i in 0..iters {
-                let tmp_raw_msg = raw_msg.clone(); // Create a mutable copy for this iteration
 
                 if i > 0 {
                     // Wait for consumer to be ready before sending next message
@@ -676,10 +790,15 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
     
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
 
+                let mut tmp_raw_msg = raw_msg.clone(); // Clone the message for this iteration
                 let send_ts = Instant::now();
 
                 ts_tx.push(send_ts).unwrap();
-                net_to_fix_tx_clone.send(tmp_raw_msg).unwrap();
+
+                while let Err(_) = net_to_fix_tx_clone.send(tmp_raw_msg) {
+                    tmp_raw_msg = raw_msg.clone(); // Clone again if the previous one was consumed while we were trying to send
+                    std::hint::spin_loop();
+                }
             }
         });
 
@@ -687,16 +806,21 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 
         for _ in 0..iters {
             let send_ts = ts_rx.pop().unwrap();
-            let _ = response_rx.recv();
+            
+            let _ = response_rx
+                .blocking_recv()
+                .expect("Expected FIX response in overall benchmark");
     
             let latency = send_ts.elapsed().as_nanos() as u64;
-
             histogram.record(latency).unwrap();
 
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
 
         // Stop all engines
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed); // Signal the engine to shut down gracefully
+        
+        std::thread::sleep(std::time::Duration::from_millis(100)); // Give engines a moment to shut down gracefully before forcefully killing the FIX inbound engine thread, which may be blocked on receiving from the channel
         kill_fix_inbound_engine(&net_to_fix_tx);
 
         ob_handle.join().unwrap();
@@ -709,12 +833,13 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 }
 
 fn benchmark_latency(c: &mut Criterion) {
-    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 1] = &[
-        // ("Execution Report", benchmark_latency_execution_report),
+    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 6] = &[
+        ("Execution Report", benchmark_latency_execution_report),
         ("Order Book", benchmark_latency_order_book),
-        // ("FIX Engine", benchmark_latency_fix),
-        // ("Market Feed", benchmark_latency_market_feed),
-        // ("Overall", benchmark_latency_all),
+        ("FIX Inbound", benchmark_latency_fix_inbound),
+        ("FIX Outbound", benchmark_latency_fix_outbound),
+        ("Market Feed", benchmark_latency_market_feed),
+        ("Overall", benchmark_latency_all),
     ];
 
     for (name, func) in functions {

@@ -157,50 +157,61 @@ pub struct FixInboundEngine<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> FixInboundEngine<'a, N> {
-        // blocking check for new inbound FIX messages, if there is a message, parse it and push the corresponding order event to the order book queue. In a real implementation, you would want to have more robust error handling and also handle different message types and fields.
+        // Blocking wait for new inbound FIX messages. Shutdown is signaled via a
+        // sentinel message (len == 0) or by disconnecting the input channel.
     pub fn run(&mut self) {
-        while !self.shared.shutdown.load(Ordering::Relaxed) || !self.request_in.is_empty() {
-            if let Some(mut msg) = self.request_in.recv().ok() {
-                tracing::debug!("[{}] Received message from network layer, parsing FIX message...", market_name());
-                let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
+        loop {
+            let mut msg = match self.request_in.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            };
 
-                let order_event = match self.build_order(msg) {
-                    Ok(event) => event,
-                    Err(e) => {
-                        tracing::error!("[{}] Failed to parse FIX message: {}, skipping", market_name(), e);
-                        continue; // Skip malformed messages
-                    }
-                };
+            if msg.len == 0 {
+                tracing::info!("[{}] Inbound FIX engine received shutdown sentinel", market_name());
+                break;
+            }
 
-                // Check validity of the parsed order event before pushing to the order book queue, this is important to avoid processing invalid events downstream
-                match order_event.check_valid() {
-                    Ok(_) => {},
-                    Err(e) => {
-                        tracing::error!("[{}] Invalid order event parsed: {}, skipping", market_name(), e);
-                        continue; // Skip invalid events
-                    }
+            let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
+
+            let order_event = match self.build_order(msg) {
+                Ok(event) => event,
+                Err(e) => {
+                    tracing::error!("[{}] Failed to parse FIX message: {}, skipping", market_name(), e);
+                    continue; // Skip malformed messages
                 }
+            };
 
-                self.counter += 1;
-
-                // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
-                if let Some(resp_queue) = resp_queue {
-                    self.shared.update_pending(order_event.sender_id, resp_queue);
+            // Check validity of the parsed order event before pushing to the order book queue, this is important to avoid processing invalid events downstream
+            match order_event.check_valid() {
+                Ok(_) => {},
+                Err(e) => {
+                    tracing::error!("[{}] Invalid order event parsed: {}, skipping", market_name(), e);
+                    continue; // Skip invalid events
                 }
-                
-                // Push the structured order event to the order book queue.
-                match self.request_out.push(order_event) {
-                    Ok(_) => {
-                        tracing::debug!("[{}] Parsed order event pushed to order book queue successfully", market_name());
-                        self.counter += 1;
-                    },
-                    Err(e) => {
-                        tracing::error!("[{}] Failed to push order event to order book queue: {}, skipping", market_name(), e);
-                        continue; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
-                    }
+            }
+
+            self.counter += 1;
+
+            // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
+            if let Some(resp_queue) = resp_queue {
+                self.shared.update_pending(order_event.sender_id, resp_queue);
+            }
+
+            // Push the structured order event to the order book queue.
+            match self.request_out.push(order_event) {
+                Ok(_) => {
+                    tracing::debug!("[{}] Parsed order event pushed to order book queue successfully", market_name());
+                    self.counter += 1;
+                },
+                Err(e) => {
+                    tracing::error!("[{}] Failed to push order event to order book queue: {}, skipping", market_name(), e);
+                    continue; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
                 }
             }
         }
+
+        // Propagate kill signal to order book engine by setting the shutdown flag, which the order book engine checks to know when to exit gracefully.
+        self.request_out.push(OrderEvent::default()).unwrap(); // Send a final order event with default values to unblock any subscribers that may be waiting for order events, such as the order book engine, allowing them to check the shutdown flag and exit gracefully.
 
         tracing::info!("[{}] Inbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
     }
@@ -291,20 +302,33 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
     pub fn run(&mut self) {
         let mut sweep_ticks = 0usize;
 
-        while !self.shared.shutdown.load(Ordering::Relaxed) || !self.response_in.is_empty() {
-            if let Some((key, _response)) = self.response_in.pop() {
+        loop {
+            if let Some((key, response)) = self.response_in.pop() {
+                if key == EntityId::from_ascii("") {
+                    tracing::info!("[{}] Outbound FIX engine received shutdown sentinel", market_name());
+                    break;
+                }
+
                 if let Some(resp_queue) = self.shared.get_pending(&key) {
-                    match resp_queue.try_send(_response) {
-                        Ok(_) => {self.counter += 1;},
+                    match resp_queue.try_send(response) {
+                        Ok(_) => {
+                            self.counter += 1;
+                        }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                             self.shared.remove_pending(&key);
                             tracing::warn!("[{}] Client response channel closed, removing pending route", market_name());
-                        },
+                        }
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             tracing::error!("[{}] Client response channel full, dropping response", market_name());
-                        },
+                        }
                     }
                 }
+            } else {
+                if self.shared.shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                std::hint::spin_loop();
+                continue;
             }
 
             // Periodically prune closed pending response queues to prevent memory leaks from clients that have disconnected without properly cleaning up their pending routes.

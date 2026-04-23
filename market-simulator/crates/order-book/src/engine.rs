@@ -296,7 +296,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 self.fan_out_execution_report(event, result);
 
                 // Update the snapshot with the latest state of the order book after processing the order
-                // TODO : Just send execution reports to the snapshot engine and let it update the snapshot instead of doing it in the hot path of processing orders in the order book engine.
+                // TODO : Just send execution reports to the snapshot engine and let it update the snapshot instead of doing it in the hot path of processing orders in the order book engine. Already done in database persistance.
                 if self.snapshot_ptr.is_some() {
                     self.incremental_update(event, result);
                 }
@@ -304,6 +304,8 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 
             if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
                 tracing::info!("[{}][{}] Shutdown signal received, stopping order book engine", market_name(), self.order_book.symbol);
+                // Propagate shutdown signal to snapshot generation engine by setting the shutdown flag, which both engines check to know when to exit gracefully.
+                self.fan_out_execution_report(OrderEvent::default(), OrderResult::default()); // Send a final execution report with default values to unblock any subscribers that may be waiting for execution reports, such as the snapshot generation engine, allowing them to check the shutdown flag and exit gracefully.
                 break;
             }
         }
