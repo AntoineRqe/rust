@@ -17,6 +17,8 @@ use types::{
 use utils::market_name;
 
 
+/// Represents a reference to an order in the order book, including its side (buy or sell), price, and position in the order queue at the given price level.
+/// This struct is used to efficiently track orders for cancellation and modification purposes, allowing for quick access to the order's location in the order book without needing to search through the entire book.
 #[derive(Debug)]
 struct OrderRef {
     side: Side,
@@ -38,12 +40,18 @@ impl OrderRef {
 /// - `trade_id_counter`: A counter used to generate unique trade IDs for matched orders.
 #[derive(Debug)]
 pub struct OrderBook {
+    /// Bids are stored in a BTreeMap where the key is the price and the value is a queue of orders at that price level. The BTreeMap allows us to efficiently access the best bid (highest price) and maintain the orders in price levels.
     pub bids: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
+    /// Asks are stored in a BTreeMap where the key is the price and the value is a queue of orders at that price level. The BTreeMap allows us to efficiently access the best ask (lowest price) and maintain the orders in price levels.
     pub asks: BTreeMap<FixedPointArithmetic, VecDeque<OrderEvent>>,
-    pub(crate) internal_id_counter: u64, // Counter for generating unique internal order IDs
-    trade_id_counter: u64, // Counter for generating unique trade IDs
-    order_map: HashMap<OrderId, OrderRef>, // Map to track orders by their ID for efficient cancellation
-    pub(crate) symbol: String, // The symbol for this order book, can be set from environment variable or constructor parameter if needed
+    /// Internal counter for generating unique order IDs for incoming orders. This is used to assign an internal order ID to each order as it is processed, which can be useful for tracking and referencing orders within the order book.
+    pub(crate) internal_id_counter: u64,
+    /// Counter for generating unique trade IDs for matched orders. Each time a trade is executed, a new trade ID is generated using this counter to ensure that each trade can be uniquely identified and tracked.
+    pub(crate) trade_id_counter: u64,
+    /// Map to track orders by their ID for efficient cancellation and modification.
+    order_map: HashMap<OrderId, OrderRef>,
+    /// The symbol for this order book.
+    pub(crate) symbol: String,
 }
 
 impl std::fmt::Display for OrderBook {
@@ -98,6 +106,11 @@ impl OrderBook {
         }
     }
 
+    /// Processes a limit order by matching it against existing orders in the order book based on its side (buy or sell). For buy limit orders, it matches against the best available asks, and for sell limit orders, it matches against the best available bids. If the order is not fully filled after matching, it is added to the appropriate side of the order book (bids for buy orders and asks for sell orders) for future matching.
+    /// Arguments:
+    /// - `order`: The incoming limit order to be processed, containing details such as price, quantity, side, order ID, and broker ID.
+    /// Returns:
+    /// - An `OrderResult` containing the details of the processed order, including any trade ID and status. The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
     fn process_limit_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         match order.side {
             Side::Buy => {
@@ -111,6 +124,11 @@ impl OrderBook {
         }
     }
 
+    /// Processes a market order by treating it as a limit order with an infinitely high price for buy orders or an infinitely low price for sell orders. This ensures that market orders will match with the best available prices in the order book. The function then calls the appropriate processing function for limit orders to handle the matching and execution of the market order.
+    /// Arguments:
+    /// - `order`: The incoming market order to be processed, containing details such as price, quantity, side, order ID, and broker ID.
+    /// Returns:
+    /// - An `OrderResult` containing the details of the processed order, including any trade ID and status. The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
     fn process_market_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         match order.side {
             Side::Buy => {
@@ -124,6 +142,11 @@ impl OrderBook {
         }
     }
 
+    /// Processes a cancel order by looking up the original order using the `orig_cl_ord_id` and removing it from the order book if it exists. The function checks for the validity of the cancel order, including the presence of the original client order ID and the existence of the original order in the order book. If the cancellation is successful, it returns an `OrderResult` with a status of `Cancelled`. If the cancellation fails (e.g., due to missing original client order ID or order not found), it returns an `OrderResult` with a status of `CancelRejected`.
+    /// Arguments:
+    /// - `order`: The incoming cancel order to be processed, containing details such as the original client order ID, order ID, and broker ID.
+    /// Returns:
+    /// - An `OrderResult` containing the details of the processed cancel order, including any trade ID and status. The status is determined based on the success or failure of the cancellation.
     fn process_cancel_order(&mut self, order: OrderEvent) -> (OrderEvent, OrderResult) {
         let orig_cl_ord_id = if let Some(orig_cl_ord_id) = order.orig_cl_ord_id {
             orig_cl_ord_id
@@ -173,9 +196,8 @@ impl OrderBook {
 
                             tracing::debug!("[{}][{}][{}] Cancelled order with ID: {}, side: {:?}, price: {}, position: {}", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id, order_ref.side, order_ref.price, index);
 
-                            if let Some(_) = self.order_map.remove(&orig_cl_ord_id) {
-                                // Remove the order from the map after cancellation
-                            } else {
+                            // !!! Remove the cancelled order from the order map
+                            if self.order_map.remove(&orig_cl_ord_id).is_none() {
                                 tracing::error!("[{}][{}][{}] Failed to remove order with ID: {} from order map after cancellation, order not found", market_name(), order.symbol, order.cl_ord_id, orig_cl_ord_id);
                             }
 
@@ -208,6 +230,11 @@ impl OrderBook {
 
     /// Generates an `OrderResult` based on the processed order, including trade ID and status.
     /// The trade ID is generated if the order was partially or fully filled, and the status is determined based on the remaining quantity of the order.
+    /// Arguments:
+    /// - `order`: The order that was processed, containing details such as price, quantity, side, order ID, and broker ID.
+    /// - `trades`: The trades that were executed as a result of processing the order, which may include multiple trades if the order was matched against multiple existing orders in the order book.
+    /// Returns:
+    /// - An `OrderResult` containing the details of the processed order, including any trade ID and status. The status is determined based on the remaining quantity of the order after processing.
     fn generate_order_result(&mut self, order: OrderEvent, trades: Trades<4>) -> (OrderEvent, OrderResult) {                        
         let order_result = OrderResult {
             trades,
@@ -218,6 +245,10 @@ impl OrderBook {
         (order, order_result)
     }
 
+    /// Adds an order to the order map for efficient tracking and future cancellation or modification.
+    /// The function calculates the position of the order in the order queue at its price level and stores this information in the `OrderRef` struct, which is then inserted into the `order_map` using the order's client order ID as the key.
+    /// Arguments:
+    /// - `order`: The order to be added to the order map, containing details such as price, quantity, side, order ID, and broker ID.
     fn add_order_to_map(&mut self, order: &OrderEvent) {
         let position = match order.side {
             Side::Buy => self.bids.get(&order.price).map_or(0, |queue| queue.len()),
@@ -291,9 +322,9 @@ impl OrderBook {
             self.add_order_to_map(&order);
 
             self.asks
-            .entry(order.price)
-            .or_insert_with(VecDeque::new)
-            .push_back(order);
+                .entry(order.price)
+                .or_insert_with(VecDeque::new)
+                .push_back(order);
 
             // Add the order to the order map for potential future cancellation
         }

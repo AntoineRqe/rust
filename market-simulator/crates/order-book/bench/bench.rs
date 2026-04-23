@@ -95,7 +95,9 @@ fn run_latency(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
             inbound_rx,
-             [Some(outbound_tx), None, None],
+             Some(outbound_tx),
+              None,
+               None,
             control_rx.1,
             order_book,
             None, // No snapshot producer for this benchmark
@@ -181,7 +183,10 @@ fn run_throughput(iters: u64) -> Duration {
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut engine = OrderBookEngine::new(
-            inbound_rx, [Some(outbound_tx), None, None],
+            inbound_rx,
+            Some(outbound_tx),
+            None,
+            None,
             control_rx.1, order_book, None, Arc::clone(&shutdown),
         );
 

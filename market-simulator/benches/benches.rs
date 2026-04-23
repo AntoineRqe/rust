@@ -19,7 +19,6 @@ use types::{OrderEvent, OrderResult, Trades};
 use types::macros::{EntityId, OrderId, SymbolId};
 use fix::engine::{FixEngine, FixRawMsg, kill_fix_inbound_engine};
 use std::sync::Arc;
-use std::sync::RwLock;
 
 const PRODUCER_CORE_OFFSET: usize = 0; // Offset for producer core
 const CONSUMER_CORE_OFFSET: usize = 2; // Offset for consumer core
@@ -139,7 +138,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                     std::hint::spin_loop();
                 }
 
-                order_event.timestamp = send_ts;
+                order_event.timestamp_ms = send_ts;
 
                 er_inbound_tx.push((order_event, order_result)).unwrap();
             }
@@ -213,9 +212,18 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
 
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
-        let order_book = Arc::new(RwLock::new(order_book::book::OrderBook::new("TEST".into())));
+        let order_book = order_book::book::OrderBook::new("TEST".into());
 
-        let mut engine = OrderBookEngine::new(er_rx, [Some(er_tx), None, None], control_rx.1, order_book, Arc::clone(&shutdown));
+        let mut engine = OrderBookEngine::new(
+            er_rx,
+            Some(er_tx),
+            None,
+            None,
+            control_rx.1,
+            order_book,
+            None,
+            Arc::clone(&shutdown)
+        );
 
         let handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
@@ -260,7 +268,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
                     std::hint::spin_loop();
                 }
 
-                order_event.timestamp = send_ts;
+                order_event.timestamp_ms = send_ts;
                 loop {
                     if let Err(ev_err) = er_inbound_tx.push(order_event) {
                         order_event = ev_err;
@@ -298,6 +306,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
 
         // Send a dummy message to unblock the engine if it's waiting
+        shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
         er_inbound_tx_clone.push(OrderEvent {
             sender_id: EntityId::from_ascii(""),
             ..Default::default()
@@ -559,6 +568,8 @@ fn benchmark_latency_fix(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 }
 
 fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
+    use tokio::sync::mpsc;
+
     let ready = Arc::new(AtomicBool::new(false));
     let shutdown = Arc::new(AtomicBool::new(false));
     let producer_core = get_cores()[(PRODUCER_CORE_OFFSET) % get_cores().len()];
@@ -583,7 +594,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 
     // outbound: execution report → fix engine → network
     let mut er_to_fix     = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
-    let (response_tx, response_rx) = crossbeam::channel::unbounded();
+    let (response_tx, mut response_rx) = mpsc::channel::<FixRawMsg<RB_SIZE>>(1024); // Channel for receiving responses from the FIX engine, if needed for future tests
 
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
@@ -605,8 +616,18 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         });
 
         // Book engine thread
-        let order_book = Arc::new(RwLock::new(order_book::book::OrderBook::new("TEST".into())));
-        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(ob_rx, [Some(ob_tx), None, None], control_rx.1, Arc::clone(&order_book), Arc::clone(&shutdown));
+        let order_book = order_book::book::OrderBook::new("TEST".into());
+        let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(
+            ob_rx,
+             Some(ob_tx),
+             None,
+             None,
+             control_rx.1,
+             order_book,
+             None,
+              Arc::clone(&shutdown)
+        );
+
         let ob_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 6 });
             order_book_engine.run();
@@ -688,12 +709,12 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 }
 
 fn benchmark_latency(c: &mut Criterion) {
-    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 5] = &[
-        ("Execution Report", benchmark_latency_execution_report),
+    let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 1] = &[
+        // ("Execution Report", benchmark_latency_execution_report),
         ("Order Book", benchmark_latency_order_book),
-        ("FIX Engine", benchmark_latency_fix),
-        ("Market Feed", benchmark_latency_market_feed),
-        ("Overall", benchmark_latency_all),
+        // ("FIX Engine", benchmark_latency_fix),
+        // ("Market Feed", benchmark_latency_market_feed),
+        // ("Overall", benchmark_latency_all),
     ];
 
     for (name, func) in functions {

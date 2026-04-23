@@ -4,10 +4,17 @@ use snapshot::types::{Snapshot};
 use utils::market_name;
 use arc_swap::ArcSwap;
 
+/// Snapshot generation engine that runs in a separate thread and periodically sends snapshots of the order book to the output queue.
+/// It uses an `ArcSwap` to hold the latest snapshot, allowing for efficient updates without blocking the snapshot generation thread.
+/// The engine checks for a shutdown signal to gracefully exit when requested.
 pub struct SnapshotGenerationEngine<'a, const N: usize> {
+    /// Producer for sending snapshots to the output queue.
     producer: Producer<'a, Arc<Snapshot>, N>,
+    /// Atomic boolean flag to signal shutdown of the snapshot generation engine.
     shutdown: Arc<AtomicBool>,
+    /// ArcSwap holding the latest snapshot of the order book, allowing for efficient updates and reads without blocking.
     snapshot_ptr: Arc<ArcSwap<Snapshot>>,
+    /// Interval in milliseconds between snapshot generations, allowing for configurable snapshot frequency.
     interval_ms: u64,
 }
 

@@ -25,19 +25,35 @@ pub enum OrderBookControl {
     Reset,
 }
 
+pub struct OrderBookSubscriber<'a, const N: usize> {
+    pub execution_report: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
+    pub market_data: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
+    pub database_persistence: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
+}
+/// Order book engine that processes incoming order events, updates the order book state, generates execution reports, and produces incremental snapshots of the order book for consumption by other components.
+/// The engine runs in a loop, processing control messages and incoming orders, and updates the snapshot after each order is processed.
+/// It also checks for a shutdown signal to gracefully exit when requested.
 pub struct OrderBookEngine<'a, const N: usize> {
+    /// Consumer for receiving incoming order events from the input queue.
     fifo_in: Consumer<'a, OrderEvent, N>,
-    fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
+    /// Array of optional producers for sending execution reports to multiple output queues. Each producer corresponds to a different consumer that may be interested in receiving execution reports.
+    subscribers: OrderBookSubscriber<'a, N>,
+    /// Receiver for control messages to manage the order book engine, such as resetting the order book.
     control_rx: crossbeam_channel::Receiver<OrderBookControl>,
+    /// The order book instance that maintains the state of buy and sell orders.
     order_book: OrderBook,
+    /// Optional ArcSwap holding the latest snapshot of the order book, allowing for efficient updates and reads without blocking. If this is None, snapshot generation is disabled.
     snapshot_ptr: Option<Arc<ArcSwap<Snapshot>>>,
+    /// Atomic boolean flag to signal shutdown of the order book engine. When set to true, the engine will stop processing new orders and exit gracefully after processing any remaining orders in the input queue.
     shutdown: Arc<AtomicBool>,
 }
 
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
     pub fn new(
         fifo_in: Consumer<'a, OrderEvent, N>,
-        fifo_out: [Option<Producer<'a, (OrderEvent, OrderResult), N>>; 3],
+        execution_report_producer: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
+        market_data_producer: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
+        database_persistence_producer: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
         order_book: OrderBook,
         snapshot_ptr: Option<Arc<ArcSwap<Snapshot>>>,
@@ -45,7 +61,11 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     ) -> Self {
         OrderBookEngine {
             fifo_in,
-            fifo_out,
+            subscribers: OrderBookSubscriber {
+                execution_report: execution_report_producer,
+                market_data: market_data_producer,
+                database_persistence: database_persistence_producer,
+            },
             control_rx,
             order_book,
             snapshot_ptr,
@@ -53,6 +73,8 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
         }
     }
 
+    /// Imports a batch of order events into the order book engine, processing each order and updating the snapshot after each order is processed.
+    /// This function is used to restored order book state from a database or other persistent storage after a reset or during initialization.
     pub fn import_order_book(&mut self, orders: Vec<OrderEvent>) {
         for order in orders {
             let (order_event, order_result) = self.order_book.process_order(order);
@@ -135,14 +157,15 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     /// Arguments:
     /// - `event`: The order event that was processed
     /// - `order_result`: The result of processing the order event, containing information about executed trades and the timestamp of the event
-    pub fn incremental_update(&mut self, event: OrderEvent, order_result: OrderResult) {
+    /// - `snapshot_id`: The ID to assign to the updated snapshot, it matches the internal ID counter of the order book to ensure that snapshots are ordered correctly based on the sequence of processed orders
+    fn incremental_update(&mut self, event: OrderEvent, order_result: OrderResult) {
 
         if let Some(snapshot_ptr) = &self.snapshot_ptr {
             snapshot_ptr.rcu(|current| {
                 let mut next = Snapshot {
                     timestamp_ms: current.timestamp_ms,
                     symbol: if current.symbol.is_empty() { self.order_book.symbol.clone() } else { current.symbol.clone() },
-                    id: current.id,
+                    id: order_result.internal_order_id, // Use the internal order ID as the snapshot ID to ensure correct ordering of snapshots based on processed orders
                     order_book: snapshot::types::OrderBookSnapshot::default(),
                 };
 
@@ -222,13 +245,37 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 }
 
                 next.timestamp_ms = order_result.timestamp_ms;
-                next.id = current.id.wrapping_add(1);
 
                 Arc::new(next)
             });
         }
     }
 
+    fn fan_out_execution_report(&mut self, event: OrderEvent, result: OrderResult) {
+        let mut execution_report_input = (event, result);
+
+        if let Some(producer) = &mut self.subscribers.execution_report {
+            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
+                execution_report_input = (event_er, result_er);
+                std::hint::spin_loop(); // If the output queue is full, spin until there is space
+            }
+        }
+
+        if let Some(producer) = &mut self.subscribers.market_data {
+            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
+                execution_report_input = (event_er, result_er);
+                std::hint::spin_loop(); // If the output queue is full, spin until there is space
+            }
+        }
+
+        if let Some(producer) = &mut self.subscribers.database_persistence {
+            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
+                execution_report_input = (event_er, result_er);
+                std::hint::spin_loop(); // If the output queue is full, spin until there is space
+            }
+        }
+    }
+    
     pub fn run(&mut self) {
         loop {
             // Process control messages first
@@ -244,21 +291,14 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             if let Some(event) = self.fifo_in.pop() {
                 // Process incoming order events from the input queue
                 let (event, result) = self.order_book.process_order(event);
-                let snapshot_event = event;
-                let snapshot_result = result;
-                // Generate the execution report and push it to the output queues
-                let mut execution_report_input = (event, result);
-                for producer in &self.fifo_out {
-                    if let Some(producer) = producer {
-                        while let Err((event_er, result_er)) = producer.push(execution_report_input) {
-                            execution_report_input = (event_er, result_er);
-                            std::hint::spin_loop(); // If the output queue is full, spin until there is space
-                        }
-                    }
-                }
+                // For now, I send a copy of the order event and result to each subscriber, but ideally I would like to avoid copying the order event and result in the hot path of processing orders.
+                // TODO : How can I avoid making a copy of the order in the hot path?                
+                self.fan_out_execution_report(event, result);
+
                 // Update the snapshot with the latest state of the order book after processing the order
+                // TODO : Just send execution reports to the snapshot engine and let it update the snapshot instead of doing it in the hot path of processing orders in the order book engine.
                 if self.snapshot_ptr.is_some() {
-                    self.incremental_update(snapshot_event, snapshot_result);
+                    self.incremental_update(event, result);
                 }
             }
 
@@ -303,7 +343,9 @@ mod tests {
             let (_control_tx, control_rx) = crossbeam_channel::unbounded();
             let mut engine = OrderBookEngine::new(
         inbound_consumer,
-        [Some(outbound_producer), None, None],
+        Some(outbound_producer),
+         None,
+         None,
                 control_rx,
                 order_book,
                 Some(Arc::clone(&snapshot_ptr)),
@@ -411,7 +453,9 @@ mod tests {
 
         let mut engine = OrderBookEngine::new(
             inbound_consumer,
-            [None, None, None],
+            None,
+             None,
+              None,
             control_rx,
             OrderBook::new(SYMBOL_STR),
             Some(Arc::clone(&snapshot_ptr)),
@@ -523,7 +567,9 @@ mod tests {
 
         let mut engine = OrderBookEngine::new(
             inbound_consumer,
-            [None, None, None],
+            None,
+             None,
+              None,
             control_rx,
             OrderBook::new(SYMBOL_STR),
             Some(Arc::clone(&snapshot_ptr)),
@@ -627,7 +673,9 @@ mod tests {
 
         let mut engine = OrderBookEngine::new(
             inbound_consumer,
-            [None, None, None],
+            None,
+            None,
+            None,
             control_rx,
             OrderBook::new(SYMBOL_STR),
             Some(Arc::clone(&snapshot_ptr)),

@@ -608,7 +608,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 
     let net_to_fix_tx = queues.net_to_fix_tx.as_ref().unwrap().clone();
     let (fix_tx, ob_rx) = queues.fix_to_ob.take().unwrap().queue.split();
-    let (ob_tx, er_rx) = queues.ob_to_er.take().unwrap().queue.split();
+    let (ob_er_tx, er_rx) = queues.ob_to_er.take().unwrap().queue.split();
     let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
     let (ob_db_tx, ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
     let (ob_md_tx, ob_md_rx) = queues.ob_to_md.take().unwrap().queue.split();
@@ -688,7 +688,10 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         // Book engine thread
         let mut order_book_engine = OrderBookEngine::new(
             ob_rx,
-            [Some(ob_tx), Some(ob_db_tx), Some(ob_md_tx)],
+            
+            Some(ob_er_tx),
+            Some(ob_db_tx),
+            Some(ob_md_tx),
             ob_control_rx,
             order_book,
             Some(Arc::clone(&snapshot_ptr)),
