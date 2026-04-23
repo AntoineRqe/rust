@@ -2,44 +2,131 @@
 
 This project is a financial market simulator implemented in Rust. It consists of several crates that work together to simulate a financial market, including an order book, a matching engine, and a market data feed.
 
-### Architecture
+For now, the simulator runs on a personal computer and is accessible from internet -> www.marketsim.site
+
+
+## Project Status
+
+- Active Rust-based market simulator for order entry, matching, execution reporting, and market data distribution.
+- Currently runs two separate market processes: NASDAQ and NYSE.
+- Each market currently trades one instrument: `AAPL`.
+- Supports FIX connectivity, WebSocket/web access, PostgreSQL persistence, and UDP multicast distribution.
+
+## Features
+
+### Connectivity
+
+- FIX protocol support for order entry and execution reports.
+- UDP multicast for market data distribution and snapshot.
+- Web interface for monitoring and interaction.
+
+### Persistence
+
+- PostgreSQL database for order events, trades, and pending orders.
+
+## Architecture
 
 ```
-Browser ──WebSocket──► axum web server (crates/web)
-                              │
-                    tokio broadcast channel
-                              │
-              ┌───────────────┴───────────────┐
-              │                               │
-    FixInboundEngine                 FixOutboundEngine
-    (crates/protocol/FIX)            (crates/protocol/FIX)
-              │                               │
-         OrderEvent                    ExecReport
-              │                               │
-    OrderBookEngine ──────────────── ExecutionReportEngine
-    (crates/order-book)            (crates/execution-report)
-              │                               │
-              └──────────────┬────────────────┘
-                             │
-                       DatabaseEngine
-                         (crates/db)
+FIX Client
+    |
+    | 
+    v 
+Browser UI
+    |
+    | WebSocket
+    v
+Web Server (crates/web, WebSocket)
+    |
+    | forwards orders/events (TCP)
+    +-----------------------------------------------------------> TCP Server (same as above)
+                                                                |
+                                                                | tcp_to_fix
+                                                                | (crossbeam bounded)
+                                                                v
+                                                    +--------------------------------------+
+                                                    | FIX Inbound Engine (protocol/FIX)    |
+                                                    +--------------------------------------+
+                                                                |
+                                                                | fix_to_ob (custom SPSC)
+                                                                v
+                                                    +--------------------------------+
+                                                    | Order Book Engine              |
+                                                    | (crates/order-book)            |
+                                                    +--------------------------------+
+                                                      |\
+                                                      | \ ob_to_snapshot ---------------------> Snapshot Engine
+                                                      |                                          (snapshot crate)
+                                                      |                                          |
+                                                      |                                          +--> UDP Multicast
+                                                      |                                               (snapshot channel)
+                                                      |
+                                                      |-- ob_to_db ----------------------------> DB Engine / PostgreSQL
+                                                      |                                          (db crate)
+                                                      |
+                                                      |-- ob_to_md ----------------------------> Market Feed Engine
+                                                      |                                          (market-feed crate)
+                                                      |                                          |
+                                                      |                                          +--> UDP Multicast
+                                                      |                                               (market data channel)
+                                                      |
+                                                      | ob_to_er
+                                                      v
+                                            +----------------------------------+
+                                            | Exec Report Engine               |
+                                            | (crates/execution-report)        |
+                                            +----------------------------------+
+                                                      |
+                                                      | er_to_fix (custom SPSC)
+                                                      v
+                                           +------------------------------------+
+                                           | FIX Outbound Engine (protocol/FIX) |
+                                           +------------------------------------+
+                                                      |
+                                                      | resp_queue (tokio mpsc / client)
+                                                      v
+                                           +------------------------------+
+                                           | TCP Server (crates/server)   |
+                                           +------------------------------+
+                                                      |
+                                                      +-------------------------------> Client (FIX response)
+                                                      |
+                                                      +-------------------------------> Web Server (crates/web)
+                                                                                         (execution reports + market data)
+
+CONTROL / RECOVERY FLOW
+gRPC / External Control      Order Book Engine                DB Engine
+          |                         |                             |
+          | -- ResetMarket() -----> | -- reset_order_book() ----> |
+          |   (gRPC command)        | -- reset_database() ------> |
+          | -- DumpOrderBook() ---->| -- read pending_orders ---> |
+          |   (gRPC command)        | <- dump_order_book() ------ |
 ```
 
 Technical choices and discussion about the architecture and design of the simulator can be found here [Architecture and Design](./papers/market-simulator.md).
 
 ## Crates
 
-- `order-book`: This crate implements the order book, which is responsible for maintaining the list of buy and sell orders in the market. It provides functionality for adding, removing, and matching orders. [Order Book](crates/order-book/README.md)
-- `fix-protocol`: This crate implements the FIX protocol, which is a standard protocol for electronic trading. It provides functionality for encoding and decoding FIX messages, as well as handling FIX sessions. [FIX Protocol](crates/protocol/FIX/README.md)
-- `execution-report`: This crate is responsible for generating execution reports based on the results of order processing. It takes the order events and their corresponding results to create detailed execution reports that can be sent back to clients or used for analysis. [Execution Report](crates/execution-report/README.md)
-- `server`: This crate implements the server that handles incoming FIX messages, processes orders through the order book and matching engine, and sends execution reports back to clients. [Server](crates/server/README.md)
-- `logging`: This crate provides logging functionality for the entire project, allowing for detailed logs of the order processing and market events. [Logging](crates/logging/README.md)
-- `types`: This crate defines the common types used across the project, such as orders, trades, and market data. [Types](crates/types/README.md)
-- `utils`: This crate provides utility functions and types that are used across the project, such as timestamp handling and fixed-point arithmetic. [Utils](crates/utils/README.md)
-- `memory`: This crate provides an in-memory implementation of the order book and matching engine, allowing for fast processing of orders without the need for persistent storage. [Memory](crates/memory/README.md)
-- `web`: This crate implements a web-based client that allows users to interact with the market simulator through a web interface. It provides functionality for sending FIX messages to the server and receiving execution reports in real-time. [Web Client](crates/web/README.md)
-- `db`: This crate provides a PostgreSQL persistence layer for the market simulator, allowing for the storage and retrieval of order events, order results, trades, and pending orders. [Database](crates/db/README.md)
+| Crate | What it does | Docs |
+|---|---|---|
+| `order-book` | Maintains the order book and matching logic (add/remove/match orders). | [Order Book](crates/order-book/README.md) |
+| `fix-protocol` | Implements FIX parsing/session handling for inbound and outbound trading messages. | [FIX Protocol](crates/protocol/FIX/README.md) |
+| `execution-report` | Builds execution reports from order events/results for client responses and analysis. | [Execution Report](crates/execution-report/README.md) |
+| `server` | TCP entrypoint that receives FIX traffic and routes requests/responses through the engines. | [Server](crates/server/README.md) |
+| `logging` | Project-wide logging/observability for order processing and market events. | [Logging](crates/logging/README.md) |
+| `types` | Shared domain types (orders, trades, market data, etc.) used across crates. | [Types](crates/types/README.md) |
+| `utils` | Shared utility helpers (timestamps, fixed-point arithmetic, traits/functions). | [Utils](crates/utils/README.md) |
+| `memory` | In-memory components for low-latency order book/matching workflows. | [Memory](crates/memory/README.md) |
+| `web` | Web interface layer (WebSocket/API) for interacting with the simulator. | [Web Client](crates/web/README.md) |
+| `db` | PostgreSQL persistence for order events/results, trades, and pending orders. | [Database](crates/db/README.md) |
 ─
+## Quick Start
+
+1. Set the market-specific PostgreSQL environment variables.
+2. Start the simulator with `cargo run --release`.
+3. Connect through a FIX client or the web interface.
+
+The detailed setup is documented below in the simulator runtime section.
+
 ## Running the Simulator
 
 ### Database configuration (per market)
@@ -117,17 +204,48 @@ export MARKET_SIM_PUBLIC_MARKETS_ONLY=1
 
 With this enabled, both market and gateway `/api/markets` endpoints return only public market URLs.
 
-## Running the Client
+## Contributing
 
-Refer to the [Tools README](./tools/README.md) for instructions on how to run the client and connect to the server.
+Contributions are welcome.
 
-## Future Work
+Suggested workflow:
 
+1. Open an issue to discuss a bug, improvement, or feature.
+2. Keep changes focused and scoped to a single concern.
+3. Update documentation when behavior, configuration, or architecture changes.
+4. Run the relevant tests and benchmarks before submitting a pull request.
+
+Areas that are especially useful for contributions:
+
+- additional order types and FIX coverage
+- recovery and replay support
+- monitoring, metrics, and observability
+- performance optimization and benchmark coverage
+- market data distribution and multicast tooling
+
+## License
+
+This project is licensed under the MIT License.
+
+See [LICENSE](LICENSE) for the full text.
+
+## Support / Contact
+
+For bug reports, feature requests, and operational questions, please use the repository issue tracker.
+
+When reporting a problem, include:
+
+- the market you are running (`NASDAQ` or `NYSE`)
+- the client type (`FIX`, web, or gRPC)
+- relevant logs or error messages
+- configuration details that may affect networking, multicast, or database setup
+
+## Roadmap
+
+- Create a private network so anyone can receive multicast market data updates and connect to the FIX port without exposing the server to the internet.
 - Implement the replayer based on log files to allow for backtesting and analysis of market data.
 - Adding more support for logging and monitoring, including metrics collection and alerting.
 - Add more command [Cancel, Replace] and order types [Stop, StopLimit] to the order book and matching engine.
 - Add more instruments and support for multiple symbols in the order book and matching engine.
-- Implement the Market Data Feed to simulate real-time market data and allow clients to subscribe to market data updates.
-- Implement the UDP multicast for market data distribution to allow for efficient dissemination of market data to multiple clients.
-- In the database, add recovery mode by saving snapshots + incremental logs to allow for faster recovery in case of a crash.
-- 
+- Improve recovery workflows with snapshots + incremental logs.
+- Expand market data tooling and multicast consumers.

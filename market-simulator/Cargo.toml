@@ -39,6 +39,7 @@ arc-swap = "1.9.1"
 name = "market-simulator"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 server = { path = "crates/server" }
