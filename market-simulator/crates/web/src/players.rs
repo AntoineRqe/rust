@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
+use chrono::{DateTime, Utc};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row, query, query_scalar};
 
 use crate::state::PendingOrder;
 
@@ -50,6 +53,21 @@ impl AuthError {
     }
 }
 
+// ── Portfolio lot ────────────────────────────────────────────────────────────
+
+/// A single purchased lot in a player's portfolio.
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioLot {
+    pub id: i64,
+    pub username: String,
+    pub symbol: String,
+    /// Remaining (un-sold) quantity for this lot.
+    pub quantity: f64,
+    /// Average purchase price per unit for this lot.
+    pub price: f64,
+    pub purchased_at: DateTime<Utc>,
+}
+
 // ── Stored player record ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,9 +80,6 @@ pub struct Player {
     /// Orders currently resting in the order book (not yet filled or cancelled).
     #[serde(default, skip_serializing, skip_deserializing)]
     pub pending_orders: Vec<PendingOrder>,
-    /// Equity inventory held by the player (symbol -> quantity).
-    #[serde(default)]
-    pub holdings: HashMap<String, f64>,
     /// Total number of authenticated websocket connections observed for this player.
     #[serde(default)]
     pub connection_count: u64,
@@ -80,7 +95,6 @@ impl Player {
             password: password_hash,
             tokens: INITIAL_TOKENS,
             pending_orders: Vec::new(),
-            holdings: HashMap::new(),
             connection_count: 0,
             ips: Vec::new(),
         }
@@ -100,7 +114,7 @@ struct StorageData {
 
 // ── PlayerStore ───────────────────────────────────────────────────────────────
 
-/// Thread-safe player registry backed by a JSON file.
+/// Thread-safe player registry backed by PostgreSQL.
 /// Cloning is cheap — the inner state is Arc-backed.
 #[derive(Clone)]
 pub struct PlayerStore {
@@ -112,7 +126,7 @@ struct StoreInner {
     order_owners: HashMap<String, String>,
     processed_exec_ids: HashSet<String>,
     total_visitor_count: u64,
-    path: PathBuf,
+    pool: Option<Arc<PgPool>>,
 }
 
 impl PlayerStore {
@@ -134,32 +148,43 @@ impl PlayerStore {
             .cloned()
     }
 
-    /// Load the store from `path`, creating an empty one if the file does not exist yet.
-    pub fn load(path: impl AsRef<Path>) -> Self {
-        let path = path.as_ref().to_path_buf();
-        let storage = if path.exists() {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            serde_json::from_str::<StorageData>(&text)
-                .unwrap_or_default()
-        } else {
-            StorageData::default()
-        };
-        let players = storage.players;
-        let order_owners = storage.order_owners;
-        let total_visitor_count = storage.total_visitor_count;
+    /// Load the store from PostgreSQL.
+    pub fn load_postgres(database_url: &str) -> Self {
+        let pool = Arc::new(block_on_storage(db::connect(database_url))
+            .unwrap_or_else(|e| panic!("failed to connect player store to postgres: {e}")));
+
+        block_on_storage(create_player_tables(&pool))
+            .unwrap_or_else(|e| panic!("failed to create player store tables: {e}"));
+
+        let (players, order_owners, total_visitor_count) = block_on_storage(load_storage_from_db(&pool))
+            .unwrap_or_else(|e| panic!("failed to load player store from postgres: {e}"));
+
         tracing::info!(
-            "[{}] Player store: {} player(s) loaded from {:?}",
+            "[{}] Player store: {} player(s) loaded from PostgreSQL",
             market_name(),
             players.len(),
-            path
         );
+
         PlayerStore {
             inner: Arc::new(Mutex::new(StoreInner {
                 players,
                 order_owners,
                 processed_exec_ids: HashSet::new(),
                 total_visitor_count,
-                path,
+                pool: Some(pool),
+            })),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_storage_data(storage: StorageData) -> Self {
+        PlayerStore {
+            inner: Arc::new(Mutex::new(StoreInner {
+                players: storage.players,
+                order_owners: storage.order_owners,
+                processed_exec_ids: HashSet::new(),
+                total_visitor_count: storage.total_visitor_count,
+                pool: None,
             })),
         }
     }
@@ -246,6 +271,31 @@ impl PlayerStore {
         drop(inner);
         self.flush();
         true
+    }
+
+    /// Return all open portfolio lots for a player, oldest first.
+    ///
+    /// Returns an empty vec if the player has no lots or the pool is unavailable.
+    pub fn get_portfolio(&self, username: &str) -> Vec<PortfolioLot> {
+        let pool = {
+            let inner = self.inner.lock().unwrap();
+            inner.pool.clone()
+        };
+        let Some(pool) = pool else {
+            return Vec::new();
+        };
+        block_on_storage(load_portfolio_lots_for_user(&pool, username))
+            .unwrap_or_default()
+    }
+
+    /// Return a holdings summary (symbol → total remaining quantity) derived
+    /// from open portfolio lots for a player.
+    pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, f64> {
+        let mut summary: HashMap<String, f64> = HashMap::new();
+        for lot in self.get_portfolio(username) {
+            *summary.entry(lot.symbol).or_insert(0.0) += lot.quantity;
+        }
+        summary
     }
 
     /// Return a snapshot of the player's current state, or `None` if unknown.
@@ -393,40 +443,36 @@ impl PlayerStore {
     /// Clears all pending orders and holdings for every player and drops execution-report
     /// deduplication state so future reports are processed normally.
     ///
-    /// Returns `(players_touched, orders_removed, holdings_cleared)`.
-    pub fn reset_market_state(&self) -> (usize, usize, usize) {
+    /// Returns `(players_touched, orders_removed)`.
+    pub fn reset_market_state(&self) -> (usize, usize) {
         let mut inner = self.inner.lock().unwrap();
         let mut players_touched = 0usize;
         let mut orders_removed = 0usize;
-        let mut holdings_cleared = 0usize;
 
         for player in inner.players.values_mut() {
-            let had_pending = !player.pending_orders.is_empty();
-            let had_holdings = !player.holdings.is_empty();
-
             if !player.pending_orders.is_empty() {
                 orders_removed += player.pending_orders.len();
                 player.pending_orders.clear();
-            }
-
-            if !player.holdings.is_empty() {
-                holdings_cleared += player.holdings.len();
-                player.holdings.clear();
-            }
-
-            if had_pending || had_holdings {
                 players_touched += 1;
             }
         }
 
         inner.order_owners.clear();
-
         inner.processed_exec_ids.clear();
+        let pool = inner.pool.clone();
         drop(inner);
 
         // Always persist to keep on-disk state aligned with the market reset.
         self.flush();
-        (players_touched, orders_removed, holdings_cleared)
+
+        // Clear all portfolio lots.
+        if let Some(pool) = pool {
+            if let Err(e) = block_on_storage(delete_all_portfolio_lots(&pool)) {
+                tracing::error!("[{}] Failed to clear portfolio lots on market reset: {e}", market_name());
+            }
+        }
+
+        (players_touched, orders_removed)
     }
 
     /// Apply a FIX execution report to player balances and pending orders.
@@ -477,27 +523,35 @@ impl PlayerStore {
             return false;
         }
 
+        // Capture owner now — before it may be removed from order_owners below.
         let owner = inner.order_owners.get(cl_ord_id).cloned();
+
+        // Portfolio lot operation to perform after releasing the lock.
+        // We determine it here while `owner` is still available.
+        let lot_op: Option<(String, String, String, f64, f64)> =
+            if let Some(ref uname) = owner {
+                if (ord_status == "1" || ord_status == "2")
+                    && last_qty > 0.0
+                    && last_px > 0.0
+                    && !symbol.is_empty()
+                    && (side == "1" || side == "2")
+                {
+                    Some((uname.clone(), side.to_string(), symbol.clone(), last_qty, last_px))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         if let Some(owner_username) = owner {
             if let Some(player) = inner.players.get_mut(&owner_username) {
                 if (ord_status == "1" || ord_status == "2") && last_qty > 0.0 && last_px > 0.0 {
                     let traded_notional = last_qty * last_px;
                     if side == "1" {
                         player.tokens -= traded_notional;
-                        if !symbol.is_empty() {
-                            let entry = player.holdings.entry(symbol.clone()).or_insert(0.0);
-                            *entry += last_qty;
-                        }
                     } else if side == "2" {
                         player.tokens += traded_notional;
-                        if !symbol.is_empty() {
-                            if let Some(owned) = player.holdings.get_mut(&symbol) {
-                                *owned = (*owned - last_qty).max(0.0);
-                                if *owned <= 1e-9 {
-                                    player.holdings.remove(&symbol);
-                                }
-                            }
-                        }
                     }
                     changed = true;
                 }
@@ -537,6 +591,114 @@ impl PlayerStore {
         if changed {
             self.flush();
         }
+
+        // Perform portfolio lot insert (buy) or FIFO consume (sell) after flush.
+        if let Some((uname, lot_side, lot_symbol, lot_qty, lot_px)) = lot_op {
+            let pool = {
+                let inner = self.inner.lock().unwrap();
+                inner.pool.clone()
+            };
+            if let Some(pool) = pool {
+                if lot_side == "1" {
+                    // Buy: insert a new lot.
+                    if let Err(e) = block_on_storage(insert_portfolio_lot(&pool, &uname, &lot_symbol, lot_qty, lot_px)) {
+                        tracing::error!("[{}] Failed to insert portfolio lot for {uname}: {e}", market_name());
+                    }
+                } else if lot_side == "2" {
+                    // Sell: FIFO consume from existing lots.
+                    if let Err(e) = block_on_storage(consume_portfolio_lots_fifo(&pool, &uname, &lot_symbol, lot_qty)) {
+                        tracing::error!("[{}] Failed to consume portfolio lots for {uname}: {e}", market_name());
+                    }
+                }
+            }
+        }
+
+        changed
+    }
+
+    /// Apply the passive side of a trade reconstructed from the multicast
+    /// market-data feed. This closes the gap where a resting owner's FIX TCP
+    /// connection no longer exists, so their execution report is never
+    /// delivered back over the original response queue.
+    pub fn apply_trade_from_feed(
+        &self,
+        trade_id: u64,
+        passive_cl_ord_id: &str,
+        symbol: &str,
+        quantity: f64,
+        price: f64,
+    ) -> bool {
+        let passive_cl_ord_id = passive_cl_ord_id.trim();
+        let symbol = symbol.trim().to_uppercase();
+
+        if passive_cl_ord_id.is_empty()
+            || symbol.is_empty()
+            || !quantity.is_finite()
+            || quantity <= 0.0
+            || !price.is_finite()
+            || price <= 0.0
+        {
+            return false;
+        }
+
+        let exec_id = format!("feed:{trade_id}:{passive_cl_ord_id}");
+        let notional = quantity * price;
+
+        let mut changed = false;
+        let mut inner = self.inner.lock().unwrap();
+
+        if !inner.processed_exec_ids.insert(exec_id) {
+            return false;
+        }
+
+        let owner = inner.order_owners.get(passive_cl_ord_id).cloned();
+
+        let lot_op = if let Some(ref owner_username) = owner {
+            Some((owner_username.clone(), symbol.clone(), quantity))
+        } else {
+            None
+        };
+
+        if let Some(owner_username) = owner {
+            if let Some(player) = inner.players.get_mut(&owner_username) {
+                player.tokens += notional;
+
+                if let Some(pos) = player
+                    .pending_orders
+                    .iter()
+                    .position(|o| o.cl_ord_id == passive_cl_ord_id)
+                {
+                    let current = player.pending_orders[pos].qty;
+                    let remaining = (current - quantity).max(0.0);
+                    if remaining <= 1e-9 {
+                        player.pending_orders.remove(pos);
+                        inner.order_owners.remove(passive_cl_ord_id);
+                    } else {
+                        player.pending_orders[pos].qty = remaining;
+                    }
+                }
+
+                changed = true;
+            }
+        }
+
+        drop(inner);
+        if changed {
+            self.flush();
+        }
+
+        if let Some((owner_username, lot_symbol, lot_qty)) = lot_op {
+            let pool = {
+                let inner = self.inner.lock().unwrap();
+                inner.pool.clone()
+            };
+            if let Some(pool) = pool {
+                if let Err(e) = block_on_storage(consume_portfolio_lots_fifo(&pool, &owner_username, &lot_symbol, lot_qty)) {
+                    tracing::error!("[{}] Failed to consume passive-side portfolio lots for {owner_username}: {e}", market_name());
+                }
+            }
+        }
+
         changed
     }
 
@@ -559,6 +721,8 @@ impl PlayerStore {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
+    /// Persist the current in-memory state to PostgreSQL. This is called after every state change to ensure durability and consistency between the in-memory state and the database.
+    /// Can be expensive, use batching for optimization if needed.
     fn flush(&self) {
         let inner = self.inner.lock().unwrap();
         let data = StorageData {
@@ -566,19 +730,316 @@ impl PlayerStore {
             order_owners: inner.order_owners.clone(),
             total_visitor_count: inner.total_visitor_count,
         };
-        match serde_json::to_string_pretty(&data) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&inner.path, json) {
-                    tracing::error!(
-                        "[{}] Failed to persist player data to {:?}: {e}",
-                        market_name(),
-                        inner.path
-                    );
-                }
-            }
-            Err(e) => tracing::error!("[{}] Failed to serialise player data: {e}", market_name()),
+        let pool = inner.pool.clone();
+        drop(inner);
+
+        let Some(pool) = pool else {
+            return;
+        };
+
+        if let Err(e) = block_on_storage(persist_storage_to_db(&pool, &data)) {
+            tracing::error!("[{}] Failed to persist player data to PostgreSQL: {e}", market_name());
         }
     }
+}
+
+fn block_on_storage<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        static STORAGE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        let runtime = STORAGE_RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .thread_name("player-store-db")
+                .build()
+                .expect("failed to build shared tokio runtime for player store")
+        });
+        runtime.block_on(future)
+    }
+}
+
+async fn create_player_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    query("SELECT pg_advisory_xact_lock($1)")
+        .bind(42_4243_i64)
+        .execute(&mut *tx)
+        .await?;
+
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS players (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            tokens DOUBLE PRECISION NOT NULL,
+            connection_count BIGINT NOT NULL DEFAULT 0,
+            ips_json TEXT NOT NULL DEFAULT '[]',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS player_order_owners (
+            cl_ord_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL REFERENCES players(username) ON DELETE CASCADE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS portfolio_lots (
+            id          BIGSERIAL PRIMARY KEY,
+            username    TEXT NOT NULL REFERENCES players(username) ON DELETE CASCADE,
+            symbol      TEXT NOT NULL,
+            quantity    DOUBLE PRECISION NOT NULL CHECK (quantity > 0),
+            price       DOUBLE PRECISION NOT NULL,
+            purchased_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    query("CREATE INDEX IF NOT EXISTS portfolio_lots_user_symbol ON portfolio_lots(username, symbol, purchased_at)")
+        .execute(&mut *tx)
+        .await?;
+
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS player_store_meta (
+            meta_key TEXT PRIMARY KEY,
+            meta_value_bigint BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await
+}
+
+async fn load_storage_from_db(
+    pool: &PgPool,
+) -> Result<(HashMap<String, Player>, HashMap<String, String>, u64), sqlx::Error> {
+    let player_rows = query(
+        "SELECT username, password, tokens, connection_count, ips_json FROM players"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut players = HashMap::new();
+    for row in player_rows {
+        let username: String = row.try_get("username")?;
+        let password: String = row.try_get("password")?;
+        let tokens: f64 = row.try_get("tokens")?;
+        let connection_count_raw: i64 = row.try_get("connection_count")?;
+        let ips_json: String = row.try_get("ips_json")?;
+
+        let ips = serde_json::from_str::<Vec<String>>(&ips_json)
+            .unwrap_or_default();
+
+        players.insert(
+            username.clone(),
+            Player {
+                username,
+                password,
+                tokens,
+                pending_orders: Vec::new(),
+                connection_count: connection_count_raw.max(0) as u64,
+                ips,
+            },
+        );
+    }
+
+    let owner_rows = query("SELECT cl_ord_id, username FROM player_order_owners")
+        .fetch_all(pool)
+        .await?;
+    let mut order_owners = HashMap::new();
+    for row in owner_rows {
+        order_owners.insert(row.try_get("cl_ord_id")?, row.try_get("username")?);
+    }
+
+    let total_visitor_count = query_scalar::<_, i64>(
+        "SELECT meta_value_bigint FROM player_store_meta WHERE meta_key = 'total_visitor_count'"
+    )
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(0)
+    .max(0) as u64;
+
+    Ok((players, order_owners, total_visitor_count))
+}
+
+async fn persist_storage_to_db(pool: &PgPool, data: &StorageData) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    for player in data.players.values() {
+        let ips_json = serde_json::to_string(&player.ips).unwrap_or_else(|_| "[]".to_string());
+        query(
+            r#"
+            INSERT INTO players (username, password, tokens, connection_count, ips_json)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (username) DO UPDATE SET
+                password = EXCLUDED.password,
+                tokens = EXCLUDED.tokens,
+                connection_count = EXCLUDED.connection_count,
+                ips_json = EXCLUDED.ips_json,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&player.username)
+        .bind(&player.password)
+        .bind(player.tokens)
+        .bind(player.connection_count as i64)
+        .bind(ips_json)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    query("DELETE FROM player_order_owners")
+        .execute(&mut *tx)
+        .await?;
+
+    for (cl_ord_id, username) in &data.order_owners {
+        query(
+            r#"
+            INSERT INTO player_order_owners (cl_ord_id, username)
+            VALUES ($1, $2)
+            ON CONFLICT (cl_ord_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(cl_ord_id)
+        .bind(username)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    query(
+        r#"
+        INSERT INTO player_store_meta (meta_key, meta_value_bigint)
+        VALUES ('total_visitor_count', $1)
+        ON CONFLICT (meta_key) DO UPDATE SET
+            meta_value_bigint = EXCLUDED.meta_value_bigint,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(data.total_visitor_count as i64)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await
+}
+
+async fn load_portfolio_lots_for_user(pool: &PgPool, username: &str) -> Result<Vec<PortfolioLot>, sqlx::Error> {
+    let rows = query(
+        "SELECT id, username, symbol, quantity, price, purchased_at \
+         FROM portfolio_lots WHERE username = $1 ORDER BY purchased_at ASC"
+    )
+    .bind(username)
+    .fetch_all(pool)
+    .await?;
+
+    let mut lots = Vec::with_capacity(rows.len());
+    for row in rows {
+        lots.push(PortfolioLot {
+            id: row.try_get("id")?,
+            username: row.try_get("username")?,
+            symbol: row.try_get("symbol")?,
+            quantity: row.try_get("quantity")?,
+            price: row.try_get("price")?,
+            purchased_at: row.try_get("purchased_at")?,
+        });
+    }
+    Ok(lots)
+}
+
+async fn insert_portfolio_lot(
+    pool: &PgPool,
+    username: &str,
+    symbol: &str,
+    quantity: f64,
+    price: f64,
+) -> Result<(), sqlx::Error> {
+    query(
+        "INSERT INTO portfolio_lots (username, symbol, quantity, price) VALUES ($1, $2, $3, $4)"
+    )
+    .bind(username)
+    .bind(symbol)
+    .bind(quantity)
+    .bind(price)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// FIFO consumption: reduce the oldest lots first for the given symbol.
+async fn consume_portfolio_lots_fifo(
+    pool: &PgPool,
+    username: &str,
+    symbol: &str,
+    mut sell_qty: f64,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let rows = query(
+        "SELECT id, quantity FROM portfolio_lots \
+         WHERE username = $1 AND symbol = $2 \
+         ORDER BY purchased_at ASC \
+         FOR UPDATE"
+    )
+    .bind(username)
+    .bind(symbol)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for row in rows {
+        if sell_qty <= 1e-9 {
+            break;
+        }
+        let lot_id: i64 = row.try_get("id")?;
+        let lot_qty: f64 = row.try_get("quantity")?;
+
+        if sell_qty >= lot_qty - 1e-9 {
+            // Consume entire lot.
+            query("DELETE FROM portfolio_lots WHERE id = $1")
+                .bind(lot_id)
+                .execute(&mut *tx)
+                .await?;
+            sell_qty -= lot_qty;
+        } else {
+            // Partially consume lot.
+            query("UPDATE portfolio_lots SET quantity = quantity - $1 WHERE id = $2")
+                .bind(sell_qty)
+                .bind(lot_id)
+                .execute(&mut *tx)
+                .await?;
+            sell_qty = 0.0;
+        }
+    }
+
+    tx.commit().await
+}
+
+async fn delete_all_portfolio_lots(pool: &PgPool) -> Result<(), sqlx::Error> {
+    query("DELETE FROM portfolio_lots").execute(pool).await?;
+    Ok(())
 }
 
 fn parse_fix_fields(body: &str) -> HashMap<String, String> {
@@ -631,54 +1092,45 @@ fn verify_or_upgrade_password(stored: &str, provided: &str) -> Result<PasswordCh
 #[cfg(test)]
 mod tests {
         use super::*;
-        use std::fs;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        fn unique_temp_path(prefix: &str) -> PathBuf {
-                let nanos = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-                std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.json", std::process::id()))
-        }
 
         #[test]
         fn trade_updates_both_participants_without_pending_orders_loaded() {
-                let path = unique_temp_path("market-sim-players");
+                let mut players = HashMap::new();
+                players.insert(
+                    "alice".to_string(),
+                    Player {
+                        username: "alice".to_string(),
+                        password: "pw".to_string(),
+                        tokens: 10000.0,
+                        pending_orders: Vec::new(),
+                        connection_count: 0,
+                        ips: Vec::new(),
+                    },
+                );
+                players.insert(
+                    "bob".to_string(),
+                    Player {
+                        username: "bob".to_string(),
+                        password: "pw".to_string(),
+                        tokens: 10000.0,
+                        pending_orders: Vec::new(),
+                        connection_count: 0,
+                        ips: Vec::new(),
+                    },
+                );
 
-                let seed = r#"{
-    "players": {
-        "alice": {
-            "username": "alice",
-            "password": "pw",
-            "tokens": 10000.0,
-            "holdings": { "AAPL": 10.0 },
-            "connection_count": 0,
-            "ips": []
-        },
-        "bob": {
-            "username": "bob",
-            "password": "pw",
-            "tokens": 10000.0,
-            "holdings": {},
-            "connection_count": 0,
-            "ips": []
-        }
-    },
-    "order_owners": {
-        "ALICESELL1": "alice",
-        "BOBBUY1": "bob"
-    }
-}"#;
-                fs::write(&path, seed).expect("seed players.json");
+                let store = PlayerStore::from_storage_data(StorageData {
+                    players,
+                    order_owners: HashMap::from([
+                        ("ALICESELL1".to_string(), "alice".to_string()),
+                        ("BOBBUY1".to_string(), "bob".to_string()),
+                    ]),
+                    total_visitor_count: 0,
+                });
 
-                let store = PlayerStore::load(&path);
-
-                // Buyer fill (bob buys 5 @ 100): tokens down, holdings up.
                 let buyer_fill = "35=8 │ 39=2 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-BUY-1";
                 assert!(store.apply_fix_execution_report(buyer_fill));
 
-                // Seller fill (alice sells 5 @ 100): tokens up, holdings down.
                 let seller_fill = "35=8 │ 39=2 │ 11=ALICESELL1 │ 54=2 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-SELL-1";
                 assert!(store.apply_fix_execution_report(seller_fill));
 
@@ -687,14 +1139,9 @@ mod tests {
 
                 assert!((alice.tokens - 10500.0).abs() < 1e-9);
                 assert!((bob.tokens - 9500.0).abs() < 1e-9);
-                assert!((alice.holdings.get("AAPL").copied().unwrap_or(0.0) - 5.0).abs() < 1e-9);
-                assert!((bob.holdings.get("AAPL").copied().unwrap_or(0.0) - 5.0).abs() < 1e-9);
 
-                // Terminal fills should clear owner mappings.
                 let owners = store.get_order_owners();
                 assert!(!owners.contains_key("ALICESELL1"));
                 assert!(!owners.contains_key("BOBBUY1"));
-
-                let _ = fs::remove_file(path);
         }
 }

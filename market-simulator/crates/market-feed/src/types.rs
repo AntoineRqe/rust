@@ -1,4 +1,4 @@
-use types::{FixedPointArithmetic, macros::SymbolId};
+use types::{FixedPointArithmetic, OrderId, macros::SymbolId};
 
 pub const MARKET_DATA_HEADER_SIZE: usize = 24;
 
@@ -165,6 +165,10 @@ pub struct Trade {
     pub side: u8,
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic,
+    /// The client order ID of the aggressive order that initiated the trade. This is used by the browser to correlate trades with pending orders and update the UI accordingly.
+    pub aggressive_cl_ord_id: OrderId,
+    /// The client order ID of the passive order that was hit. This is used by the browser to correlate trades with pending orders and update the UI accordingly. It may be all zeros if the passive order was fully executed and removed from the book before the trade event is generated, so the browser should primarily rely on aggressive_cl_ord_id for correlation.
+    pub passive_cl_ord_id: OrderId,
 }
 
 // ----------------- L2 order book snapshot structure -----------------
@@ -298,17 +302,19 @@ impl DeleteOrder {
 
 // ------------------ Trade ------------------
 impl Trade {
-    pub fn to_bytes(&self) -> [u8; 49] {
-        let mut buf = [0u8; 49];
+    pub fn to_bytes(&self) -> [u8; 89] {
+        let mut buf = [0u8; 89];
         buf[0..8].copy_from_slice(&self.trade_id.to_be_bytes());
         buf[8] = self.side;
         buf[9..29].copy_from_slice(&self.price.to_fix_bytes());
         buf[29..49].copy_from_slice(&self.quantity.to_fix_bytes());
+        buf[49..69].copy_from_slice(&self.aggressive_cl_ord_id.0);
+        buf[69..89].copy_from_slice(&self.passive_cl_ord_id.0);
         buf
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 49 {
+        if bytes.len() < 89 {
             return None;
         }
 
@@ -322,10 +328,12 @@ impl Trade {
             side: bytes[8],
             price: FixedPointArithmetic::from_fix_bytes(trim_nul(&bytes[9..29]))?,
             quantity: FixedPointArithmetic::from_fix_bytes(trim_nul(&bytes[29..49]))?,
+            aggressive_cl_ord_id: OrderId::from_bytes(&bytes[49..69])?,
+            passive_cl_ord_id: OrderId::from_bytes(&bytes[69..89])?,
         })
     }
 
-    pub fn from_trade(side: types::Side, trade: &types::Trade) -> Self {
+    pub fn from_trade(aggressor_cl_ord_id: &OrderId, side: types::Side, trade: &types::Trade) -> Self {
         Self {
             trade_id: trade.id,
             side: match side {
@@ -334,6 +342,8 @@ impl Trade {
             },
             price: trade.price,
             quantity: trade.quantity,
+            aggressive_cl_ord_id: aggressor_cl_ord_id.clone(),
+            passive_cl_ord_id: trade.cl_ord_id.clone(),
         }
     }
 }
@@ -524,6 +534,8 @@ mod tests {
             side: 1,
             price: FixedPointArithmetic::from_f64(123.45),
             quantity: FixedPointArithmetic::from_f64(10.0),
+            aggressive_cl_ord_id: OrderId::from_ascii("aggressive_order_123"),
+            passive_cl_ord_id: OrderId::from_ascii("passive_order_456"),
         };
 
         let bytes = trade.to_bytes();
@@ -533,16 +545,22 @@ mod tests {
         let expected_side = trade.side;
         let expected_price = trade.price;
         let expected_quantity = trade.quantity;
+        let expected_aggressive_cl_ord_id = trade.aggressive_cl_ord_id;
+        let expected_passive_cl_ord_id = trade.passive_cl_ord_id;
 
         let trade_id = deserialized.trade_id;
         let side = deserialized.side;
         let price = deserialized.price;
         let quantity = deserialized.quantity;
+        let aggressive_cl_ord_id = deserialized.aggressive_cl_ord_id;
+        let passive_cl_ord_id = deserialized.passive_cl_ord_id;
 
         assert_eq!(trade_id, expected_trade_id);
         assert_eq!(side, expected_side);
         assert_eq!(price, expected_price);
         assert_eq!(quantity, expected_quantity);
+        assert_eq!(aggressive_cl_ord_id, expected_aggressive_cl_ord_id);
+        assert_eq!(passive_cl_ord_id, expected_passive_cl_ord_id);
     }
 
     #[test]

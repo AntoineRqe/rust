@@ -9,6 +9,7 @@ use market_feed::types::{
     SNAPSHOT_BYTES, Trade, MARKET_DATA_HEADER_SIZE,
 };
 use web::state::{EventBus, WsEvent, PriceLevel, OrderBookState};
+use web::players::PlayerStore;
 
 use types::multicast::{MulticastSource, SourceSocket};
 
@@ -28,9 +29,11 @@ enum ParsedMarketDataKind {
         order_id: u64,
     },
     Trade {
+        trade_id: u64,
         side: u8,
         price: f64,
         quantity: f64,
+        passive_cl_ord_id: String,
     },
     Snapshot {
         bids: Vec<PriceLevel>,
@@ -160,11 +163,13 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
             let side = msg.side;
             let price = msg.price.to_f64();
             let quantity = msg.quantity.to_f64();
+            let passive_cl_ord_id = msg.passive_cl_ord_id.to_string();
             (
                 format!(
-                    "35=8 │ 39=2 │ 11=T{} │ 17={} │ 54={} │ 31={} │ 32={} │ 38={} │ 151=0 │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
+                    "35=8 │ 39=2 │ 11=T{} │ 17={} │ 41={} │ 54={} │ 31={} │ 32={} │ 38={} │ 151=0 │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
                     trade_id,
                     trade_id,
+                    passive_cl_ord_id,
                     side,
                     price,
                     quantity,
@@ -177,9 +182,11 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
                     header_length,
                 ),
                 ParsedMarketDataKind::Trade {
+                    trade_id,
                     side,
                     price,
                     quantity,
+                    passive_cl_ord_id,
                 },
             )
         }
@@ -241,6 +248,7 @@ pub fn spawn_market_feed_receiver(
     sources: Vec<MulticastSource>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<std::sync::Mutex<OrderBookState>>,
+    player_store: PlayerStore,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut sockets = Vec::<SourceSocket>::new();
@@ -323,6 +331,7 @@ pub fn spawn_market_feed_receiver(
 
                             // TODO  : Handle snapshots separately to avoid blocking the order book updates with potentially large snapshot messages, and to ensure we apply snapshots atomically to avoid inconsistent state during snapshot application.
                             // In HFT scenarios, snapshots can be large and frequent, so it's important to handle them efficiently.
+                            let mut passive_trade_update: Option<(u64, String, String, f64, f64)> = None;
                             if let Ok(mut ob) = order_book.lock() {
                                 let book = ob.get_or_create(&parsed.symbol);
                                 match parsed.kind {
@@ -357,9 +366,11 @@ pub fn spawn_market_feed_receiver(
                                         book.delete_order(order_id, parsed.timestamp_ms);
                                     }
                                     ParsedMarketDataKind::Trade {
+                                        trade_id,
                                         side,
                                         price,
                                         quantity,
+                                        passive_cl_ord_id,
                                     } => {
                                         book.apply_trade(
                                             side,
@@ -373,6 +384,15 @@ pub fn spawn_market_feed_receiver(
                                             quantity,
                                             parsed.timestamp_ms,
                                         );
+                                        if !passive_cl_ord_id.is_empty() {
+                                            passive_trade_update = Some((
+                                                trade_id,
+                                                passive_cl_ord_id,
+                                                parsed.symbol.clone(),
+                                                quantity,
+                                                price,
+                                            ));
+                                        }
                                     }
                                     ParsedMarketDataKind::Snapshot { bids, asks } => {
                                         book.apply_snapshot(bids, asks, parsed.timestamp_ms);
@@ -386,6 +406,16 @@ pub fn spawn_market_feed_receiver(
                                     asks: book.l3_asks_sorted(),
                                     timestamp_ms: parsed.timestamp_ms,
                                 });
+                            }
+
+                            if let Some((trade_id, passive_cl_ord_id, symbol, quantity, price)) = passive_trade_update {
+                                player_store.apply_trade_from_feed(
+                                    trade_id,
+                                    &passive_cl_ord_id,
+                                    &symbol,
+                                    quantity,
+                                    price,
+                                );
                             }
                         }
                     }
@@ -414,7 +444,7 @@ pub fn spawn_market_feed_receiver(
 mod tests {
     use super::*;
     use types::FixedPointArithmetic;
-    use types::macros::SymbolId;
+    use types::macros::{SymbolId, OrderId};
 
     use market_feed::types::{
         MAX_LEVELS,
@@ -486,6 +516,8 @@ mod tests {
             side: 2,
             price: FixedPointArithmetic::from_f64(100.5),
             quantity: FixedPointArithmetic::from_f64(3.0),
+            aggressive_cl_ord_id: OrderId::from_ascii("ORD-A"),
+            passive_cl_ord_id: OrderId::from_ascii("ORD-B"),
         };
         let trade_packet = build_packet(
             MessageType::Trade,
@@ -500,15 +532,20 @@ mod tests {
         assert_eq!(trade_parsed.timestamp_ms, 5);
         assert!(trade_parsed.details.contains("39=2"));
         assert!(trade_parsed.details.contains("17=777"));
+        assert!(trade_parsed.details.contains("41=ORD-B"));
         match trade_parsed.kind {
             ParsedMarketDataKind::Trade {
+                trade_id,
                 side,
                 price,
                 quantity,
+                passive_cl_ord_id,
             } => {
+                assert_eq!(trade_id, 777);
                 assert_eq!(side, 2);
                 assert_eq!(price, 100.5);
                 assert_eq!(quantity, 3.0);
+                assert_eq!(passive_cl_ord_id, "ORD-B");
             }
             _ => panic!("expected ParsedMarketDataKind::Trade"),
         }

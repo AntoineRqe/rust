@@ -1,14 +1,13 @@
 use axum::{
     Router,
     routing::{get, post},
-    response::{Html, IntoResponse},
-    extract::State,
+    response::{Html, IntoResponse, Redirect},
+    extract::{State, Query},
     http::StatusCode,
     Json,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -19,14 +18,9 @@ use rand_core::RngCore;
 use tower_http::cors::{Any, CorsLayer};
 use crate::state::{EventBus, OrderBookState};
 use crate::players::PlayerStore;
+use crate::fix_session::FIXSessionManager;
 use crate::ws::ws_handler;
-
-fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
-}
+use utils::market_name;
 
 /// Information about a single market, served to the login page.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,15 +29,19 @@ pub struct MarketInfo {
     pub url: String,
 }
 
+/// Information for an authenticated session, stored in the server's session registry.
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
+    /// The username associated with this session (e.g. "alice").
     pub username: String,
+    /// Whether this session belongs to the admin user (which has special privileges).
     pub is_admin: bool,
 }
 
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
 #[derive(Clone)]
 pub struct AppState {
+    /// Event bus for publishing FIX messages and other server-side events to browsers.
     pub bus: EventBus,
     /// Address of the FIX TCP gateway for this market instance.
     pub fix_tcp_addr: String,
@@ -61,6 +59,8 @@ pub struct AppState {
     pub active_visitors: Arc<AtomicUsize>,
     /// Total number of websocket sessions ever opened (all-time).
     pub total_visitors: Arc<AtomicUsize>,
+    /// Persistent FIX TCP session registry (one connection per player).
+    pub fix_session_manager: FIXSessionManager,
 }
 
 /// Generate a cryptographically random 128-bit hex token.
@@ -163,13 +163,24 @@ pub fn advertised_markets(markets: &[MarketInfo]) -> Vec<MarketInfo> {
         .collect()
 }
 
+/// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
+/// Arguments:
+/// - `bus`: Event bus for publishing server-side events to browsers.
+/// - `fix_tcp_addr`: Address of the FIX TCP gateway for this market instance
+/// - `grpc_addr`: gRPC address of the MarketControl service (e.g. "http://[::1]:50051") for loading initial pending orders at startup.
+/// - `ip`: The IP address to advertise in the login page URL
+/// - `port`: The port to listen on
+/// - `database_url`: Postgres connection URL for player state persistence
+/// - `known_markets`: List of all configured markets (name + web URL), sent to the login page
+/// - `shutdown`: An atomic flag that can be set to request server shutdown from another thread
+/// - `order_book`: Shared order book state to be populated at startup and kept in sync with market feed updates, so the terminal can display up-to-date pending orders and tokens.
 pub fn run_web_server(
     bus: EventBus,
     fix_tcp_addr: String,
     grpc_addr: String,
     ip: &str,
     port: u16,
-    players_file: PathBuf,
+    database_url: String,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
@@ -179,21 +190,23 @@ pub fn run_web_server(
         .thread_name("web-tokio")
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, players_file, known_markets, shutdown, order_book))
+        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, database_url, known_markets, shutdown, order_book))
 }
 
+/// Main async function to set up and run the web server. Separated from `run_web_server` to allow using async/await syntax.
 async fn serve(
     bus: EventBus,
     fix_tcp_addr: String,
     grpc_addr: String,
     ip: &str,
     port: u16,
-    players_file: PathBuf,
+    database_url: String,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
 ) {
-    let player_store = PlayerStore::load(players_file);
+    // Initialize player store and app state
+    let player_store = PlayerStore::load_postgres(&database_url);
     let advertised = advertised_markets(&known_markets);
     if !known_markets.is_empty() {
         if advertised.is_empty() {
@@ -221,6 +234,7 @@ async fn serve(
         order_book,
         active_visitors: Arc::new(AtomicUsize::new(0)),
         total_visitors: Arc::new(AtomicUsize::new(initial_total_visitors)),
+        fix_session_manager: FIXSessionManager::new(),
     };
 
     // Load initial pending orders from gRPC at startup
@@ -240,7 +254,7 @@ async fn serve(
     }
 
     let app = Router::new()
-        .route("/",            get(app_handler))
+        .route("/",            get(root_handler))
         .route("/login",       get(login_page_handler))
         .route("/app",         get(app_handler))
         .route("/api/login",   post(api_login_handler))
@@ -252,11 +266,13 @@ async fn serve(
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
-        .with_state(state);
+        .with_state(state.clone());
 
+    // Bind the TCP listener before starting the server to fail fast if the port is unavailable.
     let addr: SocketAddr = format!("0.0.0.0:{}", port)
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
+    // 
     let listener = TcpListener::bind(addr).await
         .unwrap_or_else(|e| panic!("Cannot bind to port {port}: {e}"));
 
@@ -267,6 +283,7 @@ async fn serve(
         .expect("axum server error");
 
     tracing::info!("[{}] Web server has shut down", market_name());
+    state.fix_session_manager.shutdown_all();
 }
 
 async fn shutdown_signal(shutdown: Arc<AtomicBool>) {
@@ -285,8 +302,27 @@ async fn shutdown_signal(shutdown: Arc<AtomicBool>) {
 }
 
 /// Serve the login page (always accessible, no auth required).
-async fn login_page_handler() -> impl IntoResponse {
-    Html(include_str!("../frontend/login.html"))
+#[derive(Deserialize)]
+struct LoginPageParams {
+    token: Option<String>,
+}
+
+async fn login_page_handler(
+    State(state): State<AppState>,
+    Query(params): Query<LoginPageParams>,
+) -> impl IntoResponse {
+    if let Some(token) = params.token {
+        if authenticate_token(&state, &token).is_some() {
+            return Redirect::to(&format!("/app?token={token}")).into_response();
+        }
+    }
+
+    Html(include_str!("../frontend/login.html")).into_response()
+}
+
+/// Redirect the root URL to the canonical app route.
+async fn root_handler() -> impl IntoResponse {
+    Redirect::to("/app")
 }
 
 /// Serve the trading terminal. Auth is enforced client-side via sessionStorage
@@ -422,6 +458,7 @@ async fn load_initial_order_book(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
+    // Each order from the dump is added to the order book state.
     for pending_order in dump_response.orders {
         let symbol = pending_order.symbol.clone();
         let book = book_state.get_or_create(&symbol);

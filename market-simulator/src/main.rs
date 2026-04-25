@@ -588,6 +588,10 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let bus = EventBus::new();
     let global_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let order_book = Arc::new(std::sync::Mutex::new(OrderBookState::new()));
+    let database_url = config.resolve_database_url().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+    })?;
+    let player_store = web::players::PlayerStore::load_postgres(&database_url);
 
     // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
     market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
@@ -597,6 +601,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         market_feed_sources,
         Arc::clone(&global_shutdown),
         Arc::clone(&order_book),
+        player_store,
     );
 
     {
@@ -628,11 +633,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     }
 
     // DB engine thread
-    let database_url = config.resolve_database_url().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
-    })?;
-
-
     let db_engine = match db::DatabaseEngine::new(ob_db_rx, &database_url, Arc::clone(&global_shutdown)) {
         Ok(engine) => engine,
         Err(e) => {
@@ -795,12 +795,13 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         let grpc_addr    = format!("http://127.0.0.1:{}", config.grpc.port);
         let web_ip = config.web.ip.clone();
         let web_port = config.web.port;
+        let web_database_url = database_url.clone();
         let web_shutdown = Arc::clone(&global_shutdown);
         let known_markets = market_simulator.known_markets.clone();
         let order_book = Arc::clone(&order_book);
         move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: web_core });
-            run_web_server(bus, fix_tcp_addr, grpc_addr, &web_ip, web_port, std::path::PathBuf::from("players.json"), known_markets, web_shutdown, order_book);
+            run_web_server(bus, fix_tcp_addr, grpc_addr, &web_ip, web_port, web_database_url, known_markets, web_shutdown, order_book);
         }
     });
 

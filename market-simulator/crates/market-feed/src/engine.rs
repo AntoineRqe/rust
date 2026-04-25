@@ -66,7 +66,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         order_result
             .trades
             .iter()
-            .map(|trade| Trade::from_trade(order_event.side, trade))
+            .map(|trade| Trade::from_trade(&order_event.cl_ord_id, order_event.side, trade))
             .collect()
     }
 
@@ -106,7 +106,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
 
         let mut events = Vec::new();
         for trade in self.build_trade_events(order_event, order_result) {
-            let header = self.build_header(order_event, MessageType::Trade, 49);
+            let header = self.build_header(order_event, MessageType::Trade, 89);
             events.push(MarketEvent::Trade(header, trade));
         }
 
