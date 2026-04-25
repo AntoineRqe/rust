@@ -320,6 +320,7 @@
              oninput="syncOrderInputFromSlider('o-qty')">
     </div>
   </div>
+  <div id="o-qty-max-hint" style="padding:0 14px 4px;color:var(--muted);font-size:10px">Max qty: —</div>
   <div class="frow"><label>Limit Price</label>
     <div class="spin-wrap">
       <input id="o-price" type="number" step="0.1" min="0" value="150.00">
@@ -1620,10 +1621,86 @@ function renderBuyCapacityHint() {
   el.textContent = `BUY available (${marketName}): ${capacity.available.toFixed(2)}`;
 }
 
+function updateDynamicQtyLimit() {
+  const qtyInput = ge('o-qty');
+  const qtySlider = ge('o-qty-range');
+  const priceInput = ge('o-price');
+  const symbolInput = ge('o-sym');
+  const qtyHint = ge('o-qty-max-hint');
+  if (!qtyInput || !qtySlider || !priceInput || !symbolInput) return;
+
+  if (!qtyInput.dataset.baseMin) qtyInput.dataset.baseMin = qtyInput.min || '1';
+  if (!qtyInput.dataset.baseMax) qtyInput.dataset.baseMax = qtyInput.max || '200';
+  if (!qtySlider.dataset.baseMin) qtySlider.dataset.baseMin = qtySlider.min || '1';
+  if (!qtySlider.dataset.baseMax) qtySlider.dataset.baseMax = qtySlider.max || '200';
+
+  const baseMin = Number(qtySlider.dataset.baseMin || 1);
+  const baseMax = Number(qtySlider.dataset.baseMax || 200);
+
+  let minQty = baseMin;
+  let maxQty = baseMax;
+  let capText = '—';
+  let capLabel = 'Max qty';
+
+  if (side === 'BUY') {
+    capLabel = 'Max buy qty';
+    const marketName = getSelectedOrderMarketName();
+    const capacity = computeBuyCapacityForMarket(marketName);
+    const price = Number(priceInput.value || 0);
+
+    if (capacity && Number.isFinite(price) && price > 0) {
+      const affordableQty = Math.floor(Math.max(0, capacity.available) / price);
+      if (affordableQty <= 0) {
+        minQty = 0;
+        maxQty = 0;
+        capText = '0';
+      } else {
+        minQty = 1;
+        maxQty = affordableQty;
+        capText = String(affordableQty);
+      }
+    } else if (capacity && Number.isFinite(price) && price <= 0) {
+      capText = 'set price';
+    }
+  } else if (side === 'SELL') {
+    capLabel = 'Max sell qty';
+    const symbol = String(symbolInput.value || '').trim().toUpperCase();
+    const sellCapacity = computeSellCapacity(symbol);
+    const availableQty = Math.floor(Math.max(0, Number(sellCapacity.available) || 0));
+
+    if (availableQty <= 0) {
+      minQty = 0;
+      maxQty = 0;
+      capText = '0';
+    } else {
+      minQty = 1;
+      maxQty = availableQty;
+      capText = String(availableQty);
+    }
+  }
+
+  qtyInput.min = String(minQty);
+  qtySlider.min = String(minQty);
+  qtyInput.max = String(maxQty);
+  qtySlider.max = String(maxQty);
+
+  let qtyValue = Number(qtyInput.value || 0);
+  if (!Number.isFinite(qtyValue)) qtyValue = minQty;
+  qtyValue = Math.min(maxQty, Math.max(minQty, Math.round(qtyValue)));
+  qtyInput.value = String(qtyValue);
+  qtySlider.value = String(qtyValue);
+
+  if (qtyHint) {
+    qtyHint.textContent = `${capLabel}: ${capText}`;
+  }
+}
+
 function renderOrderCostPreview() {
   const buyEl = ge('buy-cost-hint');
   const sellEl = ge('sell-value-hint');
   if (!buyEl || !sellEl) return;
+
+  updateDynamicQtyLimit();
 
   const symbol = ge('o-sym') ? ge('o-sym').value.trim().toUpperCase() : '';
   const qty = ge('o-qty') ? Number(ge('o-qty').value) : 0;
@@ -1690,10 +1767,11 @@ function sendOrder() {
     if (!currentIsAdmin) {
       const sellCapacity = computeSellCapacity(symbol);
       if (sellCapacity.available + 1e-9 < qty) {
+        const maxSellQty = Math.floor(Math.max(0, Number(sellCapacity.available) || 0));
         appendLog({
           ts: now(),
           label: 'REJECTED',
-          body: `Insufficient equity inventory for SELL ${symbol}: required ${Math.round(qty)}, available ${Math.round(sellCapacity.available)}`,
+          body: `Insufficient equity inventory for SELL ${symbol}: required ${Math.round(qty)}, available ${Math.round(sellCapacity.available)} (max sell qty: ${maxSellQty})`,
           tag: 'err',
         });
         return;
