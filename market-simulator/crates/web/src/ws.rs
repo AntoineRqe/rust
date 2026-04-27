@@ -365,7 +365,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                             let holdings = state.player_store.get_holdings_summary(username);
                             let owned_qty = holdings
                                 .get(&normalized_symbol)
-                                .copied()
+                                .map(|holding| holding.quantity)
                                 .unwrap_or(0.0);
                             let reserved_sell_qty: f64 = player
                                 .pending_orders

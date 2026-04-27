@@ -151,6 +151,15 @@
                 font-size:12px;font-weight:bold;padding:2px 6px;margin-left:4px;
                 flex-shrink:0}
   .order-cancel:hover{color:#ff5577}
+  .holdings-panel{padding:0 6px 8px;display:grid;gap:6px}
+  .holding-card{background:linear-gradient(180deg,#17202c 0%, #111723 100%);border:1px solid #233044;
+                border-left:4px solid var(--gold);border-radius:6px;padding:8px 10px;
+                box-shadow:0 0 0 1px rgba(255,215,64,.04) inset}
+  .holding-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .holding-symbol{color:var(--gold);font-size:12px;font-weight:bold;letter-spacing:.05em}
+  .holding-qty{color:var(--text);font-size:13px;font-weight:bold;font-variant-numeric:tabular-nums}
+  .holding-meta{display:flex;justify-content:space-between;gap:10px;margin-top:6px;font-size:10px;color:var(--muted)}
+  .holding-meta strong{display:block;color:var(--teal);font-size:11px;margin-top:2px;font-variant-numeric:tabular-nums}
 
   /* ── order book ── */
   #book-hdr{display:flex;justify-content:space-between;align-items:center;padding:8px 10px 4px}
@@ -486,7 +495,7 @@ let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdI
 let currentVisitorCount = 0;
 let currentTotalVisitorCount = 0;
 let lastTokenBalance = null;
-const currentHoldings = {}; // symbol -> quantity
+const currentHoldings = {}; // symbol -> { quantity, avgPrice }
 const orderOwners = {}; // cl_ord_id -> username
 const orderOwnersByOrderId = {}; // order_id(string) -> username
 let playerStateTimer = null;    // debounce handle for handlePlayerState
@@ -1365,9 +1374,11 @@ function handlePlayerState(msg) {
   const holdings = msg && typeof msg.holdings === 'object' && msg.holdings ? msg.holdings : {};
   Object.keys(holdings).forEach(symbol => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
-    const qty = Number(holdings[symbol] || 0);
+    const holding = holdings[symbol] || {};
+    const qty = Number(holding.quantity || 0);
+    const avgPrice = Number(holding.avg_price || 0);
     if (!normalizedSymbol || !(qty > 0)) return;
-    currentHoldings[normalizedSymbol] = qty;
+    currentHoldings[normalizedSymbol] = { quantity: qty, avgPrice };
   });
 
   const owners = msg && typeof msg.order_owners === 'object' && msg.order_owners ? msg.order_owners : {};
@@ -1583,7 +1594,8 @@ function computeSellCapacity(symbol) {
   const normalizedSymbol = String(symbol || '').trim().toUpperCase();
   if (!normalizedSymbol) return { available: 0 };
 
-  const ownedQty = Number(currentHoldings[normalizedSymbol] || 0);
+  const holding = currentHoldings[normalizedSymbol] || {};
+  const ownedQty = Number(holding.quantity || 0);
   const reservedSellQty = Object.keys(openOrders).reduce((sum, id) => {
     const order = openOrders[id];
     if (!order) return sum;
@@ -1604,7 +1616,7 @@ function renderHoldings() {
   if (!list) return;
 
   const entries = Object.entries(currentHoldings)
-    .filter(([, qty]) => Number(qty) > 0)
+    .filter(([, holding]) => Number((holding && holding.quantity) || 0) > 0)
     .sort((a, b) => a[0].localeCompare(b[0]));
 
   if (entries.length === 0) {
@@ -1612,9 +1624,27 @@ function renderHoldings() {
     return;
   }
 
-  list.innerHTML = entries
-    .map(([symbol, qty]) => `<div class="order-row"><div class="order-info"><span class="sym">${esc(symbol)}</span><span class="qty">${Math.round(Number(qty) || 0).toLocaleString()}</span></div></div>`)
-    .join('');
+  list.innerHTML = `<div class="holdings-panel">${entries
+    .map(([symbol, holding]) => {
+      const qty = Number((holding && holding.quantity) || 0);
+      const avgPrice = Number((holding && holding.avgPrice) || 0);
+      return `<div class="holding-card">
+        <div class="holding-top">
+          <span class="holding-symbol">${esc(symbol)}</span>
+        </div>
+        <div class="holding-meta">
+          <div>
+            AVG BUY
+            <strong>${avgPrice > 0 ? fmt(avgPrice) : '—'}</strong>
+          </div>
+          <div>
+            POSITION
+            <strong>${fmtQty(qty)}</strong>
+          </div>
+        </div>
+      </div>`;
+    })
+    .join('')}</div>`;
 }
 
 function renderBuyCapacityHint() {

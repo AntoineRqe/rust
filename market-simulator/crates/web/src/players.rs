@@ -290,12 +290,32 @@ impl PlayerStore {
 
     /// Return a holdings summary (symbol → total remaining quantity) derived
     /// from open portfolio lots for a player.
-    pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, f64> {
-        let mut summary: HashMap<String, f64> = HashMap::new();
+    pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, crate::state::HoldingSummary> {
+        let mut total_qty: HashMap<String, f64> = HashMap::new();
+        let mut total_cost: HashMap<String, f64> = HashMap::new();
+
         for lot in self.get_portfolio(username) {
-            *summary.entry(lot.symbol).or_insert(0.0) += lot.quantity;
+            *total_qty.entry(lot.symbol.clone()).or_insert(0.0) += lot.quantity;
+            *total_cost.entry(lot.symbol).or_insert(0.0) += lot.quantity * lot.price;
         }
-        summary
+
+        total_qty
+            .into_iter()
+            .filter_map(|(symbol, quantity)| {
+                if quantity <= 0.0 {
+                    return None;
+                }
+
+                let avg_price = total_cost.get(&symbol).copied().unwrap_or(0.0) / quantity;
+                Some((
+                    symbol,
+                    crate::state::HoldingSummary {
+                        quantity,
+                        avg_price,
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// Return a snapshot of the player's current state, or `None` if unknown.

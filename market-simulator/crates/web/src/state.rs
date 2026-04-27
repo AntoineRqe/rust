@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoldingSummary {
+    pub quantity: f64,
+    pub avg_price: f64,
+}
+
 /// A single order resting in the order book on behalf of a player.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingOrder {
@@ -374,7 +380,7 @@ pub enum WsEvent {
         username: String,
         tokens: f64,
         pending_orders: Vec<PendingOrder>,
-        holdings: HashMap<String, f64>,
+        holdings: HashMap<String, HoldingSummary>,
         order_owners: HashMap<String, String>,
         is_admin: bool,
         visitor_count: usize,
