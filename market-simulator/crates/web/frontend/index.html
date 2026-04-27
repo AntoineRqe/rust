@@ -70,31 +70,17 @@
   .market-card-header h3{color:var(--teal);font-size:12px;font-weight:bold;margin:0;flex:1}
   .market-book{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}
   .market-book-layout{display:flex;flex-direction:column;height:100%;min-height:0}
-  .market-book-section{flex:2;display:flex;flex-direction:column;min-height:0}
+  .market-book-section{display:flex;flex-direction:column;min-height:0;flex:1}
   .market-levels{flex:1;overflow-y:auto;min-height:0}
-  .market-trades-section{flex:1;display:flex;flex-direction:column;min-height:0;
-                         border-top:2px solid var(--border);margin-top:8px;padding-top:6px}
+  .market-chart{border-top:1px solid var(--border);padding:6px 8px 8px;background:#0a0c10;flex-shrink:0}
+  .market-chart-title{font-size:8px;color:var(--muted);letter-spacing:.1em;margin-bottom:4px}
+  .market-chart svg{display:block;width:100%;height:72px}
+  .market-trades-section{display:flex;flex-direction:column;min-height:92px;max-height:120px;
+                         border-top:2px solid var(--border);margin-top:8px;padding-top:6px;flex-shrink:0}
   .market-trades-list{flex:1;overflow-y:auto;min-height:0;padding-top:2px}
   .market-controls{padding:8px;border-top:1px solid var(--border);background:var(--panel);}
   .market-subtitle{font-size:10px;color:var(--muted);letter-spacing:.04em;margin-top:2px}
-  .market-chart{border-top:1px solid var(--border);padding:6px 8px 8px;background:#0a0c10}
-  .market-chart-title{font-size:8px;color:var(--muted);letter-spacing:.1em;margin-bottom:4px}
-  .market-chart svg{display:block;width:100%;height:58px}
-  #bottom-panels{display:grid;grid-template-columns:1fr 1fr;gap:8px;
-                 padding:8px;border-top:1px solid var(--border);background:var(--panel2);
-                 flex-shrink:0;height:33vh;min-height:220px;max-height:none;position:static;
-                 margin-left:0;width:calc(100% - 290px)}
-  #bottom-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-height:0}
-  #bottom-logs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-height:0}
-  .bottom-chart-card{border:1px solid var(--border);background:#0a0c10;border-radius:4px;
-             padding:6px 8px;display:flex;flex-direction:column;min-height:0}
-  .bottom-chart-title{font-size:9px;color:var(--muted);letter-spacing:.08em;margin-bottom:4px}
-    .bottom-chart-card svg{display:block;width:100%;height:100%;flex:1;min-height:0}
-  .bottom-log-card{border:1px solid var(--border);background:#0a0c10;border-radius:4px;
-                   padding:6px 8px;display:flex;flex-direction:column;min-height:0}
-  .bottom-log-title{display:flex;align-items:center;justify-content:space-between;
-                    font-size:9px;color:var(--muted);letter-spacing:.08em;margin-bottom:4px}
-  .bottom-log-box{flex:1;overflow-y:auto;font-size:9px;line-height:1.35;min-height:0}
+  #bottom-panels{display:none}
   .bottom-log-entry{margin-bottom:6px}
   .bottom-log-entry .ts{color:var(--muted)}
   .bottom-log-entry .lbl{font-weight:bold}
@@ -105,8 +91,22 @@
   #col-left{width:290px;min-width:260px;background:var(--panel);
             border-right:1px solid var(--border);flex-shrink:0;overflow-y:auto}
   #col-book{display:none}
-  #col-log{display:none}
+  #col-log{width:340px;min-width:300px;background:var(--panel);
+           border-left:1px solid var(--border);flex-shrink:0;display:flex}
   #col-chart{display:none}
+  .log-stack{display:flex;flex-direction:column;gap:8px;padding:8px;min-height:0;flex:1;overflow:hidden}
+  .log-tabs{display:flex;gap:6px;padding:0 0 2px}
+  .log-tab-btn{flex:1;padding:8px 0;background:#0e1520;color:var(--muted);
+               border:1px solid var(--border);border-radius:4px;
+               font-size:10px;font-weight:bold;letter-spacing:.06em;text-transform:uppercase}
+  .log-tab-btn.active{color:var(--green);border-color:var(--green);background:rgba(0,230,118,.08)}
+  .log-panels{display:flex;flex:1;min-height:0}
+  .log-card{display:none;flex-direction:column;min-height:0;flex:1;background:#0a0c10;
+            border:1px solid var(--border);border-radius:4px;overflow:hidden}
+  .log-card.active{display:flex}
+  .log-card-title{display:flex;justify-content:space-between;align-items:center;
+                  padding:8px 10px 4px;font-size:9px;color:var(--muted);letter-spacing:.1em}
+  .log-card-box{flex:1;overflow-y:auto;padding:0 8px 8px;font-size:10px;min-height:0}
 
   /* ── form elements ── */
   .stitle{font-size:9px;letter-spacing:.12em;color:var(--muted);
@@ -254,7 +254,7 @@
     #body{flex-direction:column}
     #col-left {width:100%;min-width:0;border-right:none;border-bottom:1px solid var(--border);
            max-height:38vh;overflow-y:auto;flex-shrink:0}
-    #bottom-panels{margin-left:0;width:100%}
+    #col-log{width:100%;min-width:0;border-left:none;border-top:1px solid var(--border);max-height:34vh}
   }
 
   /* ════════════════════════════════════
@@ -268,7 +268,8 @@
     #col-left,#col-book,#col-log,#markets-container{
       width:100%;min-width:0;height:100%;flex-shrink:0;
       border:none;max-height:none;display:none}
-    #col-left.active,#col-book.active,#col-log.active,#markets-container.active{display:flex}
+    #col-left.active,#col-book.active,#col-log.active{display:flex}
+    #markets-container.active{display:grid}
     .btn{padding:12px 0;font-size:13px}
     .btn-send{padding:14px 0;font-size:15px}
     .frow input{font-size:13px;padding:7px 6px}
@@ -276,7 +277,7 @@
     .dlg-row{flex-direction:column;align-items:flex-start}
     .dlg-row label{width:auto;margin-bottom:3px}
     .dlg-row input,.dlg-row select{width:100%}
-    #bottom-panels{display:none}
+    #col-log{border-top:none}
   }
 </style>
 </head>
@@ -296,7 +297,7 @@
 <div id="tabbar">
   <button onclick="showTab('col-left')"  id="tab-left">ORDERS</button>
   <button onclick="showTab('col-book')"  id="tab-book" class="active">MARKETS</button>
-  <button onclick="showTab('col-log')"   id="tab-log">LOG</button>
+  <button onclick="showTab('col-log')"   id="tab-log">LOGS</button>
 </div>
 
 <div id="body">
@@ -385,33 +386,42 @@
 <!-- LOG: message log -->
 <div id="col-log" class="panel">
   <div id="log-hdr">
-    <span>MESSAGE LOG</span>
-    <button class="ghost" onclick="ge('log-box').innerHTML=''">CLEAR</button>
+    <span>LOGS</span>
+    <button class="ghost" onclick="clearAllLogs()">CLEAR ALL</button>
   </div>
-  <div id="log-box"></div>
+  <div class="log-stack">
+    <div class="log-tabs">
+      <button id="log-tab-system" class="log-tab-btn active" onclick="showLogTab('system')">SYSTEM</button>
+      <button id="log-tab-fix" class="log-tab-btn" onclick="showLogTab('fix')">FIX</button>
+      <button id="log-tab-md" class="log-tab-btn" onclick="showLogTab('md')">MD</button>
+    </div>
+    <div class="log-panels">
+    <div id="log-panel-system" class="log-card active">
+      <div class="log-card-title">
+        <span>SYSTEM LOG</span>
+        <button class="ghost" onclick="ge('log-box').innerHTML=''">CLEAR</button>
+      </div>
+      <div id="log-box" class="log-card-box"></div>
+    </div>
+    <div id="log-panel-fix" class="log-card">
+      <div class="log-card-title">
+        <span>FIX LOG</span>
+        <button class="ghost" onclick="ge('fix-log-box').innerHTML=''">CLEAR</button>
+      </div>
+      <div id="fix-log-box" class="log-card-box"></div>
+    </div>
+    <div id="log-panel-md" class="log-card">
+      <div class="log-card-title">
+        <span>MD LOG</span>
+        <button class="ghost" onclick="ge('md-log-box').innerHTML=''">CLEAR</button>
+      </div>
+      <div id="md-log-box" class="log-card-box"></div>
+    </div>
+    </div>
+  </div>
 </div>
 
 </div><!-- #body -->
-
-<div id="bottom-panels">
-  <div id="bottom-charts"></div>
-  <div id="bottom-logs">
-    <div class="bottom-log-card">
-      <div class="bottom-log-title">
-        <span>FIX LOG</span>
-        <button class="ghost" onclick="ge('bottom-fix-log').innerHTML=''">CLEAR</button>
-      </div>
-      <div id="bottom-fix-log" class="bottom-log-box"></div>
-    </div>
-    <div class="bottom-log-card">
-      <div class="bottom-log-title">
-        <span>MD LOG</span>
-        <button class="ghost" onclick="ge('bottom-md-log').innerHTML=''">CLEAR</button>
-      </div>
-      <div id="bottom-md-log" class="bottom-log-box"></div>
-    </div>
-  </div>
-</div>
 
 <!-- DIALOG -->
 <div id="dlg-ov">
@@ -462,6 +472,7 @@ if (!AUTH_TOKEN) {
 // ── state ─────────────────────────────────────────────────────────────────────
 let side      = 'BUY';
 let dlgType   = null;
+let activeLogTab = 'system';
 let ws        = null;
 const LEVELS  = 8;
 let clordSeq  = 0;
@@ -808,7 +819,6 @@ function renderMarketsContainer() {
     container.innerHTML = html;
   }
 
-  renderBottomCharts();
 }
 
 
@@ -2045,12 +2055,16 @@ function appendLog(entry) {
   while (box.children.length > 300) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 
-  appendBottomLog(entry);
+  appendChannelLog(entry);
 }
 
-function appendBottomLog(entry) {
-  const isMd = String(entry.tag || '').toLowerCase() === 'md';
-  const box = ge(isMd ? 'bottom-md-log' : 'bottom-fix-log');
+function appendChannelLog(entry) {
+  const tag = String(entry.tag || '').toLowerCase();
+  const isMd = tag === 'md';
+  const isFix = tag === 'send' || tag === 'feed';
+  if (!isMd && !isFix) return;
+
+  const box = ge(isMd ? 'md-log-box' : 'fix-log-box');
   if (!box) return;
 
   const el = document.createElement('div');
@@ -2060,6 +2074,21 @@ function appendBottomLog(entry) {
   box.appendChild(el);
   while (box.children.length > 220) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
+}
+
+function clearAllLogs() {
+  ['log-box', 'fix-log-box', 'md-log-box'].forEach(id => {
+    const el = ge(id);
+    if (el) el.innerHTML = '';
+  });
+}
+
+function showLogTab(name) {
+  activeLogTab = name;
+  ['system', 'fix', 'md'].forEach(tab => {
+    ge(`log-tab-${tab}`)?.classList.toggle('active', tab === name);
+    ge(`log-panel-${tab}`)?.classList.toggle('active', tab === name);
+  });
 }
 
 function now() {
@@ -2462,36 +2491,14 @@ function renderMarketBook(marketName) {
     <div class="market-book-section">
       <div class="market-levels">${bookLevelsHtml}</div>
     </div>
+    <div class="market-chart">
+      <div class="market-chart-title">PRICE CHART</div>
+      ${renderMarketMiniChartSvg(b)}
+    </div>
     <div class="market-trades-section">
       <div class="market-trades-list">${tradesHtml}</div>
     </div>
   </div>`;
-
-  renderBottomCharts();
-}
-
-function renderBottomCharts() {
-  const container = ge('bottom-charts');
-  if (!container) return;
-
-  const marketNames = resolveSplitMarketConfigs()
-    .map(market => normalizeMarketName(market.name))
-    .filter(name => markets[name]);
-
-  if (marketNames.length === 0) {
-    container.innerHTML = '';
-    return;
-  }
-
-  container.innerHTML = marketNames
-    .map(name => {
-      const market = markets[name];
-      return `<div class="bottom-chart-card">
-        <div class="bottom-chart-title">${esc(name)} PRICE CHART</div>
-        ${renderMarketMiniChartSvg((market && market.book) || null)}
-      </div>`;
-    })
-    .join('');
 }
 
 function referencePriceFromBook(bookState) {
