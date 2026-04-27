@@ -26,6 +26,3 @@ lazy_static.workspace = true
 name = "ob_bench"
 harness = false
 path = "bench/bench.rs"
-
-[profile.bench]
-debug = true

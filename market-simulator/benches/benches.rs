@@ -353,7 +353,7 @@ fn benchmark_latency_market_feed(iters: u64, histogram: &mut Histogram<u64>) -> 
         let mut engine = MarketDataFeedEngine::new(
             inbound_rx,
             Arc::clone(&shutdown),
-            "127.0.0.1",
+            "127.0.0.1".to_string(),
             recv_port,
         )
         .unwrap();
