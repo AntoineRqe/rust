@@ -20,7 +20,7 @@ pub struct SourceSocket {
 
 impl SourceSocket {
 
-    pub fn new(ip: &str, port: u16, market: &str) -> std::io::Result<Self> {
+    pub fn new(ip: String, port: u16, market: &str) -> std::io::Result<Self> {
         let source = MulticastSource::new(ip, port, market);
         let socket = Self::create_multicast_sender_socket()?;
         Ok(Self { source, socket })
@@ -47,11 +47,11 @@ impl SourceSocket {
 }
 
 impl MulticastSource {
-    pub fn new(ip: &str, port: u16, market: &str) -> Self {
+    pub fn new(ip: String, port: u16, market: &str) -> Self {
         let addr = format!("{}:{}", ip, port);
         Self {
             market: market.to_string(),
-            ip: ip.to_string(),
+            ip,
             port,
             address: addr,
         }

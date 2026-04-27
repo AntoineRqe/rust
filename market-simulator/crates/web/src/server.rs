@@ -184,10 +184,14 @@ pub fn run_web_server(
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
+    core_id: usize,
 ) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("web-tokio")
+        .on_thread_start(move || {
+            core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+        })
         .build()
         .expect("Failed to build tokio runtime")
         .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, database_url, known_markets, shutdown, order_book))

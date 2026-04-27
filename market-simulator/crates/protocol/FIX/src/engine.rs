@@ -18,15 +18,11 @@ use crossbeam::queue::{ArrayQueue};
 use std::cell::UnsafeCell;
 use serde::Serialize;
 use tokio::sync::mpsc;
+use utils::market_name;
+
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
-fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    MARKET_NAME
-        .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
-        .as_str()
-}
 
 pub fn kill_fix_inbound_engine<const N: usize>(net_to_fix_tx: &crossbeam::channel::Sender<FixRawMsg<N>>) {
     // Send a special shutdown message to the FIX engine's inbound queue

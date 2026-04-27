@@ -34,7 +34,7 @@ pub struct MarketDataFeedEngine<'a, const N: usize> {
 impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
     pub fn new(fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
                shutdown: Arc<AtomicBool>,
-               ip: &str,
+               ip: String,
                port: u16) -> Result<Self, std::io::Error> {
 
         Ok(Self { fifo_in, shutdown, seq_num: 0, source: SourceSocket::new(ip, port, market_name())? })
@@ -200,7 +200,7 @@ mod tests {
         MarketDataFeedEngine::new(
             consumer_in,
             Arc::new(AtomicBool::new(false)),
-            "239.0.0.1",
+            "239.0.0.1".to_string(),
             0,
         )
         .unwrap()
@@ -272,7 +272,7 @@ mod tests {
             let mut engine = MarketDataFeedEngine::new(
                 consumer_in,
                 Arc::clone(&shutdown_signal),
-                multicast_ip,
+                multicast_ip.to_string(),
                 port,
             )
             .unwrap();
@@ -281,7 +281,7 @@ mod tests {
                 engine.run();
             });
 
-            let recv_handle = s.spawn(move || retrieve_market_data_feed_events(port, multicast_ip).unwrap());
+            let recv_handle = s.spawn(move || retrieve_market_data_feed_events(port, &multicast_ip).unwrap());
 
             std::thread::sleep(std::time::Duration::from_millis(100));
             producer_in.push((order_event, order_result)).unwrap();

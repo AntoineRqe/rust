@@ -43,7 +43,9 @@
                 "web_core": 6,
                 "tcp_core": 7,
                 "global_core": 8,
-                "snapshot_core": 9
+                "snapshot_core": 9,
+                "market_feed_multicast_core": 10,
+                "snapshot_multicast_core": 11
             }
         },
         {
@@ -83,7 +85,9 @@
                 "web_core": 6,
                 "tcp_core": 7,
                 "global_core": 8,
-                "snapshot_core": 9
+                "snapshot_core": 9,
+                "market_feed_multicast_core": 10,
+                "snapshot_multicast_core": 11
             }
         }
     ]

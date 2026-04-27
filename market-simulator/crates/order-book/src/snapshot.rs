@@ -34,7 +34,17 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
 
     pub fn run(&self) {
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(self.interval_ms)); // Sleep for the configured interval before generating the next snapshot
+            let wait_started = std::time::Instant::now();
+            let wait_target = std::time::Duration::from_millis(self.interval_ms);
+
+            while wait_started.elapsed() < wait_target {
+                if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+
+                let remaining = wait_target.saturating_sub(wait_started.elapsed());
+                std::thread::park_timeout(remaining);
+            }
             
             if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                 break; // Check for shutdown signal again after waking up to avoid generating an unnecessary snapshot

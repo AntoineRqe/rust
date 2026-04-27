@@ -11,7 +11,7 @@ pub struct SnapshotMultiCastEngine<'a, const N: usize> {
 }
 
 impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, Arc<Snapshot>, N>, shutdown: Arc<AtomicBool>, ip: &str, port: u16) -> Self {
+    pub fn new(fifo_in: Consumer<'a, Arc<Snapshot>, N>, shutdown: Arc<AtomicBool>, ip: String, port: u16) -> Self {
         Self { 
             fifo_in,
             shutdown,
