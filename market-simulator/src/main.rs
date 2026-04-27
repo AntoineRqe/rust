@@ -531,6 +531,7 @@ impl ThreadHandles {
 
 struct MarketSimulator {
     config: MarketConfig,
+    player_database_url: String,
     thread_handles: Arc<Mutex<ThreadHandles>>,
     shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Multicast endpoints for order book snapshots to forward to GUI websockets.
@@ -584,6 +585,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let mut market_simulator = market_simulator.lock().unwrap();
 
     let config = market_simulator.config.clone();
+    let player_database_url = market_simulator.player_database_url.clone();
     let market_feed_sources = market_simulator.market_feed_sources.clone();
     let bus = EventBus::new();
     let global_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -591,7 +593,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let database_url = config.resolve_database_url().map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
     })?;
-    let player_store = web::players::PlayerStore::load_postgres(&database_url);
+    let player_store = web::players::PlayerStore::load_postgres(&player_database_url);
 
     // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
     market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
@@ -795,7 +797,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         let grpc_addr    = format!("http://127.0.0.1:{}", config.grpc.port);
         let web_ip = config.web.ip.clone();
         let web_port = config.web.port;
-        let web_database_url = database_url.clone();
+        let web_database_url = player_database_url.clone();
         let web_shutdown = Arc::clone(&global_shutdown);
         let known_markets = market_simulator.known_markets.clone();
         let order_book = Arc::clone(&order_book);
@@ -900,10 +902,17 @@ fn main() {
 
         let market_config = config
             .markets
-            .into_iter()
-            .nth(index)
+            .get(index)
+            .cloned()
             .unwrap_or_else(|| {
                 tracing::error!("Market index {index} out of range");
+                std::process::exit(1);
+            });
+
+        let player_database_url = config
+            .resolve_player_database_url(&market_config)
+            .unwrap_or_else(|e| {
+                tracing::error!("{e}");
                 std::process::exit(1);
             });
 
@@ -916,6 +925,7 @@ fn main() {
 
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,
+            player_database_url,
             thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
             shutdown: None,
             market_feed_sources,

@@ -73,8 +73,8 @@ impl OrderBook {
             // Arbitrary initial capacity for the heaps to avoid frequent resizing; can be adjusted based on expected order volume.
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
-            internal_id_counter: 0, // Initialize the internal order ID counter to zero
-            trade_id_counter: 0, // Initialize the trade ID counter to zero
+            internal_id_counter: 1, // Start at 1; 0 is reserved as the sentinel "no ID" value
+            trade_id_counter: 1, // Start at 1; 0 is reserved as the sentinel "no ID" value
             order_map: HashMap::new(), // Initialize the order map
             symbol: symbol.to_string(), // Set the symbol for this order book
         }
@@ -691,7 +691,7 @@ mod tests {
         assert_eq!(order2.price, FixedPointArithmetic::from_f64(99.0));
         assert_eq!(order2.quantity, FixedPointArithmetic::from_f64(5.0));
         assert_eq!(result2.trades.len(), 1); // 5 units * 99.0 price
-        assert_eq!(result2.trades[0].id, 0); // Trade ID should be 0 for the first trade
+        assert_eq!(result2.trades[0].id, 1); // Trade ID should be 1 for the first trade (counter starts at 1)
         assert_eq!(result2.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
         assert_eq!(result2.trades[0].price, FixedPointArithmetic::from_f64(100.0)); // 100.0
         assert_eq!(result2.trades.avg_price(), FixedPointArithmetic::from_f64(100.0)); // Average price should be 100.0
@@ -912,10 +912,10 @@ mod tests {
         assert_eq!(order4.price, FixedPointArithmetic::from_f64(f64::MAX)); // Price is ignored for market orders
         assert_eq!(order4.quantity, FixedPointArithmetic::from_f64(12.0));
         assert_eq!(result4.trades.len(), 2); // 2 trades executed
-        assert_eq!(result4.trades[0].id, 0); // Trade ID should be 0 for the first trade
+        assert_eq!(result4.trades[0].id, 1); // Trade ID should be 1 for the first trade (counter starts at 1)
         assert_eq!(result4.trades[0].quantity, FixedPointArithmetic::from_f64(5.0)); // 5 units filled
         assert_eq!(result4.trades[0].price, FixedPointArithmetic::from_f64(98.0)); // 5 units * 98.0 price
-        assert_eq!(result4.trades[1].id, 1); // Trade ID should be 1 for the second trade
+        assert_eq!(result4.trades[1].id, 2); // Trade ID should be 2 for the second trade
         assert_eq!(result4.trades[1].quantity, FixedPointArithmetic::from_f64(7.0)); // 7 units filled
         assert_eq!(result4.trades[1].price, FixedPointArithmetic::from_f64(98.0)); // 7 units * 98.0 price
         assert_eq!(result4.status, OrderStatus::New);

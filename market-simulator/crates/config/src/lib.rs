@@ -57,6 +57,8 @@ impl MarketConfig {
 pub struct MarketsConfig {
     pub ring_buffer_size: usize,
     pub entry_point: Connection,
+    pub player_database_url: Option<String>,
+    pub player_database_url_env: Option<String>,
     pub markets: Vec<MarketConfig>,
 }
 
@@ -82,8 +84,23 @@ impl MarketsConfig {
                 ip: "127.0.0.1".to_string(),
                 port: 9875,
             },
+            player_database_url: None,
+            player_database_url_env: None,
             markets: vec![],
         }
+    }
+
+    pub fn resolve_player_database_url(&self, market: &MarketConfig) -> Result<String, String> {
+        if let Some(env_key) = &self.player_database_url_env {
+            return env::var(env_key)
+                .map_err(|_| format!("missing env var '{}' for global player database", env_key));
+        }
+
+        if let Some(url) = &self.player_database_url {
+            return Ok(url.clone());
+        }
+
+        market.resolve_database_url()
     }
 
     pub fn parse_from_file(file_path: &str) -> Self {

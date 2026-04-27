@@ -1,5 +1,5 @@
 use dotenvy::dotenv;
-use sqlx::{query, query_scalar, PgPool, Row, Transaction, Postgres};
+use sqlx::{query, PgPool, Row, Transaction, Postgres};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::future::Future;
@@ -22,9 +22,13 @@ use std::sync::atomic::Ordering;
 use utils::market_name;
 
 
+/// Database engine that consumes order events and results from the matching engine
 pub struct DatabaseEngine<'a, const N: usize> {
+    /// Consumer for order events and results coming from the matching engine
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
+    /// Atomic flag to signal shutdown
     shutdown: Arc<AtomicBool>,
+    /// Shared database connection pool (need to be shared with gRPC control service)
     pool: Arc<PgPool>,
 }
 
@@ -61,6 +65,10 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
         tracing::info!("[{}] Database engine shutting down gracefully", market_name());
     }
 
+    /// Persists an order event and its corresponding result to the database, and updates the pending orders table accordingly.
+    /// Arguments:
+    /// - `order_event`: The order event to persist (e.g. new order, cancel order, etc.)
+    /// - `order_result`: The result of processing the order event (e.g. filled, cancelled, rejected, etc.)
     pub fn persist_order_update(
         &self,
         order_event: &OrderEvent,
@@ -69,18 +77,31 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
         block_on_db(persist_order_update(&self.pool, order_event, order_result))
     }
 
+    /// Retrieves all order events from the database, ordered by insertion time.
+     /// Returns a vector of `OrderEvent` structs representing all order events in the database.
+    pub fn get_all_trades(&self) -> Result<Vec<Trade>, sqlx::Error> {
+        block_on_db(collect_all_trades(&self.pool))
+    }
+
+    /// Retrieves all order events from the database, ordered by insertion time.
+    /// Returns a vector of `OrderEvent` structs representing all order events in the database.
     pub fn get_all_order_events(&self) -> Result<Vec<OrderEvent>, sqlx::Error> {
         block_on_db(collect_all_orders(&self.pool))
     }
 
+    /// Retrieves all order results from the database, ordered by insertion time.
+    /// Returns a vector of `OrderResult` structs representing all order results in the database.
     pub fn get_all_order_results(&self) -> Result<Vec<OrderResult>, sqlx::Error> {
         block_on_db(collect_all_order_results(&self.pool))
     }
 
+    /// Retrieves all pending orders from the database, ordered by insertion time.
+    /// Returns a vector of `OrderEvent` structs representing all pending orders in the database.
     pub fn get_all_pending_orders(&self) -> Result<Vec<OrderEvent>, sqlx::Error> {
         block_on_db(collect_all_pending_orders(&self.pool))
     }
 
+    /// Deletes all order events, order results, trades and pending orders from the database, and resets the auto-incrementing IDs.
     pub fn reset_database(&self) -> Result<(), sqlx::Error> {
         block_on_db(reset_database(&self.pool))
     }
@@ -112,23 +133,30 @@ where
     }
 }
 
+/// Connects to the database using the provided URL, and returns a connection pool.
 pub async fn connect_from_env() -> Result<PgPool, sqlx::Error> {
     dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     connect(&database_url).await
 }
 
+/// Connects to the database using the provided URL, and returns a connection pool.
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     tracing::debug!("[{}] Connecting to database at {}", market_name(), database_url);
+
+    // Allow configuring max connections and acquire timeout via environment variables, with sensible defaults
     let max_connections = env::var("DB_MAX_CONNECTIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(10);
+
+    // Setting a longer acquire timeout to avoid connection acquisition failures during high load or long-running transactions
     let acquire_timeout_secs = env::var("DB_ACQUIRE_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(10);
 
+    // Extract search_path/schema from the database URL, and set it on each new connection to ensure the database engine operates within the correct schema if specified
     let schema = extract_search_path_from_database_url(database_url);
     if let Some(schema) = &schema {
         tracing::debug!("[{}] Using database schema/search_path '{}'", market_name(), schema);
@@ -139,6 +167,8 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
         .after_connect(move |conn, _meta| {
             let schema = schema.clone();
+            // Use Box::pin beacause `after_connect` requires a `Pin<Box<dyn Future<Output = Result<(), sqlx::Error>> + Send>>`
+            // Async future smay be self-referential due to the captured `schema` variable, so we need to pin it on the heap to ensure it is not moved after being returned from this closure.
             Box::pin(async move {
                 if let Some(schema) = schema {
                     query("SELECT set_config('search_path', $1, false)")
@@ -209,6 +239,9 @@ fn extract_search_path_from_options(options: &str) -> Option<String> {
     None
 }
 
+/// This function creates the necessary tables in the database if they do not already exist.
+/// It uses advisory locks to ensure that only one instance of the database engine can create the tables at a time, preventing
+/// race conditions and potential conflicts.
 pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -217,179 +250,97 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(&mut *tx)
         .await?;
 
-    // Check whether each table already exists.
-    let order_event_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("order_event")
-        .fetch_one(&mut *tx)
-        .await?;
-    let order_result_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("order_result")
-        .fetch_one(&mut *tx)
-        .await?;
-    let trades_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("trades")
-        .fetch_one(&mut *tx)
-        .await?;
-    let pending_orders_exists: Option<String> = query_scalar("SELECT to_regclass($1)::text")
-        .bind("pending_orders")
-        .fetch_one(&mut *tx)
-        .await?;
-
-    // All tables present — nothing to do; skip all DDL to avoid permission
-    // errors on the public schema (PostgreSQL 15+ restricts CREATE/ALTER to
-    // the table owner).
-    if order_event_exists.is_some()
-        && order_result_exists.is_some()
-        && trades_exists.is_some()
-        && pending_orders_exists.is_some()
-    {
-        tx.commit().await?;
-        tracing::debug!("[{}] Database tables already exist, skipping DDL", utils::market_name());
-        return Ok(());
-    }
-
-    // ── First-time setup ─────────────────────────────────────────────────────
-    if order_event_exists.is_none() {
-        query(
-            r#"
-            CREATE TABLE IF NOT EXISTS order_event (
-                id BIGSERIAL PRIMARY KEY,
-                price DOUBLE PRECISION,
-                quantity DOUBLE PRECISION,
-                side TEXT,
-                symbol TEXT,
-                order_type TEXT,
-                cl_ord_id TEXT,
-                orig_cl_ord_id TEXT,
-                order_id TEXT,
-                sender_id TEXT,
-                target_id TEXT,
-                event_timestamp TEXT,
-                payload JSONB,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            "#,
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS order_event (
+            id BIGSERIAL PRIMARY KEY,
+            price DOUBLE PRECISION,
+            quantity DOUBLE PRECISION,
+            side TEXT,
+            symbol TEXT,
+            order_type TEXT,
+            cl_ord_id TEXT,
+            orig_cl_ord_id TEXT,
+            order_id TEXT,
+            sender_id TEXT,
+            target_id TEXT,
+            event_timestamp BIGINT,
+            payload JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-        .execute(&mut *tx)
-        .await?;
-    }
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
 
-    // Column migrations — only applied when order_event was just created or
-    // was partially migrated on a previous incomplete run.
-    if order_event_exists.is_none() {
-        for col_sql in [
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS side TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS symbol TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS order_type TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS cl_ord_id TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS orig_cl_ord_id TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS order_id TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS sender_id TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS target_id TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS event_timestamp TEXT",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS payload JSONB",
-            "ALTER TABLE order_event ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-        ] {
-            query(col_sql).execute(&mut *tx).await?;
-        }
-    }
-
-    if order_result_exists.is_none() {
-        query(
-            r#"
-            CREATE TABLE IF NOT EXISTS order_result (
-                id BIGSERIAL PRIMARY KEY,
-                cl_ord_id TEXT,
-                internal_order_id BIGINT,
-                result_type TEXT NOT NULL,
-                status TEXT,
-                reason TEXT,
-                payload JSONB,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            "#,
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS order_result (
+            id BIGSERIAL PRIMARY KEY,
+            cl_ord_id TEXT,
+            order_id BIGINT,
+            result_timestamp BIGINT,
+            result_type TEXT NOT NULL,
+            status TEXT,
+            reason TEXT,
+            payload JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-        .execute(&mut *tx)
-        .await?;
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
 
-        query("ALTER TABLE order_result ADD COLUMN IF NOT EXISTS internal_order_id BIGINT")
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    if trades_exists.is_none() {
-        query(
-            r#"
-            CREATE TABLE IF NOT EXISTS trades (
-                id BIGSERIAL PRIMARY KEY,
-                trade_id BIGINT,
-                exec_id TEXT UNIQUE,
-                symbol TEXT,
-                buy_cl_ord_id TEXT,
-                sell_cl_ord_id TEXT,
-                qty DOUBLE PRECISION NOT NULL,
-                price DOUBLE PRECISION NOT NULL,
-                payload JSONB,
-                traded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            "#,
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS trades (
+            id BIGSERIAL PRIMARY KEY,
+            trade_id BIGINT,
+            exec_id TEXT UNIQUE,
+            symbol TEXT,
+            buy_cl_ord_id TEXT,
+            sell_cl_ord_id TEXT,
+            qty DOUBLE PRECISION NOT NULL,
+            price DOUBLE PRECISION NOT NULL,
+            order_qty DOUBLE PRECISION,
+            leaves_qty DOUBLE PRECISION,
+            payload JSONB,
+            traded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-        .execute(&mut *tx)
-        .await?;
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
 
-        query("ALTER TABLE trades ADD COLUMN IF NOT EXISTS trade_id BIGINT")
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    if pending_orders_exists.is_none() {
-        query(
-            r#"
-            CREATE TABLE IF NOT EXISTS pending_orders (
-                cl_ord_id TEXT PRIMARY KEY,
-                price DOUBLE PRECISION,
-                quantity DOUBLE PRECISION,
-                side TEXT,
-                symbol TEXT,
-                order_type TEXT,
-                orig_cl_ord_id TEXT,
-                order_id TEXT,
-                sender_id TEXT,
-                target_id TEXT,
-                event_timestamp TEXT,
-                payload JSONB,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            "#,
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS pending_orders (
+            cl_ord_id TEXT PRIMARY KEY,
+            price DOUBLE PRECISION,
+            quantity DOUBLE PRECISION,
+            side TEXT,
+            symbol TEXT,
+            order_type TEXT,
+            orig_cl_ord_id TEXT,
+            order_id TEXT,
+            sender_id TEXT,
+            target_id TEXT,
+            event_timestamp BIGINT,
+            payload JSONB,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-        .execute(&mut *tx)
-        .await?;
-
-        for col_sql in [
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS side TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS symbol TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_type TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS orig_cl_ord_id TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_id TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS sender_id TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS target_id TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS event_timestamp TEXT",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS payload JSONB",
-            "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-        ] {
-            query(col_sql).execute(&mut *tx).await?;
-        }
-    }
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
-
     Ok(())
 }
 
+/// This function resets the database by truncating all tables and restarting their identity columns.
+/// It uses advisory locks to ensure that only one instance of the database engine can reset the database at a time, preventing
+/// race conditions and potential conflicts.
 pub async fn reset_database(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -402,7 +353,7 @@ pub async fn reset_database(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(&mut *tx)
         .await?;
 
-    query("TRUNCATE TABLE pending_orders")
+    query("TRUNCATE TABLE pending_orders RESTART IDENTITY")
         .execute(&mut *tx)
         .await?;
 
@@ -410,6 +361,7 @@ pub async fn reset_database(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Retrieves all order events from the database, ordered by insertion time.
 pub async fn collect_all_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::Error> {
     let rows = query(
         r#"
@@ -423,7 +375,8 @@ pub async fn collect_all_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::
             orig_cl_ord_id,
             order_id,
             sender_id,
-            target_id
+            target_id,
+            event_timestamp AS event_timestamp_ms
         FROM order_event
         ORDER BY id ASC
         "#,
@@ -445,11 +398,13 @@ pub async fn collect_all_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::
                 .map(|value| OrderId::from_ascii(&value)),
             sender_id: entity_id_from_option(row.get("sender_id")),
             target_id: entity_id_from_option(row.get("target_id")),
+            timestamp_ms: i64_to_timestamp_ms(row.get::<Option<i64>, _>("event_timestamp_ms")),
             ..Default::default()
         })
         .collect())
 }
 
+/// Retrieves all trades from the database, ordered by insertion time.
 pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error> {
     let rows = query(
         r#"
@@ -460,8 +415,8 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
             sell_cl_ord_id,
             qty,
             price,
-            (payload->>'order_qty')::double precision AS order_qty,
-            (payload->>'leaves_qty')::double precision AS leaves_qty
+            order_qty,
+            leaves_qty
         FROM trades
         ORDER BY id ASC
         "#,
@@ -496,11 +451,13 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
         .collect())
 }
 
+/// Retrieves all order results from the database, ordered by insertion time.
 pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>, sqlx::Error> {
     let rows = query(
         r#"
         SELECT
-            internal_order_id,
+            order_id,
+            result_timestamp AS result_timestamp_ms,
             status
         FROM order_result
         ORDER BY id ASC
@@ -513,10 +470,11 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
         .into_iter()
         .map(|row| OrderResult {
             internal_order_id: row
-                .get::<Option<i64>, _>("internal_order_id")
+                .get::<Option<i64>, _>("order_id")
                 .unwrap_or_default() as u64,
             trades: types::Trades::<4>::new(),
             status: parse_order_status(row.get("status")),
+            timestamp_ms: i64_to_timestamp_ms(row.get::<Option<i64>, _>("result_timestamp_ms")),
             // `Instant` cannot be faithfully reconstructed from SQL text, so we
             // restore a fresh monotonic timestamp here.
             ..Default::default()
@@ -524,6 +482,7 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
         .collect())
 }
 
+/// Retrieves all pending orders from the database, ordered by insertion time.
 pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::Error> {
     let rows = query(
         r#"
@@ -537,7 +496,8 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
             orig_cl_ord_id,
             order_id,
             sender_id,
-            target_id
+            target_id,
+            event_timestamp AS event_timestamp_ms
         FROM pending_orders
         ORDER BY cl_ord_id ASC
         "#,
@@ -559,16 +519,22 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
                 .map(|value| OrderId::from_ascii(&value)),
             sender_id: entity_id_from_option(row.get("sender_id")),
             target_id: entity_id_from_option(row.get("target_id")),
+            timestamp_ms: i64_to_timestamp_ms(row.get::<Option<i64>, _>("event_timestamp_ms")),
             ..Default::default()
         })
         .collect())
 }
 
+/// 
 pub async fn persist_order_update(
     pool: &PgPool,
     order_event: &OrderEvent,
     order_result: &OrderResult,
 ) -> Result<(), sqlx::Error> {
+    if is_sentinel_event(order_event, order_result) {
+        return Ok(());
+    }
+
     let mut tx = pool.begin().await?;
 
     let result_type = classify_result_type(order_event, order_result);
@@ -578,6 +544,30 @@ pub async fn persist_order_update(
         OrderStatus::Cancelled => Some("cancelled"),
         _ => None,
     };
+    let order_id_text = order_id_text_from_internal(order_result.internal_order_id);
+
+    // First, I add order event and order result records, which are immutable and represent the source of truth for what happened in the market.
+    // Then, I update the pending orders table based on the order event and result, which is mutable and represents the current state of pending orders in the market.
+    let order_event_payload = serde_json::json!({
+        "price": order_event.price.to_f64(),
+        "quantity": order_event.quantity.to_f64(),
+        "side": format!("{:?}", order_event.side),
+        "symbol": order_event.symbol.to_string(),
+        "order_type": format!("{:?}", order_event.order_type),
+        "cl_ord_id": order_event.cl_ord_id.to_string(),
+        "orig_cl_ord_id": order_event.orig_cl_ord_id.map(|id| id.to_string()),
+        "order_id": order_id_text,
+        "sender_id": order_event.sender_id.to_string(),
+        "target_id": order_event.target_id.to_string(),
+        "timestamp_ms": order_event.timestamp_ms,
+    });
+    let order_result_payload = serde_json::json!({
+        "order_id": order_result.internal_order_id,
+        "status": status,
+        "result_type": result_type,
+        "reason": reason,
+        "timestamp_ms": order_result.timestamp_ms,
+    });
 
     query(
         r#"
@@ -589,12 +579,13 @@ pub async fn persist_order_update(
             order_type,
             cl_ord_id,
             orig_cl_ord_id,
+            order_id,
             sender_id,
             target_id,
             event_timestamp,
             payload
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_jsonb($11::text))
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(order_event.price.to_f64())
@@ -604,10 +595,11 @@ pub async fn persist_order_update(
     .bind(format!("{:?}", order_event.order_type))
     .bind(order_event.cl_ord_id.to_string())
     .bind(order_event.orig_cl_ord_id.map(|id| id.to_string()))
+    .bind(order_id_text_from_internal(order_result.internal_order_id))
     .bind(order_event.sender_id.to_string())
     .bind(order_event.target_id.to_string())
-    .bind(format!("{:?}", order_event.timestamp_ms))
-    .bind(format!("{}", order_event))
+    .bind(timestamp_ms_to_i64(order_event.timestamp_ms))
+    .bind(order_event_payload)
     .execute(&mut *tx)
     .await?;
 
@@ -615,24 +607,27 @@ pub async fn persist_order_update(
         r#"
         INSERT INTO order_result (
             cl_ord_id,
-            internal_order_id,
+            order_id,
+            result_timestamp,
             result_type,
             status,
             reason,
             payload
         )
-        VALUES ($1, $2, $3, $4, $5, to_jsonb($6::text))
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(order_event.cl_ord_id.to_string())
     .bind(order_result.internal_order_id as i64)
+    .bind(timestamp_ms_to_i64(order_result.timestamp_ms))
     .bind(result_type)
     .bind(status)
     .bind(reason)
-    .bind(format!("{}", order_result))
+    .bind(order_result_payload)
     .execute(&mut *tx)
     .await?;
 
+    // If the order was filled or partially filled, we need to insert the corresponding trades into the trades table, and update the pending orders table accordingly.
     if matches!(result_type, "FILL" | "PARTIAL_FILL") {
         for trade in order_result.trades.iter() {
             let (buy_cl_ord_id, sell_cl_ord_id) = match order_event.side {
@@ -656,9 +651,11 @@ pub async fn persist_order_update(
                     sell_cl_ord_id,
                     qty,
                     price,
+                    order_qty,
+                    leaves_qty,
                     payload
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, jsonb_build_object('order_qty', $8, 'leaves_qty', $9))
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, jsonb_build_object('order_qty', $8, 'leaves_qty', $9))
                 ON CONFLICT (exec_id) DO NOTHING
                 "#,
             )
@@ -676,12 +673,14 @@ pub async fn persist_order_update(
         }
     }
 
+    // Finally, I update the pending orders table based on the order event and result. This table is mutable and represents the current state of pending orders in the market.
     sync_pending_orders(&mut tx, order_event, order_result, result_type).await?;
 
     tx.commit().await?;
     Ok(())
 }
 
+/// Synchronizes the pending orders table based on the order event and result.
 async fn sync_pending_orders(
     tx: &mut Transaction<'_, Postgres>,
     order_event: &OrderEvent,
@@ -708,6 +707,9 @@ async fn sync_pending_orders(
         return Ok(());
     }
 
+    // Update the pending orders table based on the order event and result.
+    // - If the order is new or partially filled, we insert or update the pending order with the remaining quantity.
+    // - If the order is filled, cancelled or rejected, we remove it from the pending orders table.
     let remaining_qty = remaining_quantity(order_event, order_result);
 
     match result_type {
@@ -722,13 +724,14 @@ async fn sync_pending_orders(
                     symbol,
                     order_type,
                     orig_cl_ord_id,
+                    order_id,
                     sender_id,
                     target_id,
                     event_timestamp,
                     payload,
                     updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_jsonb($11::text), NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
                 ON CONFLICT (cl_ord_id) DO UPDATE SET
                     price = EXCLUDED.price,
                     quantity = EXCLUDED.quantity,
@@ -736,6 +739,7 @@ async fn sync_pending_orders(
                     symbol = EXCLUDED.symbol,
                     order_type = EXCLUDED.order_type,
                     orig_cl_ord_id = EXCLUDED.orig_cl_ord_id,
+                    order_id = EXCLUDED.order_id,
                     sender_id = EXCLUDED.sender_id,
                     target_id = EXCLUDED.target_id,
                     event_timestamp = EXCLUDED.event_timestamp,
@@ -750,10 +754,23 @@ async fn sync_pending_orders(
             .bind(order_event.symbol.to_string())
             .bind(format!("{:?}", order_event.order_type))
             .bind(order_event.orig_cl_ord_id.map(|id| id.to_string()))
+            .bind(order_id_text_from_internal(order_result.internal_order_id))
             .bind(order_event.sender_id.to_string())
             .bind(order_event.target_id.to_string())
-            .bind(format!("{:?}", order_event.timestamp_ms))
-            .bind(format!("{}", order_event))
+            .bind(timestamp_ms_to_i64(order_event.timestamp_ms))
+            .bind(serde_json::json!({
+                "price": order_event.price.to_f64(),
+                "quantity": remaining_qty.to_f64(),
+                "side": format!("{:?}", order_event.side),
+                "symbol": order_event.symbol.to_string(),
+                "order_type": format!("{:?}", order_event.order_type),
+                "cl_ord_id": order_event.cl_ord_id.to_string(),
+                "orig_cl_ord_id": order_event.orig_cl_ord_id.map(|id| id.to_string()),
+                "order_id": order_id_text_from_internal(order_result.internal_order_id),
+                "sender_id": order_event.sender_id.to_string(),
+                "target_id": order_event.target_id.to_string(),
+                "timestamp_ms": order_event.timestamp_ms,
+            }))
             .execute(&mut **tx)
             .await?;
         }
@@ -777,6 +794,7 @@ fn remaining_quantity(order_event: &OrderEvent, order_result: &OrderResult) -> F
     }
 }
 
+/// Classifies the result type of an order update based on the order event and result.
 fn classify_result_type(order_event: &OrderEvent, order_result: &OrderResult) -> &'static str {
     match order_result.status {
         OrderStatus::Filled => "FILL",
@@ -845,9 +863,40 @@ fn trade_id_from_option(value: Option<String>) -> Option<u64> {
     .and_then(|raw| raw.parse::<u64>().ok())
 }
 
+fn order_id_text_from_internal(internal_order_id: u64) -> Option<String> {
+    if internal_order_id == 0 {
+        None
+    } else {
+        Some(internal_order_id.to_string())
+    }
+}
+
+fn is_sentinel_event(order_event: &OrderEvent, order_result: &OrderResult) -> bool {
+    order_event.price == FixedPointArithmetic::ZERO
+        && order_event.quantity == FixedPointArithmetic::ZERO
+        && order_event.order_type == OrderType::LimitOrder
+        && order_event.cl_ord_id.to_string().is_empty()
+        && order_event.orig_cl_ord_id.is_none()
+        && order_event.sender_id.to_string().is_empty()
+        && order_event.target_id.to_string().is_empty()
+        && order_event.symbol.to_string().is_empty()
+        && order_result.internal_order_id == 0
+        && order_result.trades.len() == 0
+        && order_result.status == OrderStatus::Unmatched
+}
+
+fn timestamp_ms_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn i64_to_timestamp_ms(value: Option<i64>) -> u64 {
+    value.unwrap_or_default().max(0) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::query_scalar;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
     use types::{OrderType, Trade, Trades};
@@ -893,6 +942,7 @@ mod tests {
             orig_cl_ord_id: Some(OrderId::from_ascii("orig123")),
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
+            timestamp_ms: 1_712_345_678_901,
             ..Default::default()
         };
 
@@ -927,6 +977,16 @@ mod tests {
         assert_eq!(orders[0].symbol.to_string(), "TEST");
         assert_eq!(orders[0].order_type, OrderType::LimitOrder);
         assert_eq!(orders[0].side, Side::Buy);
+        assert_eq!(orders[0].timestamp_ms, 1_712_345_678_901);
+
+        let persisted_order_id: Option<String> = query_scalar(
+            "SELECT order_id FROM order_event WHERE cl_ord_id = $1"
+        )
+        .bind("test123")
+        .fetch_optional(&pool)
+        .await?
+        .flatten();
+        assert_eq!(persisted_order_id.as_deref(), Some("101"));
 
         assert_eq!(trades[0].id, 123);
         assert_eq!(trades[0].cl_ord_id.to_string(), "maker123");
@@ -977,6 +1037,7 @@ mod tests {
             internal_order_id: 102,
             status: OrderStatus::PartiallyFilled,
             trades,
+            timestamp_ms: 1_755_123_456_789,
             ..Default::default()
         };
 
@@ -990,6 +1051,7 @@ mod tests {
 
         assert_eq!(stored_results[0].status, OrderStatus::PartiallyFilled);
         assert_eq!(stored_results[0].internal_order_id, 102);
+        assert_eq!(stored_results[0].timestamp_ms, 1_755_123_456_789);
 
         let trade = &stored_trades[0];
         assert_eq!(trade.id, 456);
@@ -1022,6 +1084,7 @@ mod tests {
             orig_cl_ord_id: None,
             sender_id: EntityId::from_ascii("broker-a"),
             target_id: EntityId::from_ascii("broker-b"),
+            timestamp_ms: 1_700_000_000_000,
             ..Default::default()
         };
 
@@ -1038,6 +1101,7 @@ mod tests {
         assert_eq!(pending_after_new.len(), 1);
         assert_eq!(pending_after_new[0].cl_ord_id.to_string(), "pend001");
         assert_eq!(pending_after_new[0].quantity.to_f64(), 100.0);
+        assert_eq!(pending_after_new[0].timestamp_ms, 1_700_000_000_000);
 
         let mut partial_trades = Trades::<4>::new();
         partial_trades.add_trade(Trade {
@@ -1147,6 +1211,25 @@ mod tests {
             },
         ).await?;
 
+        assert!(collect_all_pending_orders(&pool).await?.is_empty());
+
+        reset_database(&pool).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sentinel_default_event_is_not_persisted() -> Result<(), sqlx::Error> {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().await;
+
+        let pool = connect_from_env().await?;
+        create_tables(&pool).await?;
+        reset_database(&pool).await?;
+
+        persist_order_update(&pool, &OrderEvent::default(), &OrderResult::default()).await?;
+
+        assert!(collect_all_orders(&pool).await?.is_empty());
+        assert!(collect_all_order_results(&pool).await?.is_empty());
+        assert!(collect_all_trades(&pool).await?.is_empty());
         assert!(collect_all_pending_orders(&pool).await?.is_empty());
 
         reset_database(&pool).await?;

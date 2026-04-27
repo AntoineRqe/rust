@@ -1637,6 +1637,24 @@ function updateDynamicQtyLimit() {
   const baseMin = Number(qtySlider.dataset.baseMin || 1);
   const baseMax = Number(qtySlider.dataset.baseMax || 200);
 
+  if (currentIsAdmin) {
+    qtyInput.min = String(baseMin);
+    qtySlider.min = String(baseMin);
+    qtyInput.max = String(baseMax);
+    qtySlider.max = String(baseMax);
+
+    let qtyValue = Number(qtyInput.value || 0);
+    if (!Number.isFinite(qtyValue)) qtyValue = baseMin;
+    qtyValue = Math.min(baseMax, Math.max(baseMin, Math.round(qtyValue)));
+    qtyInput.value = String(qtyValue);
+    qtySlider.value = String(qtyValue);
+
+    if (qtyHint) {
+      qtyHint.textContent = 'Max qty: admin override';
+    }
+    return;
+  }
+
   let minQty = baseMin;
   let maxQty = baseMax;
   let capText = '—';

@@ -129,23 +129,33 @@ The detailed setup is documented below in the simulator runtime section.
 
 ## Running the Simulator
 
-### Database configuration (per market)
+### Database configuration
 
-Each market process now uses its own PostgreSQL database URL from config.
+The simulator uses two persistence scopes:
+
+- per-market databases for order/trade/pending-order persistence
+- one global database for player accounts/portfolio/tokens
 
 In `crates/config/default.json`, each market declares:
 
 - `database_url_env` (preferred): name of the environment variable to read
 - `database_url` (optional fallback): direct connection string
 
+And globally (top-level in the same config file):
+
+- `player_database_url_env` (preferred): env var for the shared player database
+- `player_database_url` (optional fallback): direct connection string
+
 Default config uses:
 
+- `DATABASE_URL_MARKET_SIMULATOR`
 - `DATABASE_URL_NASDAQ`
 - `DATABASE_URL_NYSE`
 
-Set both before starting:
+Set all three before starting:
 
 ```bash
+export DATABASE_URL_MARKET_SIMULATOR=postgres://<user>:<password>@localhost:5432/market_simulator
 export DATABASE_URL_NASDAQ=postgres://<user>:<password>@localhost:5432/market_nasdaq
 export DATABASE_URL_NYSE=postgres://<user>:<password>@localhost:5432/market_nyse
 ```
