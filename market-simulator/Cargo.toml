@@ -15,6 +15,8 @@ members = [
     "crates/grpc",
     "crates/config",
     "crates/market-feed",
+    "crates/snapshot",
+    "crates/proxy",
 ]
 
 # Shared dependencies across all crates
