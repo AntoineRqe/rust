@@ -1170,9 +1170,19 @@ function handleServerEvent(msg, marketName) {
       if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
         resetClientMarketView(marketName);
       }
+      // Request player state after a trade/execution report for immediate UI update
+      if (msg.body && /\b(TRADE|EXECUTION REPORT|FILLED|PARTIALLY FILLED)\b/i.test(msg.body)) {
+        requestPlayerState();
+      }
       break;
     default:
       console.warn('Unknown server event:', msg);
+  }
+}
+
+function requestPlayerState() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'get_player_state' }));
   }
 }
 
