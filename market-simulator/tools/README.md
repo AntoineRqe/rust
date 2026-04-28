@@ -63,3 +63,99 @@ sudo ufw allow 7654/tcp
 ### Connecting to the Web Terminal
 
 Once you have set up port forwarding and firewall rules, you can access the web terminal from any device with internet access by navigating to `https://<your-public-ip>:<port>`. Remember to replace `<your-public-ip>` with your actual public IP address and `<port>` with the port number you configured.
+
+
+## Daily AAPL SELL automation
+
+The `daily_aapl_sell.py` script can place a daily SELL order on simulator markets (NASDAQ, NYSE, and optionally IEX Cloud) at a specific Paris time.
+
+Default behavior:
+- Run every day at `09:00` in `Europe/Paris`
+- Fetch AAPL prices from NASDAQ + NYSE public quote endpoints
+- Optionally, fetch AAPL price from IEX Cloud (see below)
+- Send one SELL limit order to each configured market TCP endpoint
+- Quantity: `100`
+
+### Quick start
+
+Dry-run once:
+
+```bash
+cd tools
+python daily_aapl_sell.py --once --dry-run
+```
+
+Run immediately once (sends orders):
+
+```bash
+cd tools
+python daily_aapl_sell.py --once
+```
+
+Run as a daily scheduler:
+
+```bash
+cd tools
+python daily_aapl_sell.py
+```
+
+
+
+### Using IEX Cloud or TradeWatch as a price source
+
+**IEX Cloud:**
+Register for a free API key at https://iexcloud.io and export your publishable token:
+
+```bash
+export IEX_CLOUD_API_TOKEN=sk_your_token_here
+```
+
+Then run:
+
+```bash
+python daily_aapl_sell.py --iex-market-name IEX
+```
+
+This will fetch the AAPL price from IEX Cloud and send a SELL order to the market endpoint named `IEX` in your config.
+
+**TradeWatch:**
+Register for an API key at https://dash.tradewatch.io/register and export your key:
+
+```bash
+export TRADEWATCH_API_KEY=tw_live_your_token_here
+```
+
+Then run:
+
+```bash
+python daily_aapl_sell.py --tradewatch-market-name TRADEWATCH
+```
+
+This will fetch the AAPL price from TradeWatch and send a SELL order to the market endpoint named `TRADEWATCH` in your config.
+
+### Useful options
+
+```bash
+python daily_aapl_sell.py --help
+```
+
+
+
+Important options:
+- `--config`: path to market config JSON (default: `crates/config/default.json`)
+- `--symbol`: ticker (default: `AAPL`)
+- `--qty`: quantity (default: `100`)
+- `--hour` / `--minute`: schedule time (default: `09:00`)
+- `--timezone`: scheduler timezone (default: `Europe/Paris`)
+- `--nasdaq-market-name` / `--nyse-market-name`: market names as defined in config (defaults: `NASDAQ`, `NYSE`)
+- `--iex-market-name`: market name for IEX Cloud in config (optional, enables IEX price fetch if set)
+- `--tradewatch-market-name`: market name for TradeWatch in config (optional, enables TradeWatch price fetch if set)
+- `--dry-run`: prints actions without sending FIX orders
+
+### Notes
+
+- The script uses direct FIX TCP order submission to each market endpoint from config.
+- If exchange endpoints are temporarily unavailable, that run will fail and retry on the next scheduled day.
+- NYSE `quotes/filter` sometimes returns metadata only (no live price) for some symbols. When NYSE indicates an `XNGS:*` instrument (e.g. `AAPL`), the script automatically falls back to NASDAQ quote data for the price value.
+- IEX Cloud requires a free API key (see tools/iex_api.py). If `--iex-market-name` is set, the script will fetch the price from IEX Cloud and send an order to the corresponding market endpoint.
+- TradeWatch requires an API key (see tools/tradewatch_api.py). If `--tradewatch-market-name` is set, the script will fetch the price from TradeWatch and send an order to the corresponding market endpoint.
