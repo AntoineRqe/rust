@@ -29,10 +29,12 @@ pub struct MarketConfig {
     pub web: Connection,
     pub tcp: Connection,
     pub grpc: Connection,
+    pub proxy: Connection,
     pub market_feed_multicast: MulticastConfig,
     pub snapshot_multicast: MulticastConfig,
     pub core_mapping: EngineCoreMapping,
     pub snapshot: SnapshotConfig,
+
 }
 
 impl MarketConfig {

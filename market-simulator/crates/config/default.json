@@ -21,6 +21,10 @@
                 "ip": "0.0.0.0",
                 "port": 50051
             },
+            "proxy": {
+                "ip": "127.0.0.1",
+                "port": 9878
+            },
             "market_feed_multicast": {
                 "ip": "239.0.0.1",
                 "port": 9001
@@ -64,6 +68,10 @@
                 "ip": "0.0.0.0",
                 "port": 50052
             },
+            "proxy": {
+                "ip": "127.0.0.1",
+                "port": 9880
+            },
             "market_feed_multicast": {
                 "ip": "239.0.0.1",
                 "port": 9003
@@ -74,7 +82,7 @@
             },
             "snapshot": {
                 "max_depth": 3,
-                "update_interval_ms": 100000
+                "update_interval_ms": 1000
             },
             "core_mapping": {
                 "order_book_core": 0,

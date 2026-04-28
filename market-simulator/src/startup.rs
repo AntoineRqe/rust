@@ -406,6 +406,9 @@ pub fn start_market_data_proxy(
     snapshot_feed_source: types::multicast::MulticastSource,
     shutdown: Arc<AtomicBool>,
     core_id: usize,
+    ws_ip: String,
+    ws_port: u16,
+
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let proxy = proxy::MarketDataProxy::new(
@@ -413,14 +416,17 @@ pub fn start_market_data_proxy(
         snapshot_feed_source,
         Arc::clone(&shutdown),
         core_id,
+        ws_ip,
+        ws_port,
     );
 
-    let _proxy_thread = std::thread::spawn(move || {
+    let proxy_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        proxy.run();
+        // TODO : Handle errors from the proxy and propagate them back to the main thread so we can log them and shut down gracefully if the proxy fails (currently if the market data proxy encounters an error, it will just panic and crash the thread, which is not ideal).
+        let _ = proxy.run();
     });
 
-    market_simulator.add_thread_handle(_proxy_thread);
+    market_simulator.add_thread_handle(proxy_thread);
 
     Ok(())
 }

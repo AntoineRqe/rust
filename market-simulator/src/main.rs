@@ -194,6 +194,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         snapshot_feed_sources[0].clone(),
         Arc::clone(&global_shutdown),
         config.core_mapping.market_data_proxy_core,
+            config.proxy.ip.clone(),
+            config.proxy.port,
     )?;
 
     // Snapshot multicast engine thread
