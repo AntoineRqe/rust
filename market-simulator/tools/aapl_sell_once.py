@@ -17,6 +17,22 @@ import socket
 from pathlib import Path
 from typing import Dict, Any
 
+def build_cancel_order(sender, target, symbol, seq, cl_ord_id, orig_cl_ord_id) -> bytes:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).strftime("%Y%m%d-%H:%M:%S")
+    body = (
+        fld(35, "F")  # Order Cancel Request
+        + fld(49, sender)
+        + fld(56, target)
+        + fld(34, seq)
+        + fld(52, now)
+        + fld(11, cl_ord_id)
+        + fld(41, orig_cl_ord_id)
+        + fld(55, symbol)
+        + fld(54, 2)  # Side: Sell
+    )
+    return wrap_fix(body)
+
 def fetch_nasdaq_price(symbol: str) -> float:
     import re, json
     from urllib import request
@@ -114,7 +130,7 @@ def main():
     parser.add_argument("--nasdaq-market-name", default="NASDAQ", help="Market name for NASDAQ in config")
     parser.add_argument("--nyse-market-name", default="NYSE", help="Market name for NYSE in config")
     parser.add_argument("--delta-percent", type=float, default=0.1, help="Percent delta for NYSE price (default: 0.1)")
-    parser.add_argument("--qty", type=int, default=100, help="Sell quantity")
+    parser.add_argument("--qty", type=int, default=10, help="Sell quantity")
     parser.add_argument("--sender", default="AUTO_BOT", help="FIX SenderCompID (49)")
     parser.add_argument("--target", default="SERVER1", help="FIX TargetCompID (56)")
     parser.add_argument("--dry-run", action="store_true", help="Print actions, do not send orders")
@@ -131,9 +147,26 @@ def main():
     price = fetch_nasdaq_price("AAPL")
     print(f"AAPL NASDAQ price (official): {price:.4f}")
 
-    # NASDAQ order
+
+    # Cancel previous NASDAQ order
     seq = 1
     cl_ord_id_nasdaq = f"AUTOSELL-NASDAQ"
+    cancel_nasdaq = build_cancel_order(
+        sender=args.sender,
+        target=args.target,
+        symbol="AAPL",
+        seq=seq,
+        cl_ord_id=cl_ord_id_nasdaq+"-CANCEL",
+        orig_cl_ord_id=cl_ord_id_nasdaq,
+    )
+    if args.dry_run:
+        print(f"[DRY RUN] Would send CANCEL for {cl_ord_id_nasdaq} to {nasdaq_name}")
+    else:
+        send_fix_message(endpoints[nasdaq_name], cancel_nasdaq)
+        print(f"Sent CANCEL for {cl_ord_id_nasdaq} to {nasdaq_name}")
+
+    # Send new NASDAQ order
+    seq += 1
     msg_nasdaq = build_sell_limit_order(
         sender=args.sender,
         target=args.target,
@@ -149,11 +182,27 @@ def main():
         send_fix_message(endpoints[nasdaq_name], msg_nasdaq)
         print(f"Sent SELL {args.qty} AAPL @ {price:.4f} to {nasdaq_name}")
 
-    # NYSE order at +/- delta percent
+    # Cancel previous NYSE order
+    seq += 1
+    cl_ord_id_nyse = f"AUTOSELL-NYSE"
+    cancel_nyse = build_cancel_order(
+        sender=args.sender,
+        target=args.target,
+        symbol="AAPL",
+        seq=seq,
+        cl_ord_id=cl_ord_id_nyse+"-CANCEL",
+        orig_cl_ord_id=cl_ord_id_nyse,
+    )
+    if args.dry_run:
+        print(f"[DRY RUN] Would send CANCEL for {cl_ord_id_nyse} to {nyse_name}")
+    else:
+        send_fix_message(endpoints[nyse_name], cancel_nyse)
+        print(f"Sent CANCEL for {cl_ord_id_nyse} to {nyse_name}")
+
+    # Send new NYSE order at +/- delta percent
     seq += 1
     delta = price * (args.delta_percent / 100.0)
     nyse_price = price + delta
-    cl_ord_id_nyse = f"AUTOSELL-NYSE"
     msg_nyse = build_sell_limit_order(
         sender=args.sender,
         target=args.target,

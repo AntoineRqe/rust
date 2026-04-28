@@ -299,6 +299,7 @@
   <span id="visitor-count">VISITORS: &#8212;</span>
   <span id="stale-badge-top" class="stale-badge">STALE (DISCONNECTED)</span>
   <span id="ws-dot">&#9679; WS</span>
+  <span id="ws-reconnect" style="display:none;font-size:10px;color:var(--muted);margin-left:8px;">Reconnecting…</span>
   <span id="status-dot">&#9679; DISCONNECTED</span>
   <button id="disconnect-btn" onclick="disconnect()" title="Disconnect and return to login" aria-label="Disconnect">Disconnect</button>
 </div>
@@ -803,16 +804,17 @@ function renderMarketsContainer() {
     const symbol = m.book.symbol;
     const lastPrice = m.book.last != null ? fmt(m.book.last) : '—';
     const statusColor = m.connected ? 'var(--green)' : 'var(--muted)';
-    
+    const staleBadge = !m.connected ? '<span class="stale-badge" style="display:inline-block;margin-left:8px">STALE (DISCONNECTED)</span>' : '';
+    // Keep the last known book and chart visible, only update connection status and show stale badge if disconnected
     return `<div class="market-card">
       <div class="market-card-header">
         <div>
           <h3>${esc(name)}</h3>
-          <div class="market-subtitle">${esc(symbol)} • last ${lastPrice}</div>
+          <div class="market-subtitle">${esc(symbol)} • last ${lastPrice} ${staleBadge}</div>
         </div>
       </div>
       <div class="market-book" id="market-${esc(name)}">
-        <div style="text-align:center;padding:20px;color:var(--muted)">Loading...</div>
+        <!-- Book and chart remain visible, do not clear on disconnect -->
       </div>
       <div class="market-controls">
         <span style="font-size:10px;color:${statusColor}">● ${m.connected ? 'CONNECTED' : 'DISCONNECTED'}</span>
@@ -827,7 +829,6 @@ function renderMarketsContainer() {
   } else {
     container.innerHTML = html;
   }
-
 }
 
 
@@ -954,6 +955,9 @@ renderOrderCostPreview();
 
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
+let wsDisconnectTimer = null;
+const WS_DISCONNECT_NOTICE_MS = 2000; // 2 seconds
+
 function connectWS() {
   const token = AUTH_TOKEN ? encodeURIComponent(AUTH_TOKEN) : '';
   const wsBase = buildWsEndpoint(getCurrentAppBaseUrl());
@@ -964,6 +968,12 @@ function connectWS() {
     resetPrimaryReconnect();
     ge('ws-dot').textContent = '● WS';
     ge('ws-dot').className   = 'on';
+    const wsReconnect = ge('ws-reconnect');
+    if (wsReconnect) wsReconnect.style.display = 'none';
+    if (wsDisconnectTimer) {
+      clearTimeout(wsDisconnectTimer);
+      wsDisconnectTimer = null;
+    }
     appendLog({ ts: now(), label: 'INFO', body: 'WebSocket connected', tag: 'info' });
     // Primary market connected
     const primaryMarket = getPrimaryMarketName();
@@ -983,14 +993,18 @@ function connectWS() {
   ws.onclose = () => {
     ge('ws-dot').textContent = '● WS';
     ge('ws-dot').className   = '';
-    const delay = schedulePrimaryReconnect();
-    appendLog({ ts: now(), label: 'INFO', body: `WebSocket disconnected — reconnecting in ${Math.round(delay/1000)}s…`, tag: 'info' });
+    const wsReconnect = ge('ws-reconnect');
+    if (wsReconnect) wsReconnect.style.display = '';
     handleStatus(false);
     const primaryMarket = getPrimaryMarketName();
     if (primaryMarket && markets[primaryMarket]) {
       markets[primaryMarket].connected = false;
       renderMarketsContainer();
     }
+    wsDisconnectTimer = setTimeout(() => {
+      const delay = schedulePrimaryReconnect();
+      appendLog({ ts: now(), label: 'INFO', body: `WebSocket disconnected — reconnecting in ${Math.round(delay/1000)}s…`, tag: 'info' });
+    }, WS_DISCONNECT_NOTICE_MS);
   };
 
   ws.onerror = err => {
@@ -2444,7 +2458,7 @@ function renderLevels(id, levels, cls, maxQ) {
       <div class="bar" style="width:${pct}%"></div>
       <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
-      <span class="lv-px">${fmt(px)}</span></div>`;
+      <span class="lv-px">${px.toFixed(4)}</span></div>`;
   }).join('');
 }
 
@@ -2479,7 +2493,7 @@ function renderMarketBook(marketName) {
       <div class="bar" style="width:${pct}%"></div>
       <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
-      <span class="lv-px">${fmt(px)}</span></div>`;
+      <span class="lv-px">${px.toFixed(4)}</span></div>`;
   });
   
   // Spread
@@ -2510,7 +2524,7 @@ function renderMarketBook(marketName) {
     b.trades.slice(0, 5).forEach(([px,qty,s,ts,owner='—',resolved=true]) => {
       const ownerBadge = resolved ? '' : '<span class="tr-owner-badge" title="Owner unresolved">?</span>';
       tradesHtml += `<div style="padding:1px 4px;font-size:8px;color:${s==='B'?'var(--green)':'var(--red)'}">
-        ${s} ${esc(owner)}${ownerBadge} ${Math.round(qty)}@${fmt(px)}</div>`;
+        ${s} ${esc(owner)}${ownerBadge} ${Math.round(qty)}@${px.toFixed(4)}</div>`;
     });
   } else {
     tradesHtml = `<div style="padding:2px 4px;font-size:8px;color:var(--muted)">TRADES</div>
