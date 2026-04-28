@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 types = { path = "../types" }
 tracing.workspace = true
+core_affinity.workspace = true

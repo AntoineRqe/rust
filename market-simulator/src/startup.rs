@@ -398,3 +398,29 @@ pub fn start_tcp_server(
 
     Ok(())
 }
+
+// ---------------- Market Data Proxy ----------------
+pub fn start_market_data_proxy(
+    market_simulator: &mut crate::MarketSimulator,
+    market_feed_source: types::multicast::MulticastSource,
+    snapshot_feed_source: types::multicast::MulticastSource,
+    shutdown: Arc<AtomicBool>,
+    core_id: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+
+    let proxy = proxy::MarketDataProxy::new(
+        market_feed_source,
+        snapshot_feed_source,
+        Arc::clone(&shutdown),
+        core_id,
+    );
+
+    let _proxy_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+        proxy.run();
+    });
+
+    market_simulator.add_thread_handle(_proxy_thread);
+
+    Ok(())
+}

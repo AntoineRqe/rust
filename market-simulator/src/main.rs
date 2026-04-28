@@ -62,6 +62,7 @@ pub struct MarketSimulator {
     shutdown: Option<Arc<AtomicBool>>,
     /// Multicast endpoints for order book snapshots to forward to GUI websockets.
     market_feed_sources: Vec<MulticastSource>,
+    snapshot_feed_sources: Vec<MulticastSource>,
     /// All configured markets — passed to the web server for the login page.
     known_markets: Vec<web::MarketInfo>,
 }
@@ -113,6 +114,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let config = market_simulator.config.clone();
     let player_database_url = market_simulator.player_database_url.clone();
     let market_feed_sources = market_simulator.market_feed_sources.clone();
+    let snapshot_feed_sources = market_simulator.snapshot_feed_sources.clone();
     let bus = EventBus::new();
     let global_shutdown = Arc::new(AtomicBool::new(false));
     let order_book = Arc::new(std::sync::Mutex::new(OrderBookState::new()));
@@ -183,6 +185,15 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         config.snapshot.update_interval_ms,
         config.core_mapping.order_book_core,
         config.core_mapping.snapshot_core,
+    )?;
+
+    // Start Market proxy thread
+    startup::start_market_data_proxy(
+        &mut market_simulator,
+        market_feed_sources[0].clone(),
+        snapshot_feed_sources[0].clone(),
+        Arc::clone(&global_shutdown),
+        config.core_mapping.market_data_proxy_core,
     )?;
 
     // Snapshot multicast engine thread
@@ -322,12 +333,19 @@ fn main() {
             market_name(),
         )];
 
+        let snapshot_feed_sources = vec![MulticastSource::new(
+            market_config.snapshot_multicast.ip.clone(),
+            market_config.snapshot_multicast.port,
+            market_name(),
+        )];
+
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,
             player_database_url,
             thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
             shutdown: None,
             market_feed_sources,
+            snapshot_feed_sources,
             known_markets,
         }));
 

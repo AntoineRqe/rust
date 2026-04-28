@@ -45,7 +45,8 @@
                 "global_core": 8,
                 "snapshot_core": 9,
                 "market_feed_multicast_core": 10,
-                "snapshot_multicast_core": 11
+                "snapshot_multicast_core": 11,
+                "market_data_proxy_core": 12
             }
         },
         {
@@ -87,7 +88,8 @@
                 "global_core": 8,
                 "snapshot_core": 9,
                 "market_feed_multicast_core": 10,
-                "snapshot_multicast_core": 11
+                "snapshot_multicast_core": 11,
+                "market_data_proxy_core": 12
             }
         }
     ]

@@ -76,6 +76,7 @@ pub struct EngineCoreMapping {
     pub snapshot_core: usize,
     pub market_feed_multicast_core: usize,
     pub snapshot_multicast_core: usize,
+    pub market_data_proxy_core: usize,
 }
 
 impl MarketsConfig {

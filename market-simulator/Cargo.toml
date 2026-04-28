@@ -55,6 +55,7 @@ web   = { path = "crates/web" }
 market-feed = { path = "crates/market-feed" }
 snapshot = { path = "crates/snapshot" }
 utils = { path = "crates/utils" }
+proxy = { path = "crates/proxy" }
 crossbeam.workspace = true
 crossbeam-channel.workspace = true
 spsc.workspace = true

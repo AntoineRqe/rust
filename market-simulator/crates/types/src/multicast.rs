@@ -13,6 +13,18 @@ pub struct MulticastSource {
     pub address: String,
 }
 
+impl MulticastSource {
+    pub fn new(ip: String, port: u16, market: &str) -> Self {
+        let addr = format!("{}:{}", ip, port);
+        Self {
+            market: market.to_string(),
+            ip,
+            port,
+            address: addr,
+        }
+    }
+}
+
 pub struct SourceSocket {
     pub source: MulticastSource,
     pub socket: std::net::UdpSocket,
@@ -43,17 +55,5 @@ impl SourceSocket {
         let bind_addr = std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
         socket.bind(&bind_addr.into())?;
         Ok(socket.into())
-    }
-}
-
-impl MulticastSource {
-    pub fn new(ip: String, port: u16, market: &str) -> Self {
-        let addr = format!("{}:{}", ip, port);
-        Self {
-            market: market.to_string(),
-            ip,
-            port,
-            address: addr,
-        }
     }
 }
