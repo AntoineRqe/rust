@@ -2,3 +2,4 @@
 **.pem
 *.lock
 players.json
+__pycache__/
