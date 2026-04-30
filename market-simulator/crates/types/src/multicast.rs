@@ -48,6 +48,7 @@ impl SourceSocket {
         Ok(socket)
     }
 
+    /// Creates a UDP socket bound to the specified port, suitable for receiving multicast data in a blocking context.
     pub fn create_multicast_receiver_socket(port: u16) -> std::io::Result<UdpSocket> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
@@ -55,5 +56,21 @@ impl SourceSocket {
         let bind_addr = std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
         socket.bind(&bind_addr.into())?;
         Ok(socket.into())
+    }
+
+    /// Creates a non-blocking UDP socket bound to the specified port, suitable for receiving multicast data in an async context.
+    pub async fn create_multicast_receiver_socket_async(port: u16) -> std::io::Result<tokio::net::UdpSocket> {
+        use socket2::{Socket, Domain, Type, Protocol};
+        use std::net::{SocketAddrV4, Ipv4Addr};
+
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        socket.set_reuse_address(true)?;
+        let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
+        socket.bind(&bind_addr.into())?;
+        // Set any other options here (e.g., join multicast group) if needed
+
+        let std_socket: std::net::UdpSocket = socket.into();
+        std_socket.set_nonblocking(true)?;
+        tokio::net::UdpSocket::from_std(std_socket)
     }
 }

@@ -511,7 +511,7 @@ pub fn start_market_data_proxy(
 
 ) -> Result<(), Box<dyn std::error::Error>> {
 
-    let proxy = proxy::MarketDataProxy::new(
+    let mut proxy = proxy::MarketDataProxy::new(
         market_feed_source,
         snapshot_feed_source,
         Arc::clone(&shutdown),
