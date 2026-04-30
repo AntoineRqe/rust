@@ -74,10 +74,14 @@ impl<'a, const N: usize> FixServer<N> {
     ///
     /// `cpu_ids` controls runtime worker-thread CPU pinning. When empty,
     /// no worker affinity is applied.
-    pub fn accept_loop(&self, listener: TcpListener, cpu_ids: Vec<usize>) {
+    pub fn accept_loop(
+        &self,
+        listener: TcpListener, cpu_ids: Vec<usize>
+    ) -> Result<(), Box<dyn std::error::Error>> {
+
         if let Err(e) = listener.set_nonblocking(true) {
             tracing::error!("[{}] Cannot set non-blocking on TCP listener: {e}", market_name());
-            return;
+            return Err(Box::new(e));
         }
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -110,12 +114,13 @@ impl<'a, const N: usize> FixServer<N> {
             Ok(rt) => rt,
             Err(e) => {
                 tracing::error!("[{}] Failed to build TCP Tokio runtime: {e}", market_name());
-                return;
+                return Err(Box::new(e));
             }
         };
 
         let semaphore = Arc::new(Semaphore::new(tcp_max_connections()));
         runtime.block_on(self.accept_loop_async(listener, semaphore));
+        Ok(())
     }
 
     /// Async accept loop: accept clients and spawn one Tokio task per connection.

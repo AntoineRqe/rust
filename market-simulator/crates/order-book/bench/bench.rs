@@ -106,7 +106,7 @@ fn run_latency(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
 
         let engine_handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
-            engine.run();
+            let _ = engine.run();
         });
 
         let ready_prod = Arc::clone(&ready);
@@ -192,7 +192,7 @@ fn run_throughput(iters: u64) -> Duration {
 
         let engine_handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
-            engine.run();
+            let _ = engine.run();
         });
 
         s.spawn(move || {

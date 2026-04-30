@@ -155,7 +155,7 @@ pub struct FixInboundEngine<'a, const N: usize> {
 impl<'a, const N: usize> FixInboundEngine<'a, N> {
         // Blocking wait for new inbound FIX messages. Shutdown is signaled via a
         // sentinel message (len == 0) or by disconnecting the input channel.
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             let mut msg = match self.request_in.recv() {
                 Ok(msg) => msg,
@@ -210,6 +210,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
         self.request_out.push(OrderEvent::default()).unwrap(); // Send a final order event with default values to unblock any subscribers that may be waiting for order events, such as the order book engine, allowing them to check the shutdown flag and exit gracefully.
 
         tracing::info!("[{}] Inbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
+        Ok(())
     }
 
     fn build_order(
@@ -295,7 +296,7 @@ pub struct FixOutboundEngine<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> FixOutboundEngine<'a, N> {
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut sweep_ticks = 0usize;
 
         loop {
@@ -339,6 +340,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
         }
 
         tracing::info!("[{}] Outbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
+        Ok(())
     }
 }
 
@@ -431,11 +433,11 @@ mod tests {
              // Spawn a thread to run the FIX engine
     
             let inbound_handle = scope.spawn(move || {
-                inbound_engine.run();
+                let _ = inbound_engine.run();
             });
             
             let outbound_handle = scope.spawn(move || {
-                outbound_engine.run();
+                let _ = outbound_engine.run();
             });
 
             let fix_message = b"8=FIX.4.4\x019=0000\x0135=D\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0111=12345\x0154=1\x0138=1000000\x0144=1.23456\x0155=EURUSD\x0110=123\x01";
@@ -498,11 +500,11 @@ mod tests {
              // Spawn a thread to run the FIX engine
 
             let inbound_handle = scope.spawn(move || {
-                inbound_engine.run();
+                let _ = inbound_engine.run();
             });
 
             let outbound_handle = scope.spawn(move || {
-                outbound_engine.run();
+                let _ = outbound_engine.run();
             });
 
             let fix_message = b"8=FIX.4.4\x019=0000\x0135=F\x0149=SENDER\x0156=TARGET\x0134=2\x0152=20240219-12:31:00.000\x0111=CXL-1\x0141=ORD-12345\x0154=1\x0138=100\x0144=1.23456\x0155=EURUSD\x0110=123\x01";

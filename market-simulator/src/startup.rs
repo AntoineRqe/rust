@@ -27,13 +27,18 @@ pub fn start_multicast_receiver(
     order_book: Arc<Mutex<OrderBookState>>,
     player_store: web::players::PlayerStore,
     core_id: usize,
-) -> Result<(), &'static str> {
+) -> Result<(), Box<dyn std::error::Error>> {
     
+    let err_tx = Arc::clone(&simulator.err_tx);
+
     let _receiver_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
         for source in sources {
-            tracing::info!("Starting market feed receiver for {}:{}", source.ip, source.port);
-            spawn_market_feed_receiver(bus.clone(), vec![source], Arc::clone(&shutdown), Arc::clone(&order_book), player_store.clone());
+            let err_tx = Arc::clone(&err_tx);
+            if let Err(e) = spawn_market_feed_receiver(bus.clone(), vec![source], Arc::clone(&shutdown), Arc::clone(&order_book), player_store.clone()) {
+                tracing::error!("[{}] Market feed receiver error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Market feed receiver error: {e:#}"));
+            }
         }
     });
 
@@ -49,12 +54,20 @@ pub fn start_execution_report_engine(
     er_tx: spsc::Producer<'static, (EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>,
     shutdown: Arc<AtomicBool>,
     core_id: usize,
-) -> Result<(), &'static str> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+
+    let err_tx = Arc::clone(&simulator.err_tx);
 
     let _er_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        execution_report_engine.run();
+        match execution_report_engine.run() {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("[{}] Execution report engine error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Execution report engine error: {e:#}"));
+            }
+        }
     });
 
     simulator.add_thread_handle(_er_thread);
@@ -111,9 +124,17 @@ pub fn start_db_engine(
     db_data.pool = db_engine.pool();
 
 
+    let err_tx = Arc::clone(&market_simulator.err_tx);
+
     let _db_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        db_engine.run();
+        match db_engine.run() {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("[{}] Database engine error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Database engine error: {e:#}"));
+            }
+        }
     });
 
     {
@@ -137,21 +158,36 @@ pub fn start_grpc_server(
     let grpc_port = port;
     let grpc_shutdown = Arc::clone(&global_shutdown);
     let grpc_service = grpc::MarketControlService::new(ob_control_tx, db_pool);
+    let err_tx = Arc::clone(&market_simulator.err_tx);
     let _grpc_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        let rt = tokio::runtime::Builder::new_multi_thread()
+        match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .on_thread_start(move || {
                 core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
             })
             .enable_all()
             .build()
-            .expect("failed to build tokio runtime for gRPC server");
-        let addr: std::net::SocketAddr = format!("{grpc_ip}:{grpc_port}")
-            .parse()
-            .expect("invalid gRPC address");
-        if let Err(e) = rt.block_on(grpc::serve(addr, grpc_service, grpc_shutdown)) {
-            tracing::error!("gRPC server error: {e:#}");
+        {
+            Ok(rt) => {
+                let addr: std::net::SocketAddr = match format!("{grpc_ip}:{grpc_port}").parse() {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        tracing::error!("Failed to parse gRPC server address: {e:#}");
+                        let _ = err_tx.send(format!("Failed to parse gRPC server address: {e:#}"));
+                        return;
+                    }
+                };
+                    
+                if let Err(e) = rt.block_on(grpc::serve(addr, grpc_service, grpc_shutdown)) {
+                    tracing::error!("[{}] gRPC server error: {e:#}", utils::market_name());
+                    let _ = err_tx.send(format!("gRPC server error: {e:#}"));
+                }
+            }
+            Err(e) => {
+                tracing::error!("[{}] Failed to build tokio runtime for gRPC server: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Failed to build tokio runtime for gRPC server: {e:#}"));
+            }
         }
     });
 
@@ -177,9 +213,17 @@ pub fn start_market_feed_engine(
         port,
     ).expect("Failed to create MarketDataFeedEngine");
 
+    let err_tx = Arc::clone(&market_simulator.err_tx);
+
     let _market_feed_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        market_feed_engine.run();
+        match market_feed_engine.run() {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("[{}] Market data feed engine error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Market data feed engine error: {e:#}"));
+            }
+        }
     });
 
     market_simulator.add_thread_handle(_market_feed_thread);
@@ -204,9 +248,17 @@ pub fn start_snapshot_multicast_engine(
         port,
     );
 
+    let err_tx = Arc::clone(&market_simulator.err_tx);
+
     let _snapshot_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        snapshot_engine.run();
+        match snapshot_engine.run() {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("[{}] Snapshot multicast engine error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Snapshot multicast engine error: {e:#}"));
+            }
+        }
     });
 
     {
@@ -236,14 +288,23 @@ pub fn start_fix_engine(
 
     let (mut inbound_engine, mut outbound_engine) = fix_engine.split();
 
+    let err_tx = Arc::clone(&market_simulator.err_tx);
     let _fix_inbound_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: inbound_core_id });
-        inbound_engine.run();
+        if let Err(e) = inbound_engine.run() {
+            tracing::error!("[{}] Inbound FIX engine error: {e:#}", utils::market_name());
+            let _ = err_tx.send(format!("Inbound FIX engine error: {e:#}"));
+        }
     });
+
+    let err_tx = Arc::clone(&market_simulator.err_tx);
 
     let _fix_outbound_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: outbound_core_id });
-        outbound_engine.run();
+        if let Err(e) = outbound_engine.run() {
+            tracing::error!("[{}] Outbound FIX engine error: {e:#}", utils::market_name());
+            let _ = err_tx.send(format!("Outbound FIX engine error: {e:#}"));
+        }
     });
 
     market_simulator.add_thread_handle(_fix_inbound_thread);
@@ -297,9 +358,17 @@ pub fn start_order_book_engine(
         // This ensures that the engine starts with the correct state and can process new orders/events in the context of existing pending orders.
         order_book_engine.import_order_book(pending_orders);
 
+        let err_tx = Arc::clone(&market_simulator.err_tx);
+
         let _ob_thread = std::thread::spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: order_book_core_id });
-            order_book_engine.run();
+            match order_book_engine.run() {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("[{}] Order book engine error: {e:#}", utils::market_name());
+                    let _ = err_tx.send(format!("Order book engine error: {e:#}"));
+                }
+            }
         });
 
         {
@@ -313,9 +382,18 @@ pub fn start_order_book_engine(
             Arc::clone(&snapshot_ptr),
             snapshot_interval_ms,
         );
+
+        let err_tx = Arc::clone(&market_simulator.err_tx);
+
         let _snapshot_generation_thread = std::thread::spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: snapshot_generation_core_id });
-            snapshot_generation_engine.run();
+            match snapshot_generation_engine.run() {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("[{}] Snapshot generation engine error: {e:#}", utils::market_name());
+                    let _ = err_tx.send(format!("Snapshot generation engine error: {e:#}"));
+                }
+            }
         });
 
         {
@@ -352,9 +430,11 @@ pub fn start_web_server(
         let web_shutdown = Arc::clone(&global_shutdown);
         let known_markets = market_simulator.known_markets.clone();
         let order_book = Arc::clone(&order_book);
+        let err_tx = Arc::clone(&market_simulator.err_tx);
+
         move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-            web::run_web_server(
+            match web::run_web_server(
                 bus,
                 fix_tcp_addr,
                 grpc_addr,
@@ -365,7 +445,13 @@ pub fn start_web_server(
                 web_shutdown,
                 order_book,
                 core_id
-            );
+            ) {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("[{}] Web server error: {e:#}", utils::market_name());
+                    let _ = err_tx.send(format!("[{}] Web server error: {e:#}", utils::market_name()));
+                }
+            }
         }
     });
 
@@ -384,14 +470,28 @@ pub fn start_tcp_server(
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let server: server::tcp::FixServer<RB_SIZE> = server::tcp::FixServer::new(fix_tx, Arc::clone(&global_shutdown));
-    let listener = std::net::TcpListener::bind(format!("{}:{}", tcp_addr.ip, tcp_addr.port)).unwrap();
+    let listener = match std::net::TcpListener::bind(format!("{}:{}", tcp_addr.ip, tcp_addr.port)) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("[{}] Failed to bind TCP server to {}:{} - {e:#}", utils::market_name(), tcp_addr.ip, tcp_addr.port);
+            return Err(Box::new(e));
+        }
+    };
 
     // Grab the shutdown flag before releasing the lock so the Ctrl-C handler
     // can signal the accept loop without holding any other lock.
 
+    let err_tx = Arc::clone(&market_simulator.err_tx);
+
     let _tcp_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        server.accept_loop(listener, vec![core_id]);
+        match server.accept_loop(listener, vec![core_id]) {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("[{}] TCP server error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("TCP server error: {e:#}"));
+            }
+        }
     });
 
     market_simulator.add_thread_handle(_tcp_thread);
@@ -420,10 +520,18 @@ pub fn start_market_data_proxy(
         ws_port,
     );
 
+    let err_tx = Arc::clone(&market_simulator.err_tx);
+
     let proxy_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
         // TODO : Handle errors from the proxy and propagate them back to the main thread so we can log them and shut down gracefully if the proxy fails (currently if the market data proxy encounters an error, it will just panic and crash the thread, which is not ideal).
-        let _ = proxy.run();
+        match proxy.run() {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("[{}] Market data proxy error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Market data proxy error: {e:#}"));
+            }
+        }
     });
 
     market_simulator.add_thread_handle(proxy_thread);

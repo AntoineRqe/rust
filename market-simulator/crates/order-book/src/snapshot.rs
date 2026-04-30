@@ -32,7 +32,7 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
         }
     }
 
-    pub fn run(&self) {
+    pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             let wait_started = std::time::Instant::now();
             let wait_target = std::time::Duration::from_millis(self.interval_ms);
@@ -69,6 +69,8 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
         }
 
         tracing::info!("[{}] Snapshot generation engine shutting down gracefully", market_name());
+
+        Ok(())
     }
 }
 
@@ -123,7 +125,7 @@ mod tests {
             
 
             let _engine_handle = s.spawn(move || {
-                snapshot_engine.run();
+                let _ = snapshot_engine.run();
             });
 
             let mut updated_snapshot = Snapshot::default();

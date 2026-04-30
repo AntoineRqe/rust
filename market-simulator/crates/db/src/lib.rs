@@ -51,7 +51,7 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
         block_on_db(create_tables(&self.pool))
     }
 
-    pub fn run(&self) {
+    pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
                 if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
@@ -63,6 +63,7 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
         block_on_db(self.pool.close());
 
         tracing::info!("[{}] Database engine shutting down gracefully", market_name());
+        Ok(())
     }
 
     /// Persists an order event and its corresponding result to the database, and updates the pending orders table accordingly.

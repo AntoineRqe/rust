@@ -276,7 +276,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
         }
     }
     
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             // Process control messages first
             while let Ok(control) = self.control_rx.try_recv() {
@@ -311,6 +311,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
         }
 
         tracing::info!("[{}][{}] Order book engine shutting down gracefully", market_name(), self.order_book.symbol);
+        Ok(())
     }
 }
 
@@ -355,7 +356,9 @@ mod tests {
             );
             
             let ob_handle = s.spawn(move || {
-                engine.run();
+                if let Err(e) = engine.run() {
+                    panic!("Order book engine error: {e:#}");
+                }
             });
 
             // Send some orders to the engine

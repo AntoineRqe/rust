@@ -3,7 +3,7 @@
     "player_database_url_env": "DATABASE_URL_MARKET_SIMULATOR",
     "entry_point": {
         "ip": "127.0.0.1",
-        "port": 9875
+        "port": 9860
     },
     "markets": [
         {
@@ -11,11 +11,11 @@
             "database_url_env": "DATABASE_URL_NASDAQ",
             "web": {
                 "ip": "127.0.0.1",
-                "port": 9876
+                "port": 9870
             },
             "tcp": {
                 "ip": "127.0.0.1",
-                "port": 9877
+                "port": 9871
             },
             "grpc": {
                 "ip": "0.0.0.0",
@@ -23,7 +23,7 @@
             },
             "proxy": {
                 "ip": "127.0.0.1",
-                "port": 9878
+                "port": 9891
             },
             "market_feed_multicast": {
                 "ip": "239.0.0.1",
@@ -58,11 +58,11 @@
             "database_url_env": "DATABASE_URL_NYSE",
             "web": {
                 "ip": "127.0.0.1",
-                "port": 9878
+                "port": 9885
             },
             "tcp": {
                 "ip": "127.0.0.1",
-                "port": 9879
+                "port": 9884
             },
             "grpc": {
                 "ip": "0.0.0.0",
@@ -70,7 +70,7 @@
             },
             "proxy": {
                 "ip": "127.0.0.1",
-                "port": 9880
+                "port": 9892
             },
             "market_feed_multicast": {
                 "ip": "239.0.0.1",

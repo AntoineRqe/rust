@@ -249,8 +249,9 @@ pub fn spawn_market_feed_receiver(
     shutdown: Arc<AtomicBool>,
     order_book: Arc<std::sync::Mutex<OrderBookState>>,
     player_store: PlayerStore,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> Result<std::thread::JoinHandle<()>, Box<dyn std::error::Error>> {
+
+    Ok(std::thread::spawn(move || {
         let mut sockets = Vec::<SourceSocket>::new();
 
         for source in sources {
@@ -437,7 +438,7 @@ pub fn spawn_market_feed_receiver(
         }
 
         tracing::info!("[{}] Market-feed multicast receiver stopped", market_name());
-    })
+    }))
 }
 
 #[cfg(test)]

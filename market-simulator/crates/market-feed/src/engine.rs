@@ -147,14 +147,16 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
     }
 
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             if let Some((order_event, order_result)) = self.fifo_in.pop() {
                 if let Some(market_data_feed_events) = self.build_market_data_feed_events(&order_event, &order_result) {
                     for market_data_feed_event in market_data_feed_events {
                         let bytes = market_data_feed_event.to_bytes();
                         tracing::info!("[{}] Broadcasting market data feed event: header={}, event={}", market_name(), market_data_feed_event, market_data_feed_event);
-                        let _ = self.source.socket.send_to(&bytes, &self.source.source.address);
+                        if let Err(e) = self.source.socket.send_to(&bytes, &self.source.source.address) {
+                            tracing::error!("[{}] Failed to send market data feed event: {e:#}", market_name());
+                        }
                     }
                 }
             }
@@ -167,6 +169,7 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         }
 
         tracing::info!("[{}] Market Data Feed Engine shutting down", market_name());
+        Ok(())
     }
 }
 
@@ -278,7 +281,9 @@ mod tests {
             .unwrap();
 
             let engine_handle = s.spawn(move || {
-                engine.run();
+                if let Err(e) = engine.run() {
+                    panic!("Market data feed engine error: {e:#}");
+                } 
             });
 
             let recv_handle = s.spawn(move || retrieve_market_data_feed_events(port, &multicast_ip).unwrap());

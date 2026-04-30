@@ -185,16 +185,24 @@ pub fn run_web_server(
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
     core_id: usize,
-) {
-    tokio::runtime::Builder::new_multi_thread()
+) -> Result<(), Box<dyn std::error::Error>> {
+
+    match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("web-tokio")
         .on_thread_start(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
         })
         .build()
-        .expect("Failed to build tokio runtime")
-        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, database_url, known_markets, shutdown, order_book))
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, database_url, known_markets, shutdown, order_book)) {
+            Ok(_) => (),
+            Err(e) => {
+                return Err(e);
+            }
+    }
+
+    Ok(())
 }
 
 /// Main async function to set up and run the web server. Separated from `run_web_server` to allow using async/await syntax.
@@ -208,7 +216,7 @@ async fn serve(
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize player store and app state
     let player_store = PlayerStore::load_postgres(&database_url);
     let advertised = advertised_markets(&known_markets);
@@ -277,17 +285,28 @@ async fn serve(
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
     // 
-    let listener = TcpListener::bind(addr).await
-        .unwrap_or_else(|e| panic!("Cannot bind to port {port}: {e}"));
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            return Err(Box::new(e));
+        }
+    };
 
     tracing::info!("[{}] Web terminal → http://{}:{}", market_name(), ip, port);
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+    match axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
-        .expect("axum server error");
+    {
+        Ok(_) => (),
+        Err(e) => {
+            return Err(Box::new(e));
+        }
+    }
 
     tracing::info!("[{}] Web server has shut down", market_name());
     state.fix_session_manager.shutdown_all();
+
+    Ok(())
 }
 
 async fn shutdown_signal(shutdown: Arc<AtomicBool>) {

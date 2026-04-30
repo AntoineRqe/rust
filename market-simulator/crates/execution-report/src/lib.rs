@@ -28,7 +28,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         Self { fifo_in, fifo_out, shutdown }
     }
 
-    pub fn run(&self) {
+    pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
                 self.process_execution_report(&exec_report);
@@ -45,6 +45,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         }
 
         tracing::info!("[{}] Execution report engine shutting down gracefully", market_name());
+        Ok(())
     }
 
     fn build_cancel_report(&self, exec_report: &(OrderEvent, OrderResult)) -> FixRawMsg<N> {
@@ -333,7 +334,7 @@ mod tests {
         std::thread::scope(|s| {
 
             let handle = s.spawn(move || {
-                engine.run();
+                let _ = engine.run();
             });
 
             std::thread::sleep(std::time::Duration::from_millis(100)); // Give the engine some time to start

@@ -19,7 +19,7 @@ impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
         }
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(snapshot) = self.fifo_in.pop() {
                 if snapshot.timestamp_ms == 0 {
@@ -30,11 +30,14 @@ impl <'a, const N: usize> SnapshotMultiCastEngine<'a, N> {
                 // Process incoming order events and results from the order book engine
                 // Transform the order event and result into a market data feed event
                 let bytes = crate::encode::encode_snapshot(&snapshot);
-                let _ = self.source.socket.send_to(&bytes, &self.source.source.address);
+                if let Err(e) = self.source.socket.send_to(&bytes, &self.source.source.address) {
+                    tracing::error!("[{}] Failed to send snapshot over multicast: {e:#}", market_name());
+                }
             }
         }
 
         tracing::info!("[{}] SnapshotMultiCastEngine stopped", market_name());
+        Ok(())
     }
 }
 

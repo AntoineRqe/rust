@@ -65,6 +65,9 @@ pub struct MarketSimulator {
     snapshot_feed_sources: Vec<MulticastSource>,
     /// All configured markets — passed to the web server for the login page.
     known_markets: Vec<web::MarketInfo>,
+    // Error channel for threads to report startup errors back to main thread for logging.
+    err_rx: crossbeam::channel::Receiver<String>,
+    err_tx: Arc<crossbeam::channel::Sender<String>>,
 }
 
 impl MarketSimulator {
@@ -136,7 +139,9 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 
     // Order-book control channel (used by the gRPC reset service).
     let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
-
+    let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
+    market_simulator.err_tx = Arc::new(err_tx);
+    market_simulator.err_rx = err_rx.clone();
 
     // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
     market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
@@ -152,7 +157,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         player_store.clone(),
         config.core_mapping.market_feed_multicast_core,
     )?;
-
     
     // execution report engine thread
     startup::start_execution_report_engine(
@@ -263,11 +267,19 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
             config.core_mapping.global_core,
     )?;
 
+    // Give the thread a moment to fail fast on init errors
+    match err_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        Ok(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))),          // failed during startup
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}  // still running, good
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {} // thread exited cleanly (unlikely here)
+    }
+
     tracing::info!("[{}] FIX server    -> {}:{}", utils::market_name(), config.tcp.ip, config.tcp.port);
     tracing::info!("[{}] Web terminal  -> http://{}:{}", utils::market_name(), config.web.ip, config.web.port);
     tracing::info!("[{}] gRPC control  -> {}:{}", utils::market_name(), config.grpc.ip, config.grpc.port);
     tracing::info!("[{}] Market feed   -> {}:{}", utils::market_name(), config.market_feed_multicast.ip, config.market_feed_multicast.port);
     tracing::info!("[{}] Snapshot feed -> {}:{}", utils::market_name(), config.snapshot_multicast.ip, config.snapshot_multicast.port);
+    tracing::info!("[{}] Market proxy  -> {}:{}", utils::market_name(), config.proxy.ip, config.proxy.port);
 
     Ok(())
 }
@@ -341,6 +353,9 @@ fn main() {
             market_name(),
         )];
 
+        let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
+        let err_tx = Arc::new(err_tx);
+    
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,
             player_database_url,
@@ -349,10 +364,13 @@ fn main() {
             market_feed_sources,
             snapshot_feed_sources,
             known_markets,
+            err_tx,
+            err_rx,
         }));
 
         if let Err(e) = start_market(Arc::clone(&simulator)) {
             tracing::error!("Market failed to start: {e}");
+            stop_market(Arc::clone(&simulator));
             std::process::exit(1);
         }
 
