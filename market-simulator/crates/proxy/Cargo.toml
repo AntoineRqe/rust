@@ -12,3 +12,5 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 hyper.workspace = true
 futures = "0.3"
+utils = { path = "../utils" }
+socket2.workspace = true

@@ -1,7 +1,7 @@
 import asyncio
 import websockets
 
-WS_URL = "ws://127.0.0.1:9881/ws/snapshot"  # Change host/port if needed
+WS_URL = "ws://127.0.0.1:9889/ws/snapshot"  # Change host/port if needed
 
 async def main():
     async with websockets.connect(WS_URL) as ws:
