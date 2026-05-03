@@ -411,6 +411,7 @@ pub fn start_web_server(
     market_simulator: &mut crate::MarketSimulator,
     order_book: Arc<Mutex<OrderBookState>>,
     player_database_url: String,
+    market_database_url: String,
     bus: EventBus,
     global_shutdown: Arc<AtomicBool>,
     web_addr: Connection,
@@ -425,7 +426,8 @@ pub fn start_web_server(
         let grpc_addr    = format!("http://127.0.0.1:{}", grpc_addr.port);
         let web_ip = web_addr.ip.clone();
         let web_port = web_addr.port;
-        let web_database_url = player_database_url.clone();
+        let web_player_database_url = player_database_url.clone();
+        let web_market_database_url = market_database_url.clone();
         let web_shutdown = Arc::clone(&global_shutdown);
         let known_markets = market_simulator.known_markets.clone();
         let order_book = Arc::clone(&order_book);
@@ -439,7 +441,8 @@ pub fn start_web_server(
                 grpc_addr,
                 &web_ip,
                 web_port,
-                web_database_url,
+                web_player_database_url,
+                web_market_database_url,
                 known_markets,
                 web_shutdown,
                 order_book,

@@ -145,6 +145,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo,
     // Send current order book state for all symbols
     send_order_book_snapshots(&mut sender, &state).await;
 
+    // Send trades snapshot for price chart initialization
+    send_trades_snapshot(&mut sender, &state).await;
+
     tracing::debug!("[{}] Browser WebSocket connected", market_name());
 
     loop {
@@ -297,6 +300,36 @@ async fn send_order_book_snapshots(
         let _ = sender.send(Message::Text(json.into())).await;
     }
 }
+
+/// Send trades snapshot to the browser for price chart initialization.
+async fn send_trades_snapshot(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    state: &AppState,
+) {
+    let (trades, trades_count) = {
+        let trades_queue = state.trades_queue.lock().unwrap();
+        let trades: Vec<crate::state::TradeView> = trades_queue
+            .iter()
+            .map(|t| crate::state::TradeView {
+                id: t.id,
+                price: t.price.to_f64(),
+                quantity: t.quantity.to_f64(),
+                cl_ord_id: t.cl_ord_id.to_string(),
+            })
+            .collect();
+        let count = trades.len();
+        (trades, count)
+    };
+
+    let event = WsEvent::Trades { trades };
+    let json = serde_json::to_string(&event).unwrap();
+    let _ = sender.send(Message::Text(json.into())).await;
+
+    if trades_count > 0 {
+        tracing::debug!("[{}] Sent {} trades to client for chart initialization", market_name(), trades_count);
+    }
+}
+
 /// Handle a command received from the browser client. This may involve sending FIX messages over TCP to the engine, which will then process them and publish events back to the bus.
 async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool, tcp_writer: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>) {
     tracing::debug!("[{}] Received message from browser: {text}", market_name());

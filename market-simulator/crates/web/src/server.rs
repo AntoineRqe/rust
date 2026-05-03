@@ -2,7 +2,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -15,8 +15,9 @@ use crate::order_book::OrderBookState;
 use crate::players::PlayerStore;
 use crate::fix_session::FIXSessionManager;
 use crate::ws::ws_handler;
-use crate::login::{root_handler, login_page_handler, app_handler, api_login_handler, api_markets_handler};
+use crate::login::{root_handler, login_page_handler, app_handler, api_login_handler, api_markets_handler, api_trades_handler};
 use crate::auth::{SessionInfo, MarketInfo};
+use types::Trade;
 use utils::market_name;
 
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
@@ -42,6 +43,8 @@ pub struct AppState {
     pub total_visitors: Arc<AtomicUsize>,
     /// Persistent FIX TCP session registry (one connection per player).
     pub fix_session_manager: FIXSessionManager,
+    /// Last 10 trades from the database for price chart display.
+    pub trades_queue: Arc<Mutex<VecDeque<Trade>>>,
 }
 
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
@@ -61,7 +64,8 @@ pub fn run_web_server(
     grpc_addr: String,
     ip: &str,
     port: u16,
-    database_url: String,
+    player_database_url: String,
+    market_database_url: String,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
@@ -76,7 +80,7 @@ pub fn run_web_server(
         })
         .build()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, database_url, known_markets, shutdown, order_book)) {
+        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, player_database_url, market_database_url, known_markets, shutdown, order_book)) {
             Ok(_) => (),
             Err(e) => {
                 return Err(e);
@@ -93,13 +97,14 @@ async fn serve(
     grpc_addr: String,
     ip: &str,
     port: u16,
-    database_url: String,
+    player_database_url: String,
+    market_database_url: String,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize player store and app state
-    let player_store = PlayerStore::load_postgres(&database_url);
+    let player_store = PlayerStore::load_postgres(&player_database_url);
     let advertised = crate::auth::advertised_markets(&known_markets);
     if !known_markets.is_empty() {
         if advertised.is_empty() {
@@ -117,6 +122,35 @@ async fn serve(
     }
 
     let initial_total_visitors = player_store.total_visitors() as usize;
+    
+    // Load last 10 trades from database for price chart display
+    let trades_queue = {
+        match db::connect(&market_database_url).await {
+            Ok(pool) => {
+                match db::collect_last_n_trades(&pool, 10).await {
+                    Ok(trades) => {
+                        let mut queue = VecDeque::new();
+                        for trade in trades {
+                            queue.push_back(trade);
+                        }
+                        if queue.len() > 0 {
+                            tracing::info!("[{}] Loaded {} trades from database for price chart", market_name(), queue.len());
+                        }
+                        Arc::new(Mutex::new(queue))
+                    }
+                    Err(e) => {
+                        tracing::error!("[{}] Failed to query trades from database: {}", market_name(), e);
+                        Arc::new(Mutex::new(VecDeque::new()))
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("[{}] Failed to connect to database for trades: {}", market_name(), e);
+                Arc::new(Mutex::new(VecDeque::new()))
+            }
+        }
+    };
+    
     let state = AppState {
         bus,
         fix_tcp_addr,
@@ -128,6 +162,7 @@ async fn serve(
         active_visitors: Arc::new(AtomicUsize::new(0)),
         total_visitors: Arc::new(AtomicUsize::new(initial_total_visitors)),
         fix_session_manager: FIXSessionManager::new(),
+        trades_queue,
     };
 
     // Load initial pending orders from gRPC at startup
@@ -152,6 +187,7 @@ async fn serve(
         .route("/app",         get(app_handler))
         .route("/api/login",   post(api_login_handler))
         .route("/api/markets", get(api_markets_handler))
+        .route("/api/trades",  get(api_trades_handler))
         .route("/ws",          get(ws_handler))
         .layer(
             CorsLayer::new()

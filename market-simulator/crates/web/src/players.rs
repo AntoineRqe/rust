@@ -775,8 +775,26 @@ impl PlayerStore {
             return;
         };
 
-        if let Err(e) = block_on_storage(persist_storage_to_db(&pool, &data)) {
-            tracing::error!("[{}] Failed to persist player data to PostgreSQL: {e}", market_name());
+        // Retry persistence with exponential backoff to handle transient deadlocks
+        const MAX_RETRIES: u32 = 3;
+        for attempt in 0..MAX_RETRIES {
+            match block_on_storage(persist_storage_to_db(&pool, &data)) {
+                Ok(_) => return,
+                Err(e) if e.to_string().contains("deadlock") && attempt < MAX_RETRIES - 1 => {
+                    let backoff_ms = 100 * (2_u64.pow(attempt));
+                    tracing::warn!(
+                        "[{}] Deadlock persisting player data (attempt {}), retrying in {}ms: {e}",
+                        market_name(),
+                        attempt + 1,
+                        backoff_ms
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                }
+                Err(e) => {
+                    tracing::error!("[{}] Failed to persist player data to PostgreSQL after {} attempts: {e}", market_name(), MAX_RETRIES);
+                    return;
+                }
+            }
         }
     }
 }

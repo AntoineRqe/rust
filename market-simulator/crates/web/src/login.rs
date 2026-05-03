@@ -132,3 +132,21 @@ pub async fn api_markets_handler(State(state): State<AppState>) -> impl IntoResp
     use crate::auth::advertised_markets;
     Json(advertised_markets(&state.known_markets))
 }
+
+pub async fn api_trades_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let trades_queue = state.trades_queue.lock().unwrap();
+    let trades: Vec<crate::state::TradeView> = trades_queue
+        .iter()
+        .map(|t| crate::state::TradeView {
+            id: t.id,
+            price: t.price.to_f64(),
+            quantity: t.quantity.to_f64(),
+            cl_ord_id: t.cl_ord_id.to_string(),
+        })
+        .collect();
+    
+    Json(serde_json::json!({
+        "success": true,
+        "trades": trades,
+    }))
+}

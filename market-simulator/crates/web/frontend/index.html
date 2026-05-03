@@ -1209,6 +1209,9 @@ function handleServerEvent(msg, marketName) {
     case 'order_book':
       applyOrderBookSnapshot(msg, marketName);
       break;
+    case 'trades':
+      applyTradesSnapshot(msg);
+      break;
     case 'fix_message':
       updateBookFromFix(msg.body, msg.tag, marketName);
       appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
@@ -1248,6 +1251,42 @@ function applyOrderBookSnapshot(msg, marketName) {
   }
 
   renderMarketBook(mn);
+}
+
+function applyTradesSnapshot(msg) {
+  console.log('[applyTradesSnapshot] Received message:', msg);
+  
+  if (!msg.trades || !Array.isArray(msg.trades)) {
+    console.warn('[applyTradesSnapshot] Invalid message format: no trades array or not an array');
+    return;
+  }
+  
+  console.log('[applyTradesSnapshot] Got ' + msg.trades.length + ' trades from snapshot');
+  
+  if (msg.trades.length === 0) {
+    console.warn('[applyTradesSnapshot] Empty trades snapshot, skipping chart initialization');
+    return;
+  }
+  
+  // Initialize chartPts with trades from the snapshot
+  // Always apply snapshot if we have trades, even if chartPts was pre-populated with reference price
+  const now = new Date();
+  const ts = now.toTimeString().slice(0, 8);
+  
+  // Reverse the trades array to get chronological order (oldest first)
+  chartPts = msg.trades.slice().reverse().map(trade => ({
+    price: Number(trade.price) || 0,
+    ts: ts  // Use current time for all, as we don't have original timestamps
+  }));
+  
+  lastTradeCount = msg.trades.length;
+  
+  console.log('[applyTradesSnapshot] Initialized chartPts with ' + chartPts.length + ' points:', chartPts);
+  
+  if (chartPts.length >= 2) {
+    drawChart();
+    console.log('[UI] Initialized price chart with ' + chartPts.length + ' trades');
+  }
 }
 
 function isOrderOwnedByCurrentUser(clordId) {

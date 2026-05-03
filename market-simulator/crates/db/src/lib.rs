@@ -143,12 +143,29 @@ pub async fn connect_from_env() -> Result<PgPool, sqlx::Error> {
 
 /// Connects to the database using the provided URL, and returns a connection pool.
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    tracing::debug!(
+    // Mask the password in the URL for safe logging
+    let masked_url = if let Some(pos) = database_url.find("://") {
+        let (scheme, rest) = database_url.split_at(pos + 3);
+        if let Some(at_pos) = rest.find('@') {
+            let (creds, host) = rest.split_at(at_pos);
+            if let Some(colon_pos) = creds.find(':') {
+                let user = &creds[..colon_pos];
+                format!("{}{}:***@{}", scheme, user, host)
+            } else {
+                format!("{}***@{}", scheme, host)
+            }
+        } else {
+            database_url.to_string()
+        }
+    } else {
+        database_url.to_string()
+    };
+    
+    tracing::info!(
         "[{}] Connecting to database at {}",
         market_name(),
-        database_url
+        masked_url
     );
-
     // Allow configuring max connections and acquire timeout via environment variables, with sensible defaults
     let max_connections = env::var("DB_MAX_CONNECTIONS")
         .ok()
@@ -473,7 +490,7 @@ pub async fn collect_last_n_trades(pool: &PgPool, limit: i64) -> Result<Vec<Trad
             price,
             order_qty,
             leaves_qty
-        FROM trades
+        FROM public.trades
         ORDER BY id DESC
         LIMIT $1
         "#,

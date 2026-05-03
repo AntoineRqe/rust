@@ -168,7 +168,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     // DB engine thread
     let db_data = startup::start_db_engine(
         &mut market_simulator,
-        ob_db_rx, database_url,
+        ob_db_rx, database_url.clone(),
         Arc::clone(&global_shutdown),
         config.core_mapping.db_core
     )?;
@@ -235,7 +235,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     startup::start_web_server(
         &mut market_simulator,
         Arc::clone(&order_book),
-        player_database_url.clone(),    
+        player_database_url.clone(),
+        database_url.clone(),    
         bus.clone(),
         Arc::clone(&global_shutdown),
         config.web.clone(),

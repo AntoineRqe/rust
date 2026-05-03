@@ -4,6 +4,16 @@ use std::collections::HashMap;
 use crate::players::{HoldingSummary, PendingOrder};
 use crate::order_book::L3OrderView;
 
+
+/// Trade data for WebSocket transmission
+#[derive(Debug, Clone, Serialize)]
+pub struct TradeView {
+    pub id: u64,
+    pub price: f64,
+    pub quantity: f64,
+    pub cl_ord_id: String,
+}
+
 /// Every event the FIX engine produces that the browser needs to know about.
 /// This is a plain serializable type — no FIX internals leak into the web layer.
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +62,12 @@ pub enum WsEvent {
         bids: Vec<L3OrderView>,
         asks: Vec<L3OrderView>,
         timestamp_ms: u64,
+    },
+
+    /// Trades snapshot for price chart initialization.
+    /// Sent once when a client connects to populate the price chart with historical trades.
+    Trades {
+        trades: Vec<TradeView>,
     },
 }
 
