@@ -8,6 +8,8 @@ service MarketControl {
     rpc ResetMarket (ResetRequest) returns (ResetResponse);
     // Retrieve all pending orders from the data book.
     rpc DumpOrderBook (DumpOrderBookRequest) returns (DumpOrderBookResponse);
+    // Retrieve the last 10 trades from the database.
+    rpc GetLastTrades (GetLastTradesRequest) returns (GetLastTradesResponse);
 }
 
 message ResetRequest {}
@@ -36,4 +38,19 @@ message DumpOrderBookResponse {
     bool   success = 1;
     string message = 2;
     repeated PendingOrder orders = 3;
+}
+
+message GetLastTradesRequest {}
+
+message Trade {
+    uint64 id        = 1;
+    double price     = 2;
+    double quantity  = 3;
+    string cl_ord_id = 4;
+}
+
+message GetLastTradesResponse {
+    bool   success = 1;
+    string message = 2;
+    repeated Trade trades = 3;
 }

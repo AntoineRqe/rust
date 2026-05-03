@@ -1,26 +1,17 @@
 use dotenvy::dotenv;
-use sqlx::{query, PgPool, Row, Transaction, Postgres};
+use spsc::Consumer;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Postgres, Row, Transaction, query};
 use std::env;
 use std::future::Future;
-use std::time::Duration;
 use std::sync::OnceLock;
-use url::Url;
-use types::{
-    FixedPointArithmetic,
-    OrderEvent,
-    OrderType,
-    OrderResult,
-    OrderStatus,
-    Side,
-    Trade,
-};
-use types::macros::{EntityId, SymbolId, OrderId};
-use spsc::spsc_lock_free::{Consumer};
-use std::sync::{Arc, atomic::{AtomicBool}};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Duration;
+use types::macros::{EntityId, OrderId, SymbolId};
+use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trade};
+use url::Url;
 use utils::market_name;
-
 
 /// Database engine that consumes order events and results from the matching engine
 pub struct DatabaseEngine<'a, const N: usize> {
@@ -32,7 +23,7 @@ pub struct DatabaseEngine<'a, const N: usize> {
     pool: Arc<PgPool>,
 }
 
-impl <'a, const N: usize> DatabaseEngine<'a, N> {
+impl<'a, const N: usize> DatabaseEngine<'a, N> {
     pub fn new(
         fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
         database_url: &str,
@@ -59,10 +50,13 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
                 }
             }
         }
-        
+
         block_on_db(self.pool.close());
 
-        tracing::info!("[{}] Database engine shutting down gracefully", market_name());
+        tracing::info!(
+            "[{}] Database engine shutting down gracefully",
+            market_name()
+        );
         Ok(())
     }
 
@@ -79,9 +73,15 @@ impl <'a, const N: usize> DatabaseEngine<'a, N> {
     }
 
     /// Retrieves all order events from the database, ordered by insertion time.
-     /// Returns a vector of `OrderEvent` structs representing all order events in the database.
+    /// Returns a vector of `OrderEvent` structs representing all order events in the database.
     pub fn get_all_trades(&self) -> Result<Vec<Trade>, sqlx::Error> {
         block_on_db(collect_all_trades(&self.pool))
+    }
+
+    /// Retrieves the last N trades from the database, ordered by insertion time.
+    /// Returns a vector of `Trade` structs representing the most recent trades.
+    pub fn get_last_trades(&self, limit: i64) -> Result<Vec<Trade>, sqlx::Error> {
+        block_on_db(collect_last_n_trades(&self.pool, limit))
     }
 
     /// Retrieves all order events from the database, ordered by insertion time.
@@ -143,7 +143,11 @@ pub async fn connect_from_env() -> Result<PgPool, sqlx::Error> {
 
 /// Connects to the database using the provided URL, and returns a connection pool.
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    tracing::debug!("[{}] Connecting to database at {}", market_name(), database_url);
+    tracing::debug!(
+        "[{}] Connecting to database at {}",
+        market_name(),
+        database_url
+    );
 
     // Allow configuring max connections and acquire timeout via environment variables, with sensible defaults
     let max_connections = env::var("DB_MAX_CONNECTIONS")
@@ -160,7 +164,11 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     // Extract search_path/schema from the database URL, and set it on each new connection to ensure the database engine operates within the correct schema if specified
     let schema = extract_search_path_from_database_url(database_url);
     if let Some(schema) = &schema {
-        tracing::debug!("[{}] Using database schema/search_path '{}'", market_name(), schema);
+        tracing::debug!(
+            "[{}] Using database schema/search_path '{}'",
+            market_name(),
+            schema
+        );
     }
 
     PgPoolOptions::new()
@@ -452,6 +460,55 @@ pub async fn collect_all_trades(pool: &PgPool) -> Result<Vec<Trade>, sqlx::Error
         .collect())
 }
 
+/// Retrieves the last N trades from the database, ordered by insertion time (most recent last).
+pub async fn collect_last_n_trades(pool: &PgPool, limit: i64) -> Result<Vec<Trade>, sqlx::Error> {
+    let rows = query(
+        r#"
+        SELECT
+            trade_id,
+            exec_id,
+            buy_cl_ord_id,
+            sell_cl_ord_id,
+            qty,
+            price,
+            order_qty,
+            leaves_qty
+        FROM trades
+        ORDER BY id DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| Trade {
+            price: FixedPointArithmetic::from_option_f64(row.get("price")),
+            quantity: FixedPointArithmetic::from_option_f64(row.get("qty")),
+            id: row
+                .get::<Option<i64>, _>("trade_id")
+                .map(|value| value as u64)
+                .or_else(|| trade_id_from_option(row.get("exec_id")))
+                .unwrap_or_default(),
+            cl_ord_id: row
+                .get::<Option<String>, _>("sell_cl_ord_id")
+                .map(|value| OrderId::from_ascii(&value))
+                .or_else(|| {
+                    row.get::<Option<String>, _>("buy_cl_ord_id")
+                        .map(|value| OrderId::from_ascii(&value))
+                })
+                .unwrap_or_default(),
+            order_qty: FixedPointArithmetic::from_option_f64(row.get("order_qty")),
+            leaves_qty: FixedPointArithmetic::from_option_f64(row.get("leaves_qty")),
+            // `Instant` cannot be faithfully reconstructed from SQL text, so we
+            // restore a fresh monotonic timestamp here.
+            ..Default::default()
+        })
+        .collect())
+}
+
 /// Retrieves all order results from the database, ordered by insertion time.
 pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>, sqlx::Error> {
     let rows = query(
@@ -470,9 +527,7 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
     Ok(rows
         .into_iter()
         .map(|row| OrderResult {
-            internal_order_id: row
-                .get::<Option<i64>, _>("order_id")
-                .unwrap_or_default() as u64,
+            internal_order_id: row.get::<Option<i64>, _>("order_id").unwrap_or_default() as u64,
             trades: types::Trades::<4>::new(),
             status: parse_order_status(row.get("status")),
             timestamp_ms: i64_to_timestamp_ms(row.get::<Option<i64>, _>("result_timestamp_ms")),
@@ -526,7 +581,7 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
         .collect())
 }
 
-/// 
+///
 pub async fn persist_order_update(
     pool: &PgPool,
     order_event: &OrderEvent,
@@ -786,7 +841,10 @@ async fn sync_pending_orders(
     Ok(())
 }
 
-fn remaining_quantity(order_event: &OrderEvent, order_result: &OrderResult) -> FixedPointArithmetic {
+fn remaining_quantity(
+    order_event: &OrderEvent,
+    order_result: &OrderResult,
+) -> FixedPointArithmetic {
     let traded_qty = order_result.trades.quantity_sum();
     if traded_qty >= order_event.quantity {
         FixedPointArithmetic::ZERO
@@ -811,7 +869,7 @@ fn classify_result_type(order_event: &OrderEvent, order_result: &OrderResult) ->
             } else {
                 "PARTIAL_FILL"
             }
-        },
+        }
         OrderStatus::Unmatched => "UNMATCHED",
     }
 }
@@ -860,8 +918,7 @@ fn entity_id_from_option(value: Option<String>) -> EntityId {
 }
 
 fn trade_id_from_option(value: Option<String>) -> Option<u64> {
-    value
-    .and_then(|raw| raw.parse::<u64>().ok())
+    value.and_then(|raw| raw.parse::<u64>().ok())
 }
 
 fn order_id_text_from_internal(internal_order_id: u64) -> Option<String> {
@@ -900,8 +957,8 @@ mod tests {
     use sqlx::query_scalar;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
-    use types::{OrderType, Trade, Trades};
     use types::macros::{EntityId, OrderId};
+    use types::{OrderType, Trade, Trades};
 
     static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -948,15 +1005,17 @@ mod tests {
         };
 
         let mut trades = Trades::<4>::new();
-        trades.add_trade(Trade {
-            price: FixedPointArithmetic::from_f64(10.0),
-            quantity: FixedPointArithmetic::from_f64(100.0),
-            id: 123,
-            cl_ord_id: OrderId::from_ascii("maker123"),
-            order_qty: FixedPointArithmetic::from_f64(100.0),
-            leaves_qty: FixedPointArithmetic::ZERO,
-            ..Default::default()
-        }).unwrap();
+        trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(10.0),
+                quantity: FixedPointArithmetic::from_f64(100.0),
+                id: 123,
+                cl_ord_id: OrderId::from_ascii("maker123"),
+                order_qty: FixedPointArithmetic::from_f64(100.0),
+                leaves_qty: FixedPointArithmetic::ZERO,
+                ..Default::default()
+            })
+            .unwrap();
 
         let order_result = OrderResult {
             internal_order_id: 101,
@@ -972,7 +1031,10 @@ mod tests {
         assert_eq!(orders.len(), 1);
         assert_eq!(trades.len(), 1);
         assert_eq!(orders[0].cl_ord_id.to_string(), "test123");
-        assert_eq!(orders[0].orig_cl_ord_id.map(|id| id.to_string()).as_deref(), Some("orig123"));
+        assert_eq!(
+            orders[0].orig_cl_ord_id.map(|id| id.to_string()).as_deref(),
+            Some("orig123")
+        );
         assert_eq!(orders[0].sender_id.to_string(), "broker-a");
         assert_eq!(orders[0].target_id.to_string(), "broker-b");
         assert_eq!(orders[0].symbol.to_string(), "TEST");
@@ -980,13 +1042,12 @@ mod tests {
         assert_eq!(orders[0].side, Side::Buy);
         assert_eq!(orders[0].timestamp_ms, 1_712_345_678_901);
 
-        let persisted_order_id: Option<String> = query_scalar(
-            "SELECT order_id FROM order_event WHERE cl_ord_id = $1"
-        )
-        .bind("test123")
-        .fetch_optional(&pool)
-        .await?
-        .flatten();
+        let persisted_order_id: Option<String> =
+            query_scalar("SELECT order_id FROM order_event WHERE cl_ord_id = $1")
+                .bind("test123")
+                .fetch_optional(&pool)
+                .await?
+                .flatten();
         assert_eq!(persisted_order_id.as_deref(), Some("101"));
 
         assert_eq!(trades[0].id, 123);
@@ -1024,15 +1085,17 @@ mod tests {
         };
 
         let mut trades = Trades::<4>::new();
-        trades.add_trade(Trade {
-            price: FixedPointArithmetic::from_f64(10.5),
-            quantity: FixedPointArithmetic::from_f64(40.0),
-            id: 456,
-            cl_ord_id: OrderId::from_ascii("maker456"),
-            order_qty: FixedPointArithmetic::from_f64(75.0),
-            leaves_qty: FixedPointArithmetic::from_f64(35.0),
-            ..Default::default()
-        }).unwrap();
+        trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(10.5),
+                quantity: FixedPointArithmetic::from_f64(40.0),
+                id: 456,
+                cl_ord_id: OrderId::from_ascii("maker456"),
+                order_qty: FixedPointArithmetic::from_f64(75.0),
+                leaves_qty: FixedPointArithmetic::from_f64(35.0),
+                ..Default::default()
+            })
+            .unwrap();
 
         let order_result = OrderResult {
             internal_order_id: 102,
@@ -1105,15 +1168,17 @@ mod tests {
         assert_eq!(pending_after_new[0].timestamp_ms, 1_700_000_000_000);
 
         let mut partial_trades = Trades::<4>::new();
-        partial_trades.add_trade(Trade {
-            price: FixedPointArithmetic::from_f64(12.0),
-            quantity: FixedPointArithmetic::from_f64(40.0),
-            id: 1001,
-            cl_ord_id: OrderId::from_ascii("maker-aa"),
-            order_qty: FixedPointArithmetic::from_f64(50.0),
-            leaves_qty: FixedPointArithmetic::from_f64(10.0),
-            ..Default::default()
-        }).unwrap();
+        partial_trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(12.0),
+                quantity: FixedPointArithmetic::from_f64(40.0),
+                id: 1001,
+                cl_ord_id: OrderId::from_ascii("maker-aa"),
+                order_qty: FixedPointArithmetic::from_f64(50.0),
+                leaves_qty: FixedPointArithmetic::from_f64(10.0),
+                ..Default::default()
+            })
+            .unwrap();
 
         let partial_result = OrderResult {
             internal_order_id: 202,
@@ -1130,15 +1195,17 @@ mod tests {
         assert_eq!(pending_after_partial[0].quantity.to_f64(), 60.0);
 
         let mut fill_trades = Trades::<4>::new();
-        fill_trades.add_trade(Trade {
-            price: FixedPointArithmetic::from_f64(12.0),
-            quantity: FixedPointArithmetic::from_f64(100.0),
-            id: 1002,
-            cl_ord_id: OrderId::from_ascii("maker-bb"),
-            order_qty: FixedPointArithmetic::from_f64(60.0),
-            leaves_qty: FixedPointArithmetic::ZERO,
-            ..Default::default()
-        }).unwrap();
+        fill_trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(12.0),
+                quantity: FixedPointArithmetic::from_f64(100.0),
+                id: 1002,
+                cl_ord_id: OrderId::from_ascii("maker-bb"),
+                order_qty: FixedPointArithmetic::from_f64(60.0),
+                leaves_qty: FixedPointArithmetic::ZERO,
+                ..Default::default()
+            })
+            .unwrap();
 
         let filled_result = OrderResult {
             internal_order_id: 203,
@@ -1186,7 +1253,8 @@ mod tests {
                 trades: Trades::<4>::new(),
                 ..Default::default()
             },
-        ).await?;
+        )
+        .await?;
 
         let cancel_event = OrderEvent {
             price: FixedPointArithmetic::from_f64(9.5),
@@ -1210,7 +1278,8 @@ mod tests {
                 trades: Trades::<4>::new(),
                 ..Default::default()
             },
-        ).await?;
+        )
+        .await?;
 
         assert!(collect_all_pending_orders(&pool).await?.is_empty());
 

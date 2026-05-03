@@ -12,7 +12,7 @@ pub mod proto {
 
 use proto::{
     market_control_server::{MarketControl, MarketControlServer},
-    DumpOrderBookRequest, DumpOrderBookResponse, PendingOrder, ResetRequest, ResetResponse,
+    DumpOrderBookRequest, DumpOrderBookResponse, GetLastTradesRequest, GetLastTradesResponse, PendingOrder, ResetRequest, ResetResponse, Trade,
 };
 
 /// gRPC service that exposes market-control operations.
@@ -110,6 +110,43 @@ impl MarketControl for MarketControlService {
                     success: false,
                     message: msg,
                     orders: Vec::new(),
+                }))
+            }
+        }
+    }
+
+    /// Returns the last 10 trades persisted in the database.
+    async fn get_last_trades(
+        &self,
+        _request: Request<GetLastTradesRequest>,
+    ) -> Result<Response<GetLastTradesResponse>, Status> {
+        tracing::info!("gRPC GetLastTrades called");
+
+        match db::collect_last_n_trades(&self.db_pool, 10).await {
+            Ok(trades) => {
+                let trades = trades
+                    .into_iter()
+                    .map(|trade| Trade {
+                        id: trade.id,
+                        price: trade.price.to_f64(),
+                        quantity: trade.quantity.to_f64(),
+                        cl_ord_id: trade.cl_ord_id.to_string(),
+                    })
+                    .collect();
+
+                Ok(Response::new(GetLastTradesResponse {
+                    success: true,
+                    message: "Last 10 trades retrieved successfully".to_string(),
+                    trades,
+                }))
+            }
+            Err(e) => {
+                let msg = format!("Failed to fetch trades: {e}");
+                tracing::error!("{msg}");
+                Ok(Response::new(GetLastTradesResponse {
+                    success: false,
+                    message: msg,
+                    trades: Vec::new(),
                 }))
             }
         }
