@@ -1,4 +1,3 @@
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -7,7 +6,8 @@ use crossbeam_channel::TrySendError;
 use tokio::sync::Semaphore;
 use fix::engine::FixRawMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::mpsc;
 use utils::market_name;
 
@@ -76,7 +76,7 @@ impl<'a, const N: usize> FixServer<N> {
     /// no worker affinity is applied.
     pub fn accept_loop(
         &self,
-        listener: TcpListener, cpu_ids: Vec<usize>
+        listener: std::net::TcpListener, cpu_ids: Vec<usize>
     ) -> Result<(), Box<dyn std::error::Error>> {
 
         if let Err(e) = listener.set_nonblocking(true) {
@@ -124,8 +124,8 @@ impl<'a, const N: usize> FixServer<N> {
     }
 
     /// Async accept loop: accept clients and spawn one Tokio task per connection.
-    async fn accept_loop_async(&self, listener: TcpListener, semaphore: Arc<Semaphore>) {
-        let listener = match tokio::net::TcpListener::from_std(listener) {
+    async fn accept_loop_async(&self, listener: std::net::TcpListener, semaphore: Arc<Semaphore>) {
+        let listener = match TcpListener::from_std(listener) {
             Ok(listener) => listener,
             Err(e) => {
                 tracing::error!("[{}] Failed to convert TCP listener to Tokio: {e}", market_name());
@@ -235,7 +235,7 @@ impl<'a, const N: usize> FixServer<N> {
     /// Async write loop: wait for FIX responses and write them back to the socket.
     /// Exits automatically when all senders are dropped (client disconnected or server shutdown).
     async fn writer_loop(
-        mut write_stream: tokio::net::tcp::OwnedWriteHalf,
+        mut write_stream: OwnedWriteHalf,
         mut response_rx: mpsc::Receiver<FixRawMsg<N>>,
     ) {
         while let Some(response) = response_rx.recv().await {
