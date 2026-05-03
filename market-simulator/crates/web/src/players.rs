@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row, query, query_scalar};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Summary of a player's holdings in a symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -921,10 +923,26 @@ async fn load_storage_from_db(
     Ok((players, order_owners, total_visitor_count))
 }
 
+/// Generate a lock ID from username for advisory locking
+fn username_lock_id(username: &str) -> i64 {
+    let mut hasher = DefaultHasher::new();
+    username.hash(&mut hasher);
+    // Convert to i64, ensure positive by taking absolute value
+    (hasher.finish() as i64).abs()
+}
+
 async fn persist_storage_to_db(pool: &PgPool, data: &StorageData) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     for player in data.players.values() {
+        // Acquire advisory lock for this username to prevent deadlocks
+        // when multiple markets try to update the same player simultaneously
+        let lock_id = username_lock_id(&player.username);
+        query("SELECT pg_advisory_lock($1)")
+            .bind(lock_id)
+            .execute(&mut *tx)
+            .await?;
+
         let ips_json = serde_json::to_string(&player.ips).unwrap_or_else(|_| "[]".to_string());
         query(
             r#"
@@ -945,6 +963,12 @@ async fn persist_storage_to_db(pool: &PgPool, data: &StorageData) -> Result<(), 
         .bind(ips_json)
         .execute(&mut *tx)
         .await?;
+
+        // Release advisory lock (automatically released when transaction ends)
+        query("SELECT pg_advisory_unlock($1)")
+            .bind(lock_id)
+            .execute(&mut *tx)
+            .await?;
     }
 
     query("DELETE FROM player_order_owners")
