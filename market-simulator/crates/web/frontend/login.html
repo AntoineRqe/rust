@@ -214,6 +214,159 @@ function normalizeAppBaseUrl(rawBaseUrl) {
   }
 }
 
+async function doLogin() {
+  hideError();
+
+  const username  = userEl.value.trim();
+  const password  = passEl.value;
+
+  if (!username) { showError('Username is required.'); userEl.focus(); return; }
+  if (!password) { showError('Password is required.'); passEl.focus(); return; }
+
+  setLoading(true);
+
+  try {
+    // First, try login on the current origin (could be gateway or market)
+    try {
+      const res = await fetch(`${location.origin}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+
+      console.log('[LOGIN] Response status:', res.status, 'Data:', data);
+
+      if (res.ok) {
+        // Check if this is a gateway response (multi-market) or market response (single token)
+        if (data.markets && Array.isArray(data.markets) && data.markets.length > 0) {
+          console.log('[LOGIN] Gateway response detected, markets:', data.markets.length);
+          // Gateway response with multiple markets - redirect to unified app with all tokens
+          try {
+            localStorage.setItem('last_username', data.username || username);
+          } catch (_) {}
+
+          // Store all market credentials in sessionStorage
+          const marketTokens = {};
+          for (const market of data.markets) {
+            if (market.token && market.url) {
+              marketTokens[market.name] = {
+                token: market.token,
+                url: market.url,
+                is_admin: market.is_admin || false
+              };
+            }
+          }
+
+          try {
+            sessionStorage.setItem('market_tokens', JSON.stringify(marketTokens));
+            sessionStorage.setItem('username', data.username || username);
+            sessionStorage.setItem('is_admin', String(!!data.is_admin));
+          } catch (_) {}
+
+          // Redirect to unified app with all markets
+          console.log('[LOGIN] Redirecting to unified app with', Object.keys(marketTokens).length, 'markets');
+          const usernameSafe = encodeURIComponent(data.username || username);
+          const adminSafe = encodeURIComponent(String(!!data.is_admin));
+          location.href = `/app?username=${usernameSafe}&is_admin=${adminSafe}`;
+          return;
+        } else if (data.token) {
+          console.log('[LOGIN] Market response detected, single token');
+          // Market response with single token
+          try {
+            localStorage.setItem('last_username', data.username || username);
+          } catch (_) {}
+
+          const appBaseUrl = normalizeAppBaseUrl(data.market_url || location.origin);
+          const token = encodeURIComponent(data.token || '');
+          const usernameSafe = encodeURIComponent(data.username || username);
+          const adminSafe = encodeURIComponent(String(!!data.is_admin));
+          console.log('[LOGIN] Redirecting to:', appBaseUrl);
+          location.href = `${appBaseUrl}/app?token=${token}&username=${usernameSafe}&is_admin=${adminSafe}`;
+          return;
+        } else {
+          console.log('[LOGIN] Response OK but no markets or token found in:', data);
+        }
+      } else {
+        // Not OK response - show error
+        const authError = authMessageFromResponse(data);
+        console.log('[LOGIN] Auth failed:', authError);
+        showError(authError);
+        passEl.focus();
+        setLoading(false);
+        return;
+      }
+    } catch (e) {
+      // If current origin login failed, try market candidates
+      console.log('[LOGIN] Current origin failed, trying candidates:', e.message);
+    }
+
+    // Fallback: Try market candidates if current origin didn't work
+    const candidates = await loadMarketCandidates();
+    let lastAuthError = null;
+    let anyReachable = false;
+    let anyLoginEndpoint = false;
+
+    for (const baseUrl of candidates) {
+      // Skip if it's the same as current origin (already tried)
+      if (baseUrl === location.origin) continue;
+
+      try {
+        const res = await fetch(`${baseUrl}/api/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+
+        anyReachable = true;
+
+        // Some origins (e.g. login gateways) may not expose /api/login.
+        // Ignore these and continue with other advertised market URLs.
+        if (res.status === 404) {
+          continue;
+        }
+
+        let data = {};
+        try { data = await res.json(); } catch (_) {}
+        anyLoginEndpoint = true;
+
+        if (!res.ok) {
+          lastAuthError = authMessageFromResponse(data);
+          continue;
+        }
+
+        try {
+          localStorage.setItem('last_username', data.username || username);
+        } catch (_) {}
+
+        const appBaseUrl = normalizeAppBaseUrl(data.market_url || baseUrl || location.origin);
+        const token = encodeURIComponent(data.token || '');
+        const usernameSafe = encodeURIComponent(data.username || username);
+        const adminSafe = encodeURIComponent(String(!!data.is_admin));
+        location.href = `${appBaseUrl}/app?token=${token}&username=${usernameSafe}&is_admin=${adminSafe}`;
+        return;
+      } catch (_) {
+        // try next candidate
+      }
+    }
+
+    if (anyLoginEndpoint && lastAuthError) {
+      showError(lastAuthError);
+      passEl.focus();
+    } else if (anyReachable) {
+      showError('No market login endpoint found. Check market URLs in /api/markets.');
+    } else {
+      showError('Could not reach market server.');
+    }
+    setLoading(false);
+  } catch (e) {
+    showError('Could not reach market server.');
+    setLoading(false);
+  }
+}
+
 async function loadMarketCandidates() {
   const candidates = [];
 
@@ -272,79 +425,6 @@ async function loadMarketCandidates() {
   }
 
   return candidates;
-}
-
-async function doLogin() {
-  hideError();
-
-  const username  = userEl.value.trim();
-  const password  = passEl.value;
-
-  if (!username) { showError('Username is required.'); userEl.focus(); return; }
-  if (!password) { showError('Password is required.'); passEl.focus(); return; }
-
-  setLoading(true);
-
-  try {
-    const candidates = await loadMarketCandidates();
-    let lastAuthError = null;
-    let anyReachable = false;
-    let anyLoginEndpoint = false;
-
-    for (const baseUrl of candidates) {
-      try {
-        const res = await fetch(`${baseUrl}/api/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
-
-        anyReachable = true;
-
-        // Some origins (e.g. login gateways) may not expose /api/login.
-        // Ignore these and continue with other advertised market URLs.
-        if (res.status === 404) {
-          continue;
-        }
-
-        let data = {};
-        try { data = await res.json(); } catch (_) {}
-        anyLoginEndpoint = true;
-
-        if (!res.ok) {
-          lastAuthError = authMessageFromResponse(data);
-          continue;
-        }
-
-        try {
-          localStorage.setItem('last_username', data.username || username);
-        } catch (_) {}
-
-        const appBaseUrl = normalizeAppBaseUrl(data.market_url || baseUrl || location.origin);
-        const token = encodeURIComponent(data.token || '');
-        const usernameSafe = encodeURIComponent(data.username || username);
-        const passwordSafe = encodeURIComponent(password);
-        const adminSafe = encodeURIComponent(String(!!data.is_admin));
-        location.href = `${appBaseUrl}/app?token=${token}&username=${usernameSafe}&password=${passwordSafe}&is_admin=${adminSafe}`;
-        return;
-      } catch (_) {
-        // try next candidate
-      }
-    }
-
-    if (anyLoginEndpoint && lastAuthError) {
-      showError(lastAuthError);
-      passEl.focus();
-    } else if (anyReachable) {
-      showError('No market login endpoint found. Check market URLs in /api/markets.');
-    } else {
-      showError('Could not reach market server.');
-    }
-    setLoading(false);
-  } catch (e) {
-    showError('Could not reach market server.');
-    setLoading(false);
-  }
 }
 
 btn.addEventListener('click', doLogin);

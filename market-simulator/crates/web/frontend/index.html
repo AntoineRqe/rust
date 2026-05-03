@@ -474,9 +474,22 @@ const LOGIN_GATEWAY_URL = '{{LOGIN_GATEWAY_URL}}';
 const CURRENT_MARKET_NAME = '{{CURRENT_MARKET_NAME}}';
 const KNOWN_MARKETS = {{MARKETS_JSON}};
 const AUTH_TOKEN = sessionStorage.getItem('auth_token');
-if (!AUTH_TOKEN) {
-  // No token — send back to the central login gateway
-  location.replace(LOGIN_GATEWAY_URL);
+const MARKET_TOKENS = (() => {
+  try {
+    const stored = sessionStorage.getItem('market_tokens');
+    return stored ? JSON.parse(stored) : null;
+  } catch (_) {
+    return null;
+  }
+})();
+
+// If we have multi-market tokens from gateway login, use those
+// Otherwise, fall back to single-market auth
+const hasMultiMarketAuth = MARKET_TOKENS && Object.keys(MARKET_TOKENS).length > 0;
+
+if (!AUTH_TOKEN && !hasMultiMarketAuth) {
+  // No token and no multi-market tokens — send back to the central login gateway
+  location.replace(LOGIN_GATEWAY_URL || '/');
 }
 
 // ── state ─────────────────────────────────────────────────────────────────────
@@ -770,6 +783,16 @@ function getPrimaryMarketName() {
 }
 
 function resolveSplitMarketConfigs() {
+  // If we have multi-market tokens from gateway login, use those market names
+  if (hasMultiMarketAuth && MARKET_TOKENS) {
+    return Object.keys(MARKET_TOKENS).map(name => ({
+      name: name,
+      url: MARKET_TOKENS[name].url,
+      token: MARKET_TOKENS[name].token
+    }));
+  }
+  
+  // Otherwise, fall back to KNOWN_MARKETS (template injection)
   const configured = Array.isArray(KNOWN_MARKETS) ? KNOWN_MARKETS : [];
   const byName = new Map(configured.map(m => [normalizeMarketName(m.name), m]));
   const picks = [];
@@ -959,9 +982,22 @@ let wsDisconnectTimer = null;
 const WS_DISCONNECT_NOTICE_MS = 2000; // 2 seconds
 
 function connectWS() {
-  const token = AUTH_TOKEN ? encodeURIComponent(AUTH_TOKEN) : '';
-  const wsBase = buildWsEndpoint(getCurrentAppBaseUrl());
-  const market = encodeURIComponent(getPrimaryMarketName() || '');
+  const primaryMarketName = getPrimaryMarketName();
+  
+  // Get token and URL from either AUTH_TOKEN (single-market) or MARKET_TOKENS (multi-market)
+  let token = '';
+  let marketUrl = getCurrentAppBaseUrl(); // fallback for single-market
+  
+  if (hasMultiMarketAuth && MARKET_TOKENS && MARKET_TOKENS[primaryMarketName]) {
+    token = encodeURIComponent(MARKET_TOKENS[primaryMarketName].token);
+    marketUrl = MARKET_TOKENS[primaryMarketName].url; // Use actual market URL
+  } else if (AUTH_TOKEN) {
+    token = encodeURIComponent(AUTH_TOKEN);
+  }
+  
+  const wsBase = buildWsEndpoint(marketUrl);
+  const market = encodeURIComponent(primaryMarketName || '');
+  console.log(`[Primary] Connecting to ${primaryMarketName} at ${wsBase}?token=${token}&market=${market}`);
   ws = new WebSocket(`${wsBase}?token=${token}&market=${market}`);
 
   ws.onopen = () => {
@@ -1013,13 +1049,21 @@ function connectWS() {
 }
 
 async function getMarketAuthToken(market) {
-  const username = sessionStorage.getItem('auth_username') || currentPlayer || '';
-  const password = sessionStorage.getItem('auth_password') || '';
   const normalizedTarget = normalizeMarketName(market.name);
 
+  // If we have multi-market tokens from gateway login, use those
+  if (hasMultiMarketAuth && MARKET_TOKENS && MARKET_TOKENS[normalizedTarget]) {
+    return MARKET_TOKENS[normalizedTarget].token;
+  }
+
+  // Fallback to primary market token (single-market auth)
   if (normalizedTarget === getPrimaryMarketName()) {
     return AUTH_TOKEN;
   }
+
+  // Try to login to other markets using saved credentials
+  const username = sessionStorage.getItem('auth_username') || currentPlayer || '';
+  const password = sessionStorage.getItem('auth_password') || '';
 
   if (!username || !password) {
     throw new Error('Missing saved credentials for cross-market login');
@@ -1053,7 +1097,8 @@ async function connectMarketWS(market) {
 
   try {
     const token = encodeURIComponent(await getMarketAuthToken(market));
-    const wsBase = buildWsEndpoint(getCurrentAppBaseUrl());
+    // Use market.url directly, not getCurrentAppBaseUrl()
+    const wsBase = buildWsEndpoint(market.url);
     const wsUrl = `${wsBase}?token=${token}&market=${encodeURIComponent(marketName)}`;
     
     console.log(`[Market] Connecting to ${market.name} at ${wsUrl}`);
@@ -2702,10 +2747,32 @@ function showTab(id) {
 }
 
 // ── boot ──────────────────────────────────────────────────────────────────────
+// First, add all markets to the markets object
+const allMarketsToConnect = resolveSplitMarketConfigs();
+console.log('[Boot] allMarketsToConnect:', allMarketsToConnect);
+
+const primaryMarketName = getPrimaryMarketName() || (allMarketsToConnect[0] ? normalizeMarketName(allMarketsToConnect[0].name) : '');
+console.log('[Boot] primaryMarketName:', primaryMarketName);
+
+// Add all markets
+allMarketsToConnect.forEach(market => addMarket(normalizeMarketName(market.name)));
+
+// Also ensure primary market is added even if not in list
+if (primaryMarketName && !markets[primaryMarketName]) {
+  addMarket(primaryMarketName);
+}
+
+// Connect primary market
 connectWS();
-resolveSplitMarketConfigs()
-  .filter(market => normalizeMarketName(market.name) !== getPrimaryMarketName())
-  .forEach(market => connectMarketWS(market));
+
+// Connect secondary markets
+const secondaryMarkets = allMarketsToConnect.filter(market => normalizeMarketName(market.name) !== primaryMarketName);
+console.log('[Boot] secondaryMarkets to connect:', secondaryMarkets);
+secondaryMarkets.forEach(market => {
+  connectMarketWS(market).catch(err => {
+    console.error('[Boot] Failed to connect secondary market', market.name, err);
+  });
+});
 </script>
 </body>
 </html>
