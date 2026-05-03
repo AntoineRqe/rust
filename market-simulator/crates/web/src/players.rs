@@ -166,15 +166,33 @@ impl PlayerStore {
             .cloned()
     }
 
-    /// Load the store from PostgreSQL.
+    /// Load the store from PostgreSQL. If `should_persist` is false, this instance will not
+    /// write changes back to the database (for secondary market instances).
     pub fn load_postgres(database_url: &str) -> Self {
-        let pool = Arc::new(block_on_storage(db::connect(database_url))
+        Self::load_postgres_with_persistence(database_url, true)
+    }
+
+    pub fn load_postgres_read_only(database_url: &str) -> Self {
+        Self::load_postgres_with_persistence(database_url, false)
+    }
+
+    fn load_postgres_with_persistence(database_url: &str, should_persist: bool) -> Self {
+        let pool = if should_persist {
+            Some(Arc::new(block_on_storage(db::connect(database_url))
+                .unwrap_or_else(|e| panic!("failed to connect player store to postgres: {e}"))))
+        } else {
+            // Read-only instances don't need a pool for persistence
+            None
+        };
+
+        // Still need to load initial data
+        let initial_pool = Arc::new(block_on_storage(db::connect(database_url))
             .unwrap_or_else(|e| panic!("failed to connect player store to postgres: {e}")));
 
-        block_on_storage(create_player_tables(&pool))
+        block_on_storage(create_player_tables(&initial_pool))
             .unwrap_or_else(|e| panic!("failed to create player store tables: {e}"));
 
-        let (players, order_owners, total_visitor_count) = block_on_storage(load_storage_from_db(&pool))
+        let (players, order_owners, total_visitor_count) = block_on_storage(load_storage_from_db(&initial_pool))
             .unwrap_or_else(|e| panic!("failed to load player store from postgres: {e}"));
 
         tracing::info!(
@@ -189,7 +207,7 @@ impl PlayerStore {
                 order_owners,
                 processed_exec_ids: HashSet::new(),
                 total_visitor_count,
-                pool: Some(pool),
+                pool,
             })),
         }
     }

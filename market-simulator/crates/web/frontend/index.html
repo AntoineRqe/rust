@@ -839,6 +839,9 @@ function renderMarketsContainer() {
       <div class="market-book" id="market-${esc(name)}">
         <!-- Book and chart remain visible, do not clear on disconnect -->
       </div>
+      <div id="chart-wrap" style="display:none">
+        <canvas id="price-canvas"></canvas>
+      </div>
       <div class="market-controls">
         <span style="font-size:10px;color:${statusColor}">● ${m.connected ? 'CONNECTED' : 'DISCONNECTED'}</span>
       </div>
@@ -1210,7 +1213,7 @@ function handleServerEvent(msg, marketName) {
       applyOrderBookSnapshot(msg, marketName);
       break;
     case 'trades':
-      applyTradesSnapshot(msg);
+      applyTradesSnapshot(msg, marketName);
       break;
     case 'fix_message':
       updateBookFromFix(msg.body, msg.tag, marketName);
@@ -1253,7 +1256,7 @@ function applyOrderBookSnapshot(msg, marketName) {
   renderMarketBook(mn);
 }
 
-function applyTradesSnapshot(msg) {
+function applyTradesSnapshot(msg, marketName) {
   console.log('[applyTradesSnapshot] Received message:', msg);
   
   if (!msg.trades || !Array.isArray(msg.trades)) {
@@ -1263,30 +1266,32 @@ function applyTradesSnapshot(msg) {
   
   console.log('[applyTradesSnapshot] Got ' + msg.trades.length + ' trades from snapshot');
   
-  if (msg.trades.length === 0) {
-    console.warn('[applyTradesSnapshot] Empty trades snapshot, skipping chart initialization');
+  // Apply trades to the specified market
+  const mn = normalizeMarketName(marketName || getPrimaryMarketName());
+  const market = markets[mn];
+  if (!market) {
+    console.warn('[applyTradesSnapshot] Market not found:', mn);
     return;
   }
   
-  // Initialize chartPts with trades from the snapshot
-  // Always apply snapshot if we have trades, even if chartPts was pre-populated with reference price
-  const now = new Date();
-  const ts = now.toTimeString().slice(0, 8);
-  
-  // Reverse the trades array to get chronological order (oldest first)
-  chartPts = msg.trades.slice().reverse().map(trade => ({
-    price: Number(trade.price) || 0,
-    ts: ts  // Use current time for all, as we don't have original timestamps
-  }));
-  
-  lastTradeCount = msg.trades.length;
-  
-  console.log('[applyTradesSnapshot] Initialized chartPts with ' + chartPts.length + ' points:', chartPts);
-  
-  if (chartPts.length >= 2) {
-    drawChart();
-    console.log('[UI] Initialized price chart with ' + chartPts.length + ' trades');
+  if (msg.trades.length > 0) {
+    // Convert API trades to book trade format [price, qty, side, ts]
+    // The API returns {id, price, quantity, cl_ord_id}
+    market.book.trades = msg.trades.map(t => [
+      Number(t.price) || 0,
+      Number(t.quantity) || 0,
+      'B',  // Default to buy side (we don't have the actual side in the snapshot)
+      new Date().toTimeString().slice(0, 8),  // Timestamp
+      '—',  // Owner (unknown from snapshot)
+      false  // resolved flag
+    ]);
+    console.log('[applyTradesSnapshot] Updated market ' + mn + ' book.trades with ' + market.book.trades.length + ' trades');
+  } else {
+    console.log('[applyTradesSnapshot] Empty trades snapshot, skipping');
   }
+  
+  // Re-render the market book with the new trades
+  renderMarketBook(mn);
 }
 
 function isOrderOwnedByCurrentUser(clordId) {
