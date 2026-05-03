@@ -1,15 +1,19 @@
 /// Persistent per-player FIX TCP session manager.
 ///
 /// Each player gets exactly one long-lived TCP connection to the FIX engine.
-/// The background reader thread lives independently of any WebSocket connection:
+/// The background reader task lives independently of any WebSocket connection:
 /// it continuously applies execution reports to the player store even when the
 /// browser is offline, and publishes them to the event bus for display when the
 /// browser reconnects.
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedWriteHalf;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::players::PlayerStore;
 use crate::state::{EventBus, WsEvent};
@@ -19,7 +23,7 @@ use utils::market_name;
 
 pub struct FIXSession {
     /// Write-side of the TCP connection (used for sending FIX orders).
-    pub writer: Arc<Mutex<TcpStream>>,
+    pub writer: Arc<AsyncMutex<OwnedWriteHalf>>,
     /// Set to `true` to tear down the session (e.g. on server shutdown).
     pub stop: Arc<AtomicBool>,
 }
@@ -42,7 +46,7 @@ impl FIXSessionManager {
     /// Return the write-half of the existing FIX session for `username`, or
     /// create a new one by connecting to `fix_tcp_addr`.
     ///
-    /// The background reader thread is spawned automatically and handles:
+    /// The background reader task is spawned automatically and handles:
     ///
     /// - Calling `player_store.apply_fix_execution_report()` for every
     ///   execution report received, regardless of WebSocket state.
@@ -56,7 +60,7 @@ impl FIXSessionManager {
         fix_tcp_addr: &str,
         player_store: &PlayerStore,
         bus: &EventBus,
-    ) -> Result<Arc<Mutex<TcpStream>>, std::io::Error> {
+    ) -> Result<Arc<AsyncMutex<OwnedWriteHalf>>, std::io::Error> {
         let mut sessions = self.inner.lock().unwrap();
 
         if let Some(session) = sessions.get(username) {
@@ -67,10 +71,16 @@ impl FIXSessionManager {
             return Ok(Arc::clone(&session.writer));
         }
 
-        let stream = TcpStream::connect(fix_tcp_addr)?;
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(100)))?;
+        // This is a blocking call, so we use block_in_place to avoid blocking the tokio runtime
+        let stream = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                TcpStream::connect(fix_tcp_addr).await
+            })
+        })?;
 
-        let writer = Arc::new(Mutex::new(stream.try_clone()?));
+        // Split into read and write halves
+        let (reader, writer_half) = stream.into_split();
+        let writer = Arc::new(AsyncMutex::new(writer_half));
         let stop = Arc::new(AtomicBool::new(false));
 
         {
@@ -80,9 +90,9 @@ impl FIXSessionManager {
             let bus = bus.clone();
             let sessions_ref = Arc::clone(&self.inner);
 
-            // Spawn the background reader thread for this session.
-            std::thread::spawn(move || {
-                let mut tcp_reader = stream;
+            // Spawn the background reader task for this session.
+            tokio::spawn(async move {
+                let mut reader = reader;
                 let mut buf = [0u8; 4096];
                 let mut stream_buf: Vec<u8> = Vec::with_capacity(8192);
 
@@ -92,15 +102,18 @@ impl FIXSessionManager {
                 );
 
                 while !stop_flag.load(Ordering::Relaxed) {
-                    match tcp_reader.read(&mut buf) {
-                        Ok(0) => {
+                    match tokio::time::timeout(
+                        Duration::from_millis(100),
+                        reader.read(&mut buf)
+                    ).await {
+                        Ok(Ok(0)) => {
                             tracing::info!(
                                 "[{}] FIX session closed by engine for '{username}'",
                                 market_name()
                             );
                             break;
                         }
-                        Ok(n) => {
+                        Ok(Ok(n)) => {
                             stream_buf.extend_from_slice(&buf[..n]);
                             for raw_msg in extract_fix_messages(&mut stream_buf) {
                                 let body = pretty_fix(&raw_msg);
@@ -117,12 +130,7 @@ impl FIXSessionManager {
                                 });
                             }
                         }
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                            ) => {}
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::warn!(
                                 "[{}] FIX TCP read error for '{username}': {e}",
                                 market_name()
@@ -135,6 +143,9 @@ impl FIXSessionManager {
                             });
                             break;
                         }
+                        Err(_) => {
+                            // Timeout is expected on idle - just continue
+                        }
                     }
                 }
 
@@ -144,6 +155,7 @@ impl FIXSessionManager {
                     market_name()
                 );
             });
+
         }
 
         tracing::info!(
@@ -162,14 +174,13 @@ impl FIXSessionManager {
         let sessions = self.inner.lock().unwrap();
         for (username, session) in sessions.iter() {
             session.stop.store(true, Ordering::Relaxed);
-            if let Ok(stream) = session.writer.lock() {
-                let _ = stream.shutdown(Shutdown::Both);
-            }
             tracing::debug!(
-                "[{}] FIX session stopped for '{username}' (shutdown)",
+                "[{}] FIX session shutdown requested for '{username}'",
                 market_name()
             );
         }
+        // Drop the sessions, which will cause the async tasks to see stop flag and exit
+        // The streams will be closed automatically when dropped
     }
 }
 
@@ -262,11 +273,11 @@ pub fn classify_fix_msg(raw: &[u8]) -> String {
     }
 }
 
-/// Send raw bytes over the TCP writer.
-pub fn send_fix_over_tcp(
-    tcp_writer: &Arc<Mutex<TcpStream>>,
+/// Send raw bytes over the TCP writer (must be called from async context).
+pub async fn send_fix_over_tcp(
+    tcp_writer: &Arc<AsyncMutex<OwnedWriteHalf>>,
     bytes: &[u8],
 ) -> std::io::Result<()> {
-    let mut stream = tcp_writer.lock().unwrap();
-    stream.write_all(bytes)
+    let mut stream = tcp_writer.lock().await;
+    stream.write_all(bytes).await
 }

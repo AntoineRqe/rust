@@ -1,104 +1,104 @@
 {
-    "ring_buffer_size": 1024,
-    "player_database_url_env": "DATABASE_URL_MARKET_SIMULATOR",
-    "entry_point": {
+  "ring_buffer_size": 1024,
+  "player_database_url_env": "DATABASE_URL_MARKET_SIMULATOR",
+  "entry_point": {
+    "ip": "127.0.0.1",
+    "port": 9860
+  },
+  "markets": [
+    {
+      "name": "NASDAQ",
+      "database_url_env": "DATABASE_URL_NASDAQ",
+      "web": {
         "ip": "127.0.0.1",
-        "port": 9860
+        "port": 9870
+      },
+      "tcp": {
+        "ip": "127.0.0.1",
+        "port": 9871
+      },
+      "grpc": {
+        "ip": "0.0.0.0",
+        "port": 50051
+      },
+      "proxy": {
+        "ip": "127.0.0.1",
+        "port": 9891
+      },
+      "market_feed_multicast": {
+        "ip": "239.0.0.1",
+        "port": 9001
+      },
+      "snapshot_multicast": {
+        "ip": "239.0.0.1",
+        "port": 9002
+      },
+      "snapshot": {
+        "max_depth": 5,
+        "update_interval_ms": 100000
+      },
+      "core_mapping": {
+        "order_book_core": 0,
+        "fix_inbound_core": 1,
+        "fix_outbound_core": 2,
+        "execution_report_core": 3,
+        "market_feed_core": 4,
+        "db_core": 5,
+        "web_core": 6,
+        "tcp_core": 7,
+        "global_core": 8,
+        "snapshot_core": 9,
+        "market_feed_multicast_core": 10,
+        "snapshot_multicast_core": 11,
+        "market_data_proxy_core": 12
+      }
     },
-    "markets": [
-        {
-            "name" : "NASDAQ",
-            "database_url_env": "DATABASE_URL_NASDAQ",
-            "web": {
-                "ip": "127.0.0.1",
-                "port": 9870
-            },
-            "tcp": {
-                "ip": "127.0.0.1",
-                "port": 9871
-            },
-            "grpc": {
-                "ip": "0.0.0.0",
-                "port": 50051
-            },
-            "proxy": {
-                "ip": "127.0.0.1",
-                "port": 9891
-            },
-            "market_feed_multicast": {
-                "ip": "239.0.0.1",
-                "port": 9001
-            },
-            "snapshot_multicast": {
-                "ip": "239.0.0.1",
-                "port": 9002
-            },
-            "snapshot": {
-                "max_depth": 5,
-                "update_interval_ms": 100000
-            },
-            "core_mapping": {
-                "order_book_core": 0,
-                "fix_inbound_core": 1,
-                "fix_outbound_core": 2,
-                "execution_report_core": 3,
-                "market_feed_core": 4,
-                "db_core": 5,
-                "web_core": 6,
-                "tcp_core": 7,
-                "global_core": 8,
-                "snapshot_core": 9,
-                "market_feed_multicast_core": 10,
-                "snapshot_multicast_core": 11,
-                "market_data_proxy_core": 12
-            }
-        },
-        {
-            "name" : "NYSE",
-            "database_url_env": "DATABASE_URL_NYSE",
-            "web": {
-                "ip": "127.0.0.1",
-                "port": 9885
-            },
-            "tcp": {
-                "ip": "127.0.0.1",
-                "port": 9884
-            },
-            "grpc": {
-                "ip": "0.0.0.0",
-                "port": 50052
-            },
-            "proxy": {
-                "ip": "127.0.0.1",
-                "port": 9892
-            },
-            "market_feed_multicast": {
-                "ip": "239.0.0.1",
-                "port": 9003
-            },
-            "snapshot_multicast": {
-                "ip": "239.0.0.1",
-                "port": 9004
-            },
-            "snapshot": {
-                "max_depth": 3,
-                "update_interval_ms": 1000
-            },
-            "core_mapping": {
-                "order_book_core": 0,
-                "fix_inbound_core": 1,
-                "fix_outbound_core": 2,
-                "execution_report_core": 3,
-                "market_feed_core": 4,
-                "db_core": 5,
-                "web_core": 6,
-                "tcp_core": 7,
-                "global_core": 8,
-                "snapshot_core": 9,
-                "market_feed_multicast_core": 10,
-                "snapshot_multicast_core": 11,
-                "market_data_proxy_core": 12
-            }
-        }
-    ]
+    {
+      "name": "NYSE",
+      "database_url_env": "DATABASE_URL_NYSE",
+      "web": {
+        "ip": "127.0.0.1",
+        "port": 9885
+      },
+      "tcp": {
+        "ip": "127.0.0.1",
+        "port": 9884
+      },
+      "grpc": {
+        "ip": "0.0.0.0",
+        "port": 50052
+      },
+      "proxy": {
+        "ip": "127.0.0.1",
+        "port": 9892
+      },
+      "market_feed_multicast": {
+        "ip": "239.0.0.1",
+        "port": 9003
+      },
+      "snapshot_multicast": {
+        "ip": "239.0.0.1",
+        "port": 9004
+      },
+      "snapshot": {
+        "max_depth": 3,
+        "update_interval_ms": 100000
+      },
+      "core_mapping": {
+        "order_book_core": 0,
+        "fix_inbound_core": 1,
+        "fix_outbound_core": 2,
+        "execution_report_core": 3,
+        "market_feed_core": 4,
+        "db_core": 5,
+        "web_core": 6,
+        "tcp_core": 7,
+        "global_core": 8,
+        "snapshot_core": 9,
+        "market_feed_multicast_core": 10,
+        "snapshot_multicast_core": 11,
+        "market_data_proxy_core": 12
+      }
+    }
+  ]
 }

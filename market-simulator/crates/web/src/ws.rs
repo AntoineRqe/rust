@@ -4,8 +4,9 @@ use axum::{
     http::StatusCode,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
-use std::net::{TcpStream, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddr;
+use tokio::net::tcp::OwnedWriteHalf;
+use std::sync::Arc;
 use serde::Deserialize;
 use crate::server::AppState;
 use crate::auth::{SessionInfo, authenticate_token, require_admin};
@@ -297,7 +298,7 @@ async fn send_order_book_snapshots(
     }
 }
 /// Handle a command received from the browser client. This may involve sending FIX messages over TCP to the engine, which will then process them and publish events back to the bus.
-async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool, tcp_writer: &Arc<Mutex<TcpStream>>) {
+async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool, tcp_writer: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>) {
     tracing::debug!("[{}] Received message from browser: {text}", market_name());
     let cmd: BrowserCommand = match serde_json::from_str(text) {
         Ok(c)  => c,
@@ -419,7 +420,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 recipient: Some(username.to_string()),
             });
 
-            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes) {
+            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes).await {
                 state.bus.publish(WsEvent::FixMessage {
                     label: "ERROR".into(),
                     body: format!("Unable to send FIX order over TCP: {e}"),
@@ -451,7 +452,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 recipient: Some(username.to_string()),
             });
 
-            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes) {
+            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes).await {
                 state.bus.publish(WsEvent::FixMessage {
                     label: "ERROR".into(),
                     body: format!("Unable to send FIX cancel over TCP: {e}"),
@@ -586,7 +587,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
         BrowserCommand::MdRequest { symbol, depth } => {
             let fix_bytes = build_md_request("BROWSER", "SERVER1",
                                              &symbol, depth.unwrap_or(1));
-            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes) {
+            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes).await {
                 state.bus.publish(WsEvent::FixMessage {
                     label: "ERROR".into(),
                     body: format!("Unable to send market data request over TCP: {e}"),
