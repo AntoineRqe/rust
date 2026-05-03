@@ -7,8 +7,10 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use std::net::{TcpStream, SocketAddr};
 use std::sync::{Arc, Mutex};
 use serde::Deserialize;
-use crate::server::{AppState, SessionInfo, authenticate_token};
-use crate::state::{WsEvent, BrowserCommand, PendingOrder};
+use crate::server::AppState;
+use crate::auth::{SessionInfo, authenticate_token, require_admin};
+use crate::state::{WsEvent, BrowserCommand};
+use crate::players::PendingOrder;
 use crate::fix_session::{pretty_fix, send_fix_over_tcp};
 use utils::market_name;
 
@@ -57,7 +59,7 @@ pub async fn ws_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let token = params.token.unwrap_or_default();
-    let Some(session) = authenticate_token(&state, &token) else {
+    let Some(session) = authenticate_token(&state.sessions, &token) else {
         return (StatusCode::UNAUTHORIZED, "Invalid or missing session token").into_response();
     };
 
@@ -294,21 +296,6 @@ async fn send_order_book_snapshots(
         let _ = sender.send(Message::Text(json.into())).await;
     }
 }
-
-fn require_admin(state: &AppState, username: &str, is_admin: bool) -> bool {
-    if is_admin {
-        return true;
-    }
-
-    state.bus.publish(WsEvent::FixMessage {
-        label: "ADMIN ONLY".into(),
-        body: "This action is reserved to the admin user.".into(),
-        tag: "err".into(),
-        recipient: Some(username.to_string()),
-    });
-    false
-}
-
 /// Handle a command received from the browser client. This may involve sending FIX messages over TCP to the engine, which will then process them and publish events back to the bus.
 async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool, tcp_writer: &Arc<Mutex<TcpStream>>) {
     tracing::debug!("[{}] Received message from browser: {text}", market_name());
@@ -475,7 +462,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
         }
 
         BrowserCommand::ResetSeq => {
-            if !require_admin(state, username, is_admin) {
+            if !require_admin(&state.bus, username, is_admin) {
                 return;
             }
             // We'll handle sequence numbers in the FIX engine
@@ -489,7 +476,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
         }
 
         BrowserCommand::ClearBook => {
-            if !require_admin(state, username, is_admin) {
+            if !require_admin(&state.bus, username, is_admin) {
                 return;
             }
             use grpc::proto::market_control_client::MarketControlClient;
@@ -570,7 +557,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
         }
 
         BrowserCommand::ResetTokens => {
-            if !require_admin(state, username, is_admin) {
+            if !require_admin(&state.bus, username, is_admin) {
                 return;
             }
 

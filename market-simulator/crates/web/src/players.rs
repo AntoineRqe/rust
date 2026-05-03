@@ -9,7 +9,23 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row, query, query_scalar};
 
-use crate::state::PendingOrder;
+/// Summary of a player's holdings in a symbol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoldingSummary {
+    pub quantity: f64,
+    pub avg_price: f64,
+}
+
+/// A single order resting in the order book on behalf of a player.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingOrder {
+    pub cl_ord_id: String,
+    pub symbol: String,
+    /// FIX side: "1" = buy, "2" = sell.
+    pub side: String,
+    pub qty: f64,
+    pub price: f64,
+}
 
 fn market_name() -> &'static str {
     static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -290,7 +306,7 @@ impl PlayerStore {
 
     /// Return a holdings summary (symbol → total remaining quantity) derived
     /// from open portfolio lots for a player.
-    pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, crate::state::HoldingSummary> {
+    pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, HoldingSummary> {
         let mut total_qty: HashMap<String, f64> = HashMap::new();
         let mut total_cost: HashMap<String, f64> = HashMap::new();
 
@@ -309,7 +325,7 @@ impl PlayerStore {
                 let avg_price = total_cost.get(&symbol).copied().unwrap_or(0.0) / quantity;
                 Some((
                     symbol,
-                    crate::state::HoldingSummary {
+                    HoldingSummary {
                         quantity,
                         avg_price,
                     },

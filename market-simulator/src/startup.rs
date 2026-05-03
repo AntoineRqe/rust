@@ -1,9 +1,8 @@
 use config::Connection;
 use execution_report::{ExecutionReportEngine};
 use server::multicast::{spawn_market_feed_receiver};
-use web::state::{
-    EventBus, OrderBookState,
-};
+use web::state::EventBus;
+use web::order_book::OrderBookState;
 
 use types::multicast::MulticastSource;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool}};

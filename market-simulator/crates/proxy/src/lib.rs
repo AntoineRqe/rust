@@ -25,7 +25,7 @@ impl MarketDataProxy {
         
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .thread_name("market-data-proxy-runtime")
-            .worker_threads(1)
+            .worker_threads(3)
             .on_thread_start(move || {
                 core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
             })

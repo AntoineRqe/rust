@@ -16,20 +16,23 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use crate::auth::MarketInfo;
 
 #[derive(Clone)]
 struct LoginGatewayState {
-    markets: Vec<web::MarketInfo>,
+    markets: Vec<MarketInfo>,
 }
 
-pub fn run_login_gateway(markets: Vec<web::MarketInfo>, ip: &str, port: u16) {
+/// Run the login gateway server on the specified IP and port.
+/// The gateway serves the login page and proxies login requests to configured market servers.
+pub fn run_login_gateway(markets: Vec<MarketInfo>, ip: &str, port: u16) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("login-gateway")
         .build()
         .expect("Failed to build tokio runtime for login gateway")
         .block_on(async move {
-            let advertised = web::server::advertised_markets(&markets);
+            let advertised = crate::auth::advertised_markets(&markets);
             if !markets.is_empty() {
                 if advertised.is_empty() {
                     tracing::warn!(
@@ -69,7 +72,7 @@ pub fn run_login_gateway(markets: Vec<web::MarketInfo>, ip: &str, port: u16) {
 }
 
 async fn gateway_login_page_handler() -> Html<&'static str> {
-    Html(include_str!("../crates/web/frontend/login.html"))
+    Html(include_str!("../frontend/login.html"))
 }
 
 fn gateway_public_base_url(headers: &HeaderMap) -> String {
@@ -89,14 +92,14 @@ async fn gateway_app_handler(
     State(state): State<LoginGatewayState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let advertised = web::server::advertised_markets(&state.markets);
+    let advertised = crate::auth::advertised_markets(&state.markets);
     if advertised.is_empty() {
         return Html("No markets available.").into_response();
     }
 
-    let markets_for_client: Vec<web::MarketInfo> = advertised
+    let markets_for_client: Vec<MarketInfo> = advertised
         .iter()
-        .map(|market| web::MarketInfo {
+        .map(|market| MarketInfo {
             name: market.name.clone(),
             url: adapt_market_url_for_client(&market.url, &headers),
         })
@@ -110,7 +113,7 @@ async fn gateway_app_handler(
     let markets_json = serde_json::to_string(&markets_for_client)
         .unwrap_or_else(|_| "[]".to_string());
 
-    let html = include_str!("../crates/web/frontend/index.html")
+    let html = include_str!("../frontend/index.html")
         .replace("{{MARKET_NAME}}", "gateway")
         .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url)
         .replace("{{CURRENT_MARKET_NAME}}", current_market_name)
@@ -119,8 +122,8 @@ async fn gateway_app_handler(
     Html(html).into_response()
 }
 
-async fn gateway_markets_handler(State(state): State<LoginGatewayState>) -> Json<Vec<web::MarketInfo>> {
-    Json(web::server::advertised_markets(&state.markets))
+async fn gateway_markets_handler(State(state): State<LoginGatewayState>) -> Json<Vec<MarketInfo>> {
+    Json(crate::auth::advertised_markets(&state.markets))
 }
 
 #[derive(Deserialize)]
@@ -140,7 +143,7 @@ fn market_ws_url(base_url: &str, token: &str) -> String {
     endpoint
 }
 
-fn pick_market<'a>(markets: &'a [web::MarketInfo], requested: Option<&str>) -> Option<&'a web::MarketInfo> {
+fn pick_market<'a>(markets: &'a [MarketInfo], requested: Option<&str>) -> Option<&'a MarketInfo> {
     if let Some(name) = requested {
         let requested_trimmed = name.trim();
         if !requested_trimmed.is_empty() {
@@ -161,7 +164,7 @@ async fn gateway_ws_handler(
         return StatusCode::BAD_REQUEST.into_response();
     }
 
-    let markets = web::server::advertised_markets(&state.markets);
+    let markets = crate::auth::advertised_markets(&state.markets);
     let Some(target_market) = pick_market(&markets, query.market.as_deref()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -341,7 +344,7 @@ async fn gateway_login_handler(
     headers: HeaderMap,
     Json(body): Json<GatewayLoginRequest>,
 ) -> impl IntoResponse {
-    let markets = web::server::advertised_markets(&state.markets);
+    let markets = crate::auth::advertised_markets(&state.markets);
     if markets.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -359,7 +362,7 @@ async fn gateway_login_handler(
         .map(str::trim)
         .filter(|name| !name.is_empty());
 
-    let markets_to_try: Vec<web::MarketInfo> = if let Some(name) = requested_market {
+    let markets_to_try: Vec<MarketInfo> = if let Some(name) = requested_market {
         match markets.iter().find(|market| market.name.eq_ignore_ascii_case(name)) {
             Some(found) => vec![found.clone()],
             None => {

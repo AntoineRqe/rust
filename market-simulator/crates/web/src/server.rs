@@ -1,10 +1,6 @@
 use axum::{
     Router,
     routing::{get, post},
-    response::{Html, IntoResponse, Redirect},
-    extract::{State, Query},
-    http::StatusCode,
-    Json,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -13,30 +9,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
-use serde::{Deserialize, Serialize};
-use rand_core::RngCore;
 use tower_http::cors::{Any, CorsLayer};
-use crate::state::{EventBus, OrderBookState};
+use crate::state::EventBus;
+use crate::order_book::OrderBookState;
 use crate::players::PlayerStore;
 use crate::fix_session::FIXSessionManager;
 use crate::ws::ws_handler;
+use crate::login::{root_handler, login_page_handler, app_handler, api_login_handler, api_markets_handler};
+use crate::auth::{SessionInfo, MarketInfo};
 use utils::market_name;
-
-/// Information about a single market, served to the login page.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MarketInfo {
-    pub name: String,
-    pub url: String,
-}
-
-/// Information for an authenticated session, stored in the server's session registry.
-#[derive(Clone, Debug)]
-pub struct SessionInfo {
-    /// The username associated with this session (e.g. "alice").
-    pub username: String,
-    /// Whether this session belongs to the admin user (which has special privileges).
-    pub is_admin: bool,
-}
 
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
 #[derive(Clone)]
@@ -61,106 +42,6 @@ pub struct AppState {
     pub total_visitors: Arc<AtomicUsize>,
     /// Persistent FIX TCP session registry (one connection per player).
     pub fix_session_manager: FIXSessionManager,
-}
-
-/// Generate a cryptographically random 128-bit hex token.
-pub(crate) fn generate_token() -> String {
-    let mut bytes = [0u8; 16];
-    rand_core::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Look up a session token and return the associated session metadata.
-pub(crate) fn authenticate_token(state: &AppState, token: &str) -> Option<SessionInfo> {
-    state.sessions.lock().unwrap().get(token).cloned()
-}
-
-fn admin_password() -> Option<String> {
-    std::env::var("MARKET_SIMULATOR_ADMIN_PWD")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn public_markets_only_enabled() -> bool {
-    std::env::var("MARKET_SIM_PUBLIC_MARKETS_ONLY")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn is_private_ipv4(host: &str) -> bool {
-    if host.starts_with("10.") || host.starts_with("192.168.") || host.starts_with("169.254.") {
-        return true;
-    }
-
-    if let Some(rest) = host.strip_prefix("172.") {
-        if let Some(octet_str) = rest.split('.').next() {
-            if let Ok(octet) = octet_str.parse::<u8>() {
-                return (16..=31).contains(&octet);
-            }
-        }
-    }
-
-    false
-}
-
-fn is_public_market_url(raw_url: &str) -> bool {
-    let trimmed = raw_url.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    let without_scheme = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-        .unwrap_or(trimmed);
-
-    let host_port = without_scheme.split('/').next().unwrap_or_default().trim();
-    if host_port.is_empty() {
-        return false;
-    }
-
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        rest.split(']').next().unwrap_or_default()
-    } else {
-        host_port.split(':').next().unwrap_or_default()
-    }
-    .trim()
-    .to_ascii_lowercase();
-
-    if host.is_empty() {
-        return false;
-    }
-
-    if matches!(
-        host.as_str(),
-        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "host.docker.internal"
-    ) {
-        return false;
-    }
-
-    if is_private_ipv4(&host) {
-        return false;
-    }
-
-    true
-}
-
-pub fn advertised_markets(markets: &[MarketInfo]) -> Vec<MarketInfo> {
-    if !public_markets_only_enabled() {
-        return markets.to_vec();
-    }
-
-    markets
-        .iter()
-        .filter(|market| is_public_market_url(&market.url))
-        .cloned()
-        .collect()
 }
 
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
@@ -219,7 +100,7 @@ async fn serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize player store and app state
     let player_store = PlayerStore::load_postgres(&database_url);
-    let advertised = advertised_markets(&known_markets);
+    let advertised = crate::auth::advertised_markets(&known_markets);
     if !known_markets.is_empty() {
         if advertised.is_empty() {
             tracing::warn!(
@@ -322,124 +203,6 @@ async fn shutdown_signal(shutdown: Arc<AtomicBool>) {
             tracing::info!("[{}] Stop request received, shutting down web server", market_name());
         }
     }
-}
-
-/// Serve the login page (always accessible, no auth required).
-#[derive(Deserialize)]
-struct LoginPageParams {
-    token: Option<String>,
-}
-
-async fn login_page_handler(
-    State(state): State<AppState>,
-    Query(params): Query<LoginPageParams>,
-) -> impl IntoResponse {
-    if let Some(token) = params.token {
-        if authenticate_token(&state, &token).is_some() {
-            return Redirect::to(&format!("/app?token={token}")).into_response();
-        }
-    }
-
-    Html(include_str!("../frontend/login.html")).into_response()
-}
-
-/// Redirect the root URL to the canonical app route.
-async fn root_handler() -> impl IntoResponse {
-    Redirect::to("/app")
-}
-
-/// Serve the trading terminal. Auth is enforced client-side via sessionStorage
-/// token; the WebSocket upgrade enforces it server-side.
-async fn app_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let market = market_name();
-    let login_gateway_url = std::env::var("LOGIN_GATEWAY_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:9875".to_string());
-    let markets_json = serde_json::to_string(&advertised_markets(&state.known_markets))
-        .unwrap_or_else(|_| "[]".to_string());
-    let html = include_str!("../frontend/index.html")
-        .replace("{{MARKET_NAME}}", market)
-        .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url)
-        .replace("{{CURRENT_MARKET_NAME}}", market)
-        .replace("{{MARKETS_JSON}}", &markets_json);
-    Html(html)
-}
-
-/// POST /api/login — body: `{ "username": "...", "password": "..." }`
-/// Returns 200 `{ token, username }` on success, 401 `{ error }` on failure.
-#[derive(Deserialize)]
-struct LoginRequest {
-    username: String,
-    password: String,
-}
-
-async fn api_login_handler(
-    State(state): State<AppState>,
-    Json(body): Json<LoginRequest>,
-) -> impl IntoResponse {
-    let admin_login = body.username.eq_ignore_ascii_case("admin")
-        && admin_password().as_deref() == Some(body.password.as_str());
-
-    if admin_login {
-        let created = state.player_store.ensure_player_exists("admin");
-        if created {
-            tracing::info!("[{}] Admin player profile initialized", market_name());
-        }
-
-        let token = generate_token();
-        state.sessions.lock().unwrap().insert(
-            token.clone(),
-            SessionInfo {
-                username: "admin".to_string(),
-                is_admin: true,
-            },
-        );
-        tracing::info!("[{}] Admin session created", market_name());
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "token": token,
-                "username": "admin",
-                "is_admin": true
-            })),
-        )
-            .into_response();
-    }
-
-    match state.player_store.authenticate_or_register(&body.username, &body.password) {
-        Ok(username) => {
-            let token = generate_token();
-            state.sessions.lock().unwrap().insert(
-                token.clone(),
-                SessionInfo {
-                    username: username.clone(),
-                    is_admin: false,
-                },
-            );
-            tracing::info!("[{}] Session created for '{username}'", market_name());
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "token": token,
-                    "username": username,
-                    "is_admin": false
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({
-                "error": e.message(),
-                "code": e.code(),
-            })),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /api/markets — returns the list of all configured markets.
-async fn api_markets_handler(State(state): State<AppState>) -> impl IntoResponse {
-    Json(advertised_markets(&state.known_markets))
 }
 
 /// Load initial pending orders from gRPC DumpOrderBook RPC at startup.

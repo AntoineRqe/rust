@@ -9,15 +9,13 @@ use std::sync::{Arc, Mutex};
 use crossbeam::{channel};
 use fix::engine::{FixRawMsg};
 use memory;
-use web::state::{
-    EventBus, OrderBookState,
-};
+use web::state::EventBus;
+use web::order_book::OrderBookState;
 use config::{MarketConfig, MarketsConfig};
 use std::sync::atomic::{AtomicBool};
 use types::consts::RB_SIZE;
 
 
-pub mod gateway;
 pub mod startup;
 
 #[derive(Parser, Debug)]
@@ -407,7 +405,7 @@ fn main() {
         let login_ip = gateway_ip.clone();
         let login_port = gateway_port;
         std::thread::spawn(move || {
-            gateway::run_login_gateway(gateway_markets, &login_ip, login_port);
+            web::run_login_gateway(gateway_markets, &login_ip, login_port);
         });
     }
 
