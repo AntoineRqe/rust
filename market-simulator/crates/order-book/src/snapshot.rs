@@ -1,8 +1,8 @@
-use std::sync::{Arc, atomic::{AtomicBool}};
-use spsc::{Producer};
-use snapshot::types::{Snapshot};
-use utils::market_name;
 use arc_swap::ArcSwap;
+use snapshot::types::Snapshot;
+use spsc::Producer;
+use std::sync::{Arc, atomic::AtomicBool};
+use utils::market_name;
 
 /// Snapshot generation engine that runs in a separate thread and periodically sends snapshots of the order book to the output queue.
 /// It uses an `ArcSwap` to hold the latest snapshot, allowing for efficient updates without blocking the snapshot generation thread.
@@ -18,17 +18,18 @@ pub struct SnapshotGenerationEngine<'a, const N: usize> {
     interval_ms: u64,
 }
 
-impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
+impl<'a, const N: usize> SnapshotGenerationEngine<'a, N> {
     pub fn new(
         producer: Producer<'a, Arc<Snapshot>, N>,
         shutdown: Arc<AtomicBool>,
-        snapshot_ptr: Arc<ArcSwap<Snapshot>>, 
-        interval_ms: u64) -> Self
-    {
-        Self {  producer,
-                shutdown,
-                snapshot_ptr,
-                interval_ms 
+        snapshot_ptr: Arc<ArcSwap<Snapshot>>,
+        interval_ms: u64,
+    ) -> Self {
+        Self {
+            producer,
+            shutdown,
+            snapshot_ptr,
+            interval_ms,
         }
     }
 
@@ -45,15 +46,20 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
                 let remaining = wait_target.saturating_sub(wait_started.elapsed());
                 std::thread::park_timeout(remaining);
             }
-            
+
             if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                 break; // Check for shutdown signal again after waking up to avoid generating an unnecessary snapshot
             }
 
             let mut snapshot = self.snapshot_ptr.load_full();
 
-            tracing::debug!("[{}] Snapshot sent with ID: {}, timestamp: {}", market_name(), snapshot.id, snapshot.timestamp_ms);
-            
+            tracing::debug!(
+                "[{}] Snapshot sent with ID: {}, timestamp: {}",
+                market_name(),
+                snapshot.id,
+                snapshot.timestamp_ms
+            );
+
             while let Err(s) = self.producer.push(snapshot) {
                 snapshot = s;
                 std::hint::spin_loop(); // If the output queue is full, spin until there is space
@@ -62,13 +68,16 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
 
         // Send a final snapshot with the shutdown flag set to true to signal the snapshot consumer to stop processing snapshots and exit gracefully.
         let mut snapshot = Arc::new(Snapshot::default());
-    
+
         while let Err(s) = self.producer.push(Arc::clone(&snapshot)) {
             snapshot = s;
             std::hint::spin_loop(); // If the output queue is full, spin until there is space
         }
 
-        tracing::info!("[{}] Snapshot generation engine shutting down gracefully", market_name());
+        tracing::info!(
+            "[{}] Snapshot generation engine shutting down gracefully",
+            market_name()
+        );
 
         Ok(())
     }
@@ -77,10 +86,10 @@ impl <'a, const N: usize> SnapshotGenerationEngine<'a, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::{OrderEvent, FixedPointArithmetic, Side, OrderType};
-    use std::sync::atomic::Ordering;
     use snapshot::types::OrderBookSnapshot;
-    
+    use std::sync::atomic::Ordering;
+    use types::{FixedPointArithmetic, OrderEvent, OrderType, Side};
+
     #[test]
     fn test_send_snapshot() {
         let order1 = OrderEvent {
@@ -109,8 +118,8 @@ mod tests {
         snapshot.order_book.add_ask(order2).unwrap();
 
         let mut queue = spsc::spsc_lock_free::RingBuffer::<Arc<Snapshot>, 1024>::new();
-        
-        std::thread::scope(|   s| {
+
+        std::thread::scope(|s| {
             let (ss_producer, ss_consumer) = queue.split();
 
             let snapshot_ptr = Arc::new(ArcSwap::from_pointee(snapshot));
@@ -118,11 +127,10 @@ mod tests {
 
             let snapshot_engine = SnapshotGenerationEngine::new(
                 ss_producer,
-            Arc::clone(&shutdown),
-            Arc::clone(&snapshot_ptr),
-        1000, // Set the snapshot interval to 1000 milliseconds (1 second)
+                Arc::clone(&shutdown),
+                Arc::clone(&snapshot_ptr),
+                1000, // Set the snapshot interval to 1000 milliseconds (1 second)
             );
-            
 
             let _engine_handle = s.spawn(move || {
                 let _ = snapshot_engine.run();
@@ -137,16 +145,28 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1000));
 
             let recv_snapshot = ss_consumer.pop().unwrap();
-        
+
             // Check ask side
             assert_eq!(recv_snapshot.order_book.bids_len, 1); // One bid should be in the snapshot
-            assert_eq!(recv_snapshot.order_book.bids[0].price, FixedPointArithmetic::from_f64(100.0));
-            assert_eq!(recv_snapshot.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(10.0));
+            assert_eq!(
+                recv_snapshot.order_book.bids[0].price,
+                FixedPointArithmetic::from_f64(100.0)
+            );
+            assert_eq!(
+                recv_snapshot.order_book.bids[0].quantity,
+                FixedPointArithmetic::from_f64(10.0)
+            );
 
             // Check bid side
             assert_eq!(recv_snapshot.order_book.asks_len, 1); // One ask should be in the snapshot
-            assert_eq!(recv_snapshot.order_book.asks[0].price, FixedPointArithmetic::from_f64(102.0));
-            assert_eq!(recv_snapshot.order_book.asks[0].quantity, FixedPointArithmetic::from_f64(5.0));
+            assert_eq!(
+                recv_snapshot.order_book.asks[0].price,
+                FixedPointArithmetic::from_f64(102.0)
+            );
+            assert_eq!(
+                recv_snapshot.order_book.asks[0].quantity,
+                FixedPointArithmetic::from_f64(5.0)
+            );
 
             shutdown.store(true, Ordering::Relaxed);
 

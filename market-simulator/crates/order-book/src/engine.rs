@@ -1,25 +1,25 @@
 use crate::book::OrderBook;
 use spsc::spsc_lock_free::{Consumer, Producer};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use types::{
-    OrderEvent,
-    OrderResult,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
+use types::{OrderEvent, OrderResult};
 
-use types::macros::{EntityId};
 use arc_swap::ArcSwap;
 use snapshot::types::Snapshot;
+use types::macros::EntityId;
 
 use utils::market_name;
 
 pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent, N>) {
     let order_event = OrderEvent {
         sender_id: EntityId::from_ascii(""), // An empty sender_id is used as a signal to the order book engine to shut down
-        ..Default::default() // Fill the rest of the fields with default values
+        ..Default::default()                 // Fill the rest of the fields with default values
     };
 
-    fix_to_ob_tx.push(order_event).unwrap();  
-} 
+    fix_to_ob_tx.push(order_event).unwrap();
+}
 
 pub enum OrderBookControl {
     Reset,
@@ -57,7 +57,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
         order_book: OrderBook,
         snapshot_ptr: Option<Arc<ArcSwap<Snapshot>>>,
-        shutdown: Arc<AtomicBool>
+        shutdown: Arc<AtomicBool>,
     ) -> Self {
         OrderBookEngine {
             fifo_in,
@@ -91,7 +91,12 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     /// - `len`: The number of valid levels currently in the `levels` array
     /// - `price`: The price level to be reduced
     /// - `quantity`: The quantity to reduce at the specified price level
-    fn reduce_level(levels: &mut [OrderEvent], len: &mut usize, price: types::FixedPointArithmetic, quantity: types::FixedPointArithmetic) {
+    fn reduce_level(
+        levels: &mut [OrderEvent],
+        len: &mut usize,
+        price: types::FixedPointArithmetic,
+        quantity: types::FixedPointArithmetic,
+    ) {
         for index in 0..*len {
             if levels[index].price == price {
                 if levels[index].quantity > quantity {
@@ -114,7 +119,12 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     /// - `len`: The number of valid levels currently in the `levels` array
     /// - `order`: The order event containing the price and quantity to be upserted
     /// - `descending`: A boolean indicating whether the levels are sorted in descending order (true for bids, false for asks)
-    fn upsert_level(levels: &mut [OrderEvent], len: &mut usize, order: OrderEvent, descending: bool) {
+    fn upsert_level(
+        levels: &mut [OrderEvent],
+        len: &mut usize,
+        order: OrderEvent,
+        descending: bool,
+    ) {
         for index in 0..*len {
             if levels[index].price == order.price {
                 levels[index] = order;
@@ -159,20 +169,25 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     /// - `order_result`: The result of processing the order event, containing information about executed trades and the timestamp of the event
     /// - `snapshot_id`: The ID to assign to the updated snapshot, it matches the internal ID counter of the order book to ensure that snapshots are ordered correctly based on the sequence of processed orders
     fn incremental_update(&mut self, event: OrderEvent, order_result: OrderResult) {
-
         if let Some(snapshot_ptr) = &self.snapshot_ptr {
             snapshot_ptr.rcu(|current| {
                 let mut next = Snapshot {
                     timestamp_ms: current.timestamp_ms,
-                    symbol: if current.symbol.is_empty() { self.order_book.symbol.clone() } else { current.symbol.clone() },
+                    symbol: if current.symbol.is_empty() {
+                        self.order_book.symbol.clone()
+                    } else {
+                        current.symbol.clone()
+                    },
                     id: order_result.internal_order_id, // Use the internal order ID as the snapshot ID to ensure correct ordering of snapshots based on processed orders
                     order_book: snapshot::types::OrderBookSnapshot::default(),
                 };
 
                 next.order_book.bids_len = current.order_book.bids_len;
                 next.order_book.asks_len = current.order_book.asks_len;
-                next.order_book.bids[..next.order_book.bids_len].copy_from_slice(&current.order_book.bids[..current.order_book.bids_len]);
-                next.order_book.asks[..next.order_book.asks_len].copy_from_slice(&current.order_book.asks[..current.order_book.asks_len]);
+                next.order_book.bids[..next.order_book.bids_len]
+                    .copy_from_slice(&current.order_book.bids[..current.order_book.bids_len]);
+                next.order_book.asks[..next.order_book.asks_len]
+                    .copy_from_slice(&current.order_book.asks[..current.order_book.asks_len]);
 
                 match event.order_type {
                     types::OrderType::CancelOrder => {
@@ -222,7 +237,9 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                             types::FixedPointArithmetic::ZERO
                         };
 
-                        if event.order_type == types::OrderType::LimitOrder && leaves_qty > types::FixedPointArithmetic::ZERO {
+                        if event.order_type == types::OrderType::LimitOrder
+                            && leaves_qty > types::FixedPointArithmetic::ZERO
+                        {
                             let mut resting_order = event;
                             resting_order.quantity = leaves_qty;
 
@@ -275,7 +292,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             }
         }
     }
-    
+
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             // Process control messages first
@@ -283,7 +300,11 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 match control {
                     OrderBookControl::Reset => {
                         self.order_book = OrderBook::new(self.order_book.symbol.as_str()); // Reset the order book by creating a new instance
-                        tracing::info!("[{}][{}] Order book reset completed", market_name(), self.order_book.symbol);
+                        tracing::info!(
+                            "[{}][{}] Order book reset completed",
+                            market_name(),
+                            self.order_book.symbol
+                        );
                     }
                 }
             }
@@ -292,7 +313,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 // Process incoming order events from the input queue
                 let (event, result) = self.order_book.process_order(event);
                 // For now, I send a copy of the order event and result to each subscriber, but ideally I would like to avoid copying the order event and result in the hot path of processing orders.
-                // TODO : How can I avoid making a copy of the order in the hot path?                
+                // TODO : How can I avoid making a copy of the order in the hot path?
                 self.fan_out_execution_report(event, result);
 
                 // Update the snapshot with the latest state of the order book after processing the order
@@ -303,14 +324,22 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             }
 
             if self.shutdown.load(Ordering::Relaxed) && self.fifo_in.is_empty() {
-                tracing::info!("[{}][{}] Shutdown signal received, stopping order book engine", market_name(), self.order_book.symbol);
+                tracing::info!(
+                    "[{}][{}] Shutdown signal received, stopping order book engine",
+                    market_name(),
+                    self.order_book.symbol
+                );
                 // Propagate shutdown signal to snapshot generation engine by setting the shutdown flag, which both engines check to know when to exit gracefully.
                 self.fan_out_execution_report(OrderEvent::default(), OrderResult::default()); // Send a final execution report with default values to unblock any subscribers that may be waiting for execution reports, such as the snapshot generation engine, allowing them to check the shutdown flag and exit gracefully.
                 break;
             }
         }
 
-        tracing::info!("[{}][{}] Order book engine shutting down gracefully", market_name(), self.order_book.symbol);
+        tracing::info!(
+            "[{}][{}] Order book engine shutting down gracefully",
+            market_name(),
+            self.order_book.symbol
+        );
         Ok(())
     }
 }
@@ -318,9 +347,9 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::macros::{SymbolId, EntityId, OrderId};
-    use types::{OrderEvent, FixedPointArithmetic, Side, OrderType, OrderStatus, Trade, Trades};
     use snapshot::types::OrderBookSnapshot;
+    use types::macros::{EntityId, OrderId, SymbolId};
+    use types::{FixedPointArithmetic, OrderEvent, OrderStatus, OrderType, Side, Trade, Trades};
 
     const SYMBOL_STR: &str = "TEST";
     const SYMBOL_ID: SymbolId = SymbolId::from_ascii(SYMBOL_STR);
@@ -331,30 +360,31 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn test_engine(){
+    fn test_engine() {
         let mut inbound_queue = spsc::spsc_lock_free::RingBuffer::<OrderEvent, 1024>::new();
-        let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
+        let mut outbound_queue =
+            spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
 
         thread::scope(|s| {
             let shutdown = Arc::new(AtomicBool::new(false));
             let order_book = OrderBook::new(SYMBOL_STR);
             let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot::default()));
 
-            let(inbound_producer, inbound_consumer) = inbound_queue.split();
-            let(outbound_producer, outbound_consumer) = outbound_queue.split();
+            let (inbound_producer, inbound_consumer) = inbound_queue.split();
+            let (outbound_producer, outbound_consumer) = outbound_queue.split();
 
             let (_control_tx, control_rx) = crossbeam_channel::unbounded();
             let mut engine = OrderBookEngine::new(
-        inbound_consumer,
-        Some(outbound_producer),
-         None,
-         None,
+                inbound_consumer,
+                Some(outbound_producer),
+                None,
+                None,
                 control_rx,
                 order_book,
                 Some(Arc::clone(&snapshot_ptr)),
                 Arc::clone(&shutdown),
             );
-            
+
             let ob_handle = s.spawn(move || {
                 if let Err(e) = engine.run() {
                     panic!("Order book engine error: {e:#}");
@@ -384,7 +414,7 @@ mod tests {
             assert!(order_result.trades.len() == 0);
 
             assert!(order_result.status == OrderStatus::New);
-            
+
             // Send a matching sell order to the engine
             let order2 = OrderEvent {
                 price: FixedPointArithmetic::from_f64(100.0),
@@ -403,7 +433,7 @@ mod tests {
             // Give some time for the engine to process the order
             std::thread::sleep(std::time::Duration::from_millis(100));
             let (order_event2, order_result2) = outbound_consumer.pop().unwrap();
-            
+
             assert!(order_event2.price == FixedPointArithmetic::from_f64(100.0));
             assert!(order_result2.trades.len() == 1); // One trade should be executed for the matching orders
             assert!(order_result2.status == OrderStatus::New); // Both orders should be filled
@@ -421,7 +451,8 @@ mod tests {
         const N: usize = 1024;
 
         let mut inbound_queue = spsc::spsc_lock_free::RingBuffer::<OrderEvent, N>::new();
-        let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), N>::new();
+        let mut outbound_queue =
+            spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), N>::new();
 
         let (_inbound_producer, inbound_consumer) = inbound_queue.split();
         let (_outbound_producer, _outbound_consumer) = outbound_queue.split();
@@ -459,8 +490,8 @@ mod tests {
         let mut engine = OrderBookEngine::new(
             inbound_consumer,
             None,
-             None,
-              None,
+            None,
+            None,
             control_rx,
             OrderBook::new(SYMBOL_STR),
             Some(Arc::clone(&snapshot_ptr)),
@@ -477,11 +508,13 @@ mod tests {
         };
 
         let mut trades = Trades::new();
-        trades.add_trade(Trade {
-            price: FixedPointArithmetic::from_f64(101.0),
-            quantity: FixedPointArithmetic::from_f64(4.0),
-            ..Default::default()
-        }).unwrap();
+        trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(101.0),
+                quantity: FixedPointArithmetic::from_f64(4.0),
+                ..Default::default()
+            })
+            .unwrap();
 
         engine.incremental_update(
             taker_buy,
@@ -495,13 +528,31 @@ mod tests {
 
         let after_fill = snapshot_ptr.load_full();
         assert_eq!(after_fill.order_book.asks_len, 1);
-        assert_eq!(after_fill.order_book.asks[0].price, FixedPointArithmetic::from_f64(101.0));
-        assert_eq!(after_fill.order_book.asks[0].quantity, FixedPointArithmetic::from_f64(3.0));
+        assert_eq!(
+            after_fill.order_book.asks[0].price,
+            FixedPointArithmetic::from_f64(101.0)
+        );
+        assert_eq!(
+            after_fill.order_book.asks[0].quantity,
+            FixedPointArithmetic::from_f64(3.0)
+        );
         assert_eq!(after_fill.order_book.bids_len, 2);
-        assert_eq!(after_fill.order_book.bids[0].price, FixedPointArithmetic::from_f64(102.0));
-        assert_eq!(after_fill.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(6.0));
-        assert_eq!(after_fill.order_book.bids[1].price, FixedPointArithmetic::from_f64(99.0));
-        assert_eq!(after_fill.order_book.bids[1].quantity, FixedPointArithmetic::from_f64(5.0));
+        assert_eq!(
+            after_fill.order_book.bids[0].price,
+            FixedPointArithmetic::from_f64(102.0)
+        );
+        assert_eq!(
+            after_fill.order_book.bids[0].quantity,
+            FixedPointArithmetic::from_f64(6.0)
+        );
+        assert_eq!(
+            after_fill.order_book.bids[1].price,
+            FixedPointArithmetic::from_f64(99.0)
+        );
+        assert_eq!(
+            after_fill.order_book.bids[1].quantity,
+            FixedPointArithmetic::from_f64(5.0)
+        );
 
         let cancel_order = OrderEvent {
             price: FixedPointArithmetic::from_f64(102.0),
@@ -523,11 +574,23 @@ mod tests {
 
         let after_cancel = snapshot_ptr.load_full();
         assert_eq!(after_cancel.order_book.bids_len, 1);
-        assert_eq!(after_cancel.order_book.bids[0].price, FixedPointArithmetic::from_f64(99.0));
-        assert_eq!(after_cancel.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(5.0));
+        assert_eq!(
+            after_cancel.order_book.bids[0].price,
+            FixedPointArithmetic::from_f64(99.0)
+        );
+        assert_eq!(
+            after_cancel.order_book.bids[0].quantity,
+            FixedPointArithmetic::from_f64(5.0)
+        );
         assert_eq!(after_cancel.order_book.asks_len, 1);
-        assert_eq!(after_cancel.order_book.asks[0].price, FixedPointArithmetic::from_f64(101.0));
-        assert_eq!(after_cancel.order_book.asks[0].quantity, FixedPointArithmetic::from_f64(3.0));
+        assert_eq!(
+            after_cancel.order_book.asks[0].price,
+            FixedPointArithmetic::from_f64(101.0)
+        );
+        assert_eq!(
+            after_cancel.order_book.asks[0].quantity,
+            FixedPointArithmetic::from_f64(3.0)
+        );
     }
 
     #[test]
@@ -535,7 +598,8 @@ mod tests {
         const N: usize = 1024;
 
         let mut inbound_queue = spsc::spsc_lock_free::RingBuffer::<OrderEvent, N>::new();
-        let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), N>::new();
+        let mut outbound_queue =
+            spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), N>::new();
 
         let (_inbound_producer, inbound_consumer) = inbound_queue.split();
         let (_outbound_producer, _outbound_consumer) = outbound_queue.split();
@@ -573,8 +637,8 @@ mod tests {
         let mut engine = OrderBookEngine::new(
             inbound_consumer,
             None,
-             None,
-              None,
+            None,
+            None,
             control_rx,
             OrderBook::new(SYMBOL_STR),
             Some(Arc::clone(&snapshot_ptr)),
@@ -591,11 +655,13 @@ mod tests {
         };
 
         let mut trades = Trades::new();
-        trades.add_trade(Trade {
-            price: FixedPointArithmetic::from_f64(100.0),
-            quantity: FixedPointArithmetic::from_f64(3.0),
-            ..Default::default()
-        }).unwrap();
+        trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(100.0),
+                quantity: FixedPointArithmetic::from_f64(3.0),
+                ..Default::default()
+            })
+            .unwrap();
 
         engine.incremental_update(
             taker_sell,
@@ -609,13 +675,31 @@ mod tests {
 
         let after_fill = snapshot_ptr.load_full();
         assert_eq!(after_fill.order_book.bids_len, 1);
-        assert_eq!(after_fill.order_book.bids[0].price, FixedPointArithmetic::from_f64(100.0));
-        assert_eq!(after_fill.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(5.0));
+        assert_eq!(
+            after_fill.order_book.bids[0].price,
+            FixedPointArithmetic::from_f64(100.0)
+        );
+        assert_eq!(
+            after_fill.order_book.bids[0].quantity,
+            FixedPointArithmetic::from_f64(5.0)
+        );
         assert_eq!(after_fill.order_book.asks_len, 2);
-        assert_eq!(after_fill.order_book.asks[0].price, FixedPointArithmetic::from_f64(99.0));
-        assert_eq!(after_fill.order_book.asks[0].quantity, FixedPointArithmetic::from_f64(7.0));
-        assert_eq!(after_fill.order_book.asks[1].price, FixedPointArithmetic::from_f64(103.0));
-        assert_eq!(after_fill.order_book.asks[1].quantity, FixedPointArithmetic::from_f64(4.0));
+        assert_eq!(
+            after_fill.order_book.asks[0].price,
+            FixedPointArithmetic::from_f64(99.0)
+        );
+        assert_eq!(
+            after_fill.order_book.asks[0].quantity,
+            FixedPointArithmetic::from_f64(7.0)
+        );
+        assert_eq!(
+            after_fill.order_book.asks[1].price,
+            FixedPointArithmetic::from_f64(103.0)
+        );
+        assert_eq!(
+            after_fill.order_book.asks[1].quantity,
+            FixedPointArithmetic::from_f64(4.0)
+        );
 
         let cancel_order = OrderEvent {
             price: FixedPointArithmetic::from_f64(99.0),
@@ -637,11 +721,23 @@ mod tests {
 
         let after_cancel = snapshot_ptr.load_full();
         assert_eq!(after_cancel.order_book.asks_len, 1);
-        assert_eq!(after_cancel.order_book.asks[0].price, FixedPointArithmetic::from_f64(103.0));
-        assert_eq!(after_cancel.order_book.asks[0].quantity, FixedPointArithmetic::from_f64(4.0));
+        assert_eq!(
+            after_cancel.order_book.asks[0].price,
+            FixedPointArithmetic::from_f64(103.0)
+        );
+        assert_eq!(
+            after_cancel.order_book.asks[0].quantity,
+            FixedPointArithmetic::from_f64(4.0)
+        );
         assert_eq!(after_cancel.order_book.bids_len, 1);
-        assert_eq!(after_cancel.order_book.bids[0].price, FixedPointArithmetic::from_f64(100.0));
-        assert_eq!(after_cancel.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(5.0));
+        assert_eq!(
+            after_cancel.order_book.bids[0].price,
+            FixedPointArithmetic::from_f64(100.0)
+        );
+        assert_eq!(
+            after_cancel.order_book.bids[0].quantity,
+            FixedPointArithmetic::from_f64(5.0)
+        );
     }
 
     #[test]
@@ -649,7 +745,8 @@ mod tests {
         const N: usize = 1024;
 
         let mut inbound_queue = spsc::spsc_lock_free::RingBuffer::<OrderEvent, N>::new();
-        let mut outbound_queue = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), N>::new();
+        let mut outbound_queue =
+            spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), N>::new();
 
         let (_inbound_producer, inbound_consumer) = inbound_queue.split();
         let (_outbound_producer, _outbound_consumer) = outbound_queue.split();
@@ -659,14 +756,16 @@ mod tests {
 
         let mut initial_book = OrderBookSnapshot::default();
         for raw_price in (101..=110).rev() {
-            initial_book.add_bid(OrderEvent {
-                price: FixedPointArithmetic::from_f64(raw_price as f64),
-                quantity: FixedPointArithmetic::from_f64(1.0),
-                side: Side::Buy,
-                order_type: OrderType::LimitOrder,
-                symbol: SYMBOL_ID,
-                ..Default::default()
-            }).unwrap();
+            initial_book
+                .add_bid(OrderEvent {
+                    price: FixedPointArithmetic::from_f64(raw_price as f64),
+                    quantity: FixedPointArithmetic::from_f64(1.0),
+                    side: Side::Buy,
+                    order_type: OrderType::LimitOrder,
+                    symbol: SYMBOL_ID,
+                    ..Default::default()
+                })
+                .unwrap();
         }
 
         let snapshot_ptr = Arc::new(ArcSwap::from_pointee(Snapshot {
@@ -705,9 +804,18 @@ mod tests {
 
         let after_better_insert = snapshot_ptr.load_full();
         assert_eq!(after_better_insert.order_book.bids_len, 10);
-        assert_eq!(after_better_insert.order_book.bids[0].price, FixedPointArithmetic::from_f64(111.0));
-        assert_eq!(after_better_insert.order_book.bids[0].quantity, FixedPointArithmetic::from_f64(2.0));
-        assert_eq!(after_better_insert.order_book.bids[9].price, FixedPointArithmetic::from_f64(102.0));
+        assert_eq!(
+            after_better_insert.order_book.bids[0].price,
+            FixedPointArithmetic::from_f64(111.0)
+        );
+        assert_eq!(
+            after_better_insert.order_book.bids[0].quantity,
+            FixedPointArithmetic::from_f64(2.0)
+        );
+        assert_eq!(
+            after_better_insert.order_book.bids[9].price,
+            FixedPointArithmetic::from_f64(102.0)
+        );
 
         engine.incremental_update(
             OrderEvent {
@@ -727,7 +835,13 @@ mod tests {
 
         let after_worse_insert = snapshot_ptr.load_full();
         assert_eq!(after_worse_insert.order_book.bids_len, 10);
-        assert_eq!(after_worse_insert.order_book.bids[0].price, FixedPointArithmetic::from_f64(111.0));
-        assert_eq!(after_worse_insert.order_book.bids[9].price, FixedPointArithmetic::from_f64(102.0));
+        assert_eq!(
+            after_worse_insert.order_book.bids[0].price,
+            FixedPointArithmetic::from_f64(111.0)
+        );
+        assert_eq!(
+            after_worse_insert.order_book.bids[9].price,
+            FixedPointArithmetic::from_f64(102.0)
+        );
     }
 }
