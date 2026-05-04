@@ -8,9 +8,9 @@ use market_feed::types::{
     AddOrder, DeleteOrder, MarketDataHeader, MessageType, ModifyOrder, OrderBookSnapshot,
     SNAPSHOT_BYTES, Trade, MARKET_DATA_HEADER_SIZE,
 };
-use web::state::{EventBus, WsEvent};
-use web::order_book::{PriceLevel, OrderBookState};
-use web::players::PlayerStore;
+use backend::state::{EventBus, WsEvent};
+use backend::order_book::{PriceLevel, OrderBookState};
+use players::players::PlayerStore;
 
 use types::multicast::{MulticastSource, SourceSocket};
 

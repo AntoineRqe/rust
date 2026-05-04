@@ -455,11 +455,13 @@ const usernameFromQuery = params.get('username');
 const passwordFromQuery = params.get('password');
 const adminFromQuery = params.get('is_admin');
 
+// Always save username if provided (for multi-market gateway responses)
+if (usernameFromQuery) {
+  sessionStorage.setItem('auth_username', usernameFromQuery);
+}
+
 if (tokenFromQuery) {
   sessionStorage.setItem('auth_token', tokenFromQuery);
-  if (usernameFromQuery) {
-    sessionStorage.setItem('auth_username', usernameFromQuery);
-  }
   if (passwordFromQuery) {
     sessionStorage.setItem('auth_password', passwordFromQuery);
   }
@@ -1000,8 +1002,9 @@ function connectWS() {
   
   const wsBase = buildWsEndpoint(marketUrl);
   const market = encodeURIComponent(primaryMarketName || '');
-  console.log(`[Primary] Connecting to ${primaryMarketName} at ${wsBase}?token=${token}&market=${market}`);
-  ws = new WebSocket(`${wsBase}?token=${token}&market=${market}`);
+  const username = encodeURIComponent(currentPlayer || sessionStorage.getItem('auth_username') || '');
+  console.log(`[Primary] Connecting to ${primaryMarketName} at ${wsBase}?token=${token}&market=${market}&username=${username}`);
+  ws = new WebSocket(`${wsBase}?token=${token}&market=${market}&username=${username}`);
 
   ws.onopen = () => {
     resetPrimaryReconnect();
@@ -1102,7 +1105,8 @@ async function connectMarketWS(market) {
     const token = encodeURIComponent(await getMarketAuthToken(market));
     // Use market.url directly, not getCurrentAppBaseUrl()
     const wsBase = buildWsEndpoint(market.url);
-    const wsUrl = `${wsBase}?token=${token}&market=${encodeURIComponent(marketName)}`;
+    const username = encodeURIComponent(currentPlayer || sessionStorage.getItem('auth_username') || '');
+    const wsUrl = `${wsBase}?token=${token}&market=${encodeURIComponent(marketName)}&username=${username}`;
     
     console.log(`[Market] Connecting to ${market.name} at ${wsUrl}`);
     

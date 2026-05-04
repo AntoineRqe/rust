@@ -1,25 +1,27 @@
+use crate::auth::MarketInfo;
+use crate::fix_session::FIXSessionManager;
+use crate::login::{
+    api_login_handler, api_markets_handler, app_handler, login_page_handler, root_handler,
+};
+use crate::order_book::OrderBookState;
+use crate::player_client::PlayerClient;
+use crate::state::EventBus;
+use crate::state::TradeView;
+use crate::ws::ws_handler;
 use axum::{
     Router,
     routing::{get, post},
 };
-use std::collections::{HashMap, VecDeque};
+use db;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
-use crate::state::EventBus;
-use crate::order_book::OrderBookState;
-use crate::players::PlayerStore;
-use crate::fix_session::FIXSessionManager;
-use crate::ws::ws_handler;
-use crate::login::{root_handler, login_page_handler, app_handler, api_login_handler, api_markets_handler};
-use crate::auth::{SessionInfo, MarketInfo};
-use types::Trade;
 use utils::market_name;
-use db;
 
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
 #[derive(Clone)]
@@ -30,12 +32,10 @@ pub struct AppState {
     pub fix_tcp_addr: String,
     /// gRPC address of the MarketControl service (e.g. "http://[::1]:50051").
     pub grpc_addr: String,
-    /// Per-player state registry (tokens, pending orders, credentials).
-    pub player_store: PlayerStore,
+    /// gRPC client for the player service (running on separate port, e.g. 50052).
+    pub player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
     /// All configured markets (name + web URL), sent to the login page.
     pub known_markets: Vec<MarketInfo>,
-    /// Active sessions: token → session metadata.
-    pub sessions: Arc<Mutex<HashMap<String, SessionInfo>>>,
     /// Current order book state for all symbols (updated with market feed data).
     pub order_book: Arc<Mutex<OrderBookState>>,
     /// Number of currently connected browser websocket sessions.
@@ -45,7 +45,7 @@ pub struct AppState {
     /// Persistent FIX TCP session registry (one connection per player).
     pub fix_session_manager: FIXSessionManager,
     /// Recent trades for price chart initialization.
-    pub trades_queue: Arc<Mutex<VecDeque<Trade>>>,
+    pub trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
 }
 
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
@@ -65,14 +65,12 @@ pub fn run_web_server(
     grpc_addr: String,
     ip: &str,
     port: u16,
-    player_database_url: String,
     market_database_url: String,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
     core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("web-tokio")
@@ -81,11 +79,21 @@ pub fn run_web_server(
         })
         .build()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-        .block_on(serve(bus, fix_tcp_addr, grpc_addr, ip, port, player_database_url, market_database_url, known_markets, shutdown, order_book)) {
-            Ok(_) => (),
-            Err(e) => {
-                return Err(e);
-            }
+        .block_on(serve(
+            bus,
+            fix_tcp_addr,
+            grpc_addr,
+            ip,
+            port,
+            market_database_url,
+            known_markets,
+            shutdown,
+            order_book,
+        )) {
+        Ok(_) => (),
+        Err(e) => {
+            return Err(e);
+        }
     }
 
     Ok(())
@@ -98,19 +106,30 @@ async fn serve(
     grpc_addr: String,
     ip: &str,
     port: u16,
-    player_database_url: String,
     market_database_url: String,
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize player store and app state
-    // Only the primary market (NASDAQ) persists player data to avoid deadlocks from concurrent writes
-    let player_store = if market_name() == "NASDAQ" {
-        PlayerStore::load_postgres(&player_database_url)
-    } else {
-        PlayerStore::load_postgres_read_only(&player_database_url)
-    };
+    // Initialize player client connecting to the standalone player-server gRPC service
+    // The PlayerClient uses tonic::transport::Channel which automatically:
+    // - Maintains HTTP/2 connection pooling
+    // - Implements keepalive (15s interval, 5s timeout)
+    // - Reuses connections across all requests
+    // - Handles reconnection on failure
+    let player_service_port = std::env::var("GRPC_PLAYER_SERVICE_PORT")
+        .unwrap_or_else(|_| "50052".to_string());
+    let player_service_addr = format!("http://[::1]:{}", player_service_port);
+    
+    let player_client = Arc::new(tokio::sync::Mutex::new(
+        PlayerClient::connect(&player_service_addr).await?,
+    ));
+    tracing::info!(
+        "[{}] Connected to player service at {}",
+        market_name(),
+        player_service_addr
+    );
+
     let advertised = crate::auth::advertised_markets(&known_markets);
     if !known_markets.is_empty() {
         if advertised.is_empty() {
@@ -127,40 +146,52 @@ async fn serve(
         }
     }
 
-    let initial_total_visitors = player_store.total_visitors() as usize;
-    
     // Load trades for price chart initialization
     let trades_queue = Arc::new(Mutex::new(VecDeque::new()));
     match db::connect(&market_database_url).await {
-        Ok(pool) => {
-            match db::collect_last_n_trades(&pool, 10).await {
-                Ok(trades) => {
-                    let mut queue = trades_queue.lock().unwrap();
-                    for trade in trades {
-                        queue.push_back(trade);
-                    }
-                    tracing::info!("[{}] Loaded {} trades from database for price chart", market_name(), queue.len());
+        Ok(pool) => match db::collect_last_n_trades(&pool, 10).await {
+            Ok(trades) => {
+                let mut queue = trades_queue.lock().unwrap();
+                for trade in trades {
+                    queue.push_back(TradeView {
+                        id: trade.id,
+                        price: trade.price.to_f64(),
+                        quantity: trade.quantity.to_f64(),
+                        cl_ord_id: trade.cl_ord_id.to_string(),
+                    });
                 }
-                Err(e) => {
-                    tracing::warn!("[{}] Failed to query trades from database: {}", market_name(), e);
-                }
+                tracing::info!(
+                    "[{}] Loaded {} trades from database for price chart",
+                    market_name(),
+                    queue.len()
+                );
             }
-        }
+            Err(e) => {
+                tracing::warn!(
+                    "[{}] Failed to query trades from database: {}",
+                    market_name(),
+                    e
+                );
+            }
+        },
         Err(e) => {
-            tracing::error!("[{}] Failed to connect to database for trades: {}", market_name(), e);
+            tracing::error!(
+                "[{}] Failed to connect to database for trades: {}",
+                market_name(),
+                e
+            );
         }
     }
-    
+
     let state = AppState {
         bus,
         fix_tcp_addr,
         grpc_addr,
-        player_store,
+        player_client: player_client,
         known_markets,
-        sessions: Arc::new(Mutex::new(HashMap::new())),
         order_book,
         active_visitors: Arc::new(AtomicUsize::new(0)),
-        total_visitors: Arc::new(AtomicUsize::new(initial_total_visitors)),
+        total_visitors: Arc::new(AtomicUsize::new(0)),
         fix_session_manager: FIXSessionManager::new(),
         trades_queue,
     };
@@ -169,26 +200,33 @@ async fn serve(
     {
         let grpc_addr_clone = state.grpc_addr.clone();
         let order_book_clone = Arc::clone(&state.order_book);
-        let player_store_clone = state.player_store.clone();
-        
-        match load_initial_order_book(&grpc_addr_clone, order_book_clone, &player_store_clone).await {
+
+        match load_initial_order_book(&grpc_addr_clone, order_book_clone).await {
             Ok(count) => {
-                tracing::info!("[{}] Loaded {} pending orders from gRPC at startup", market_name(), count);
+                tracing::info!(
+                    "[{}] Loaded {} pending orders from gRPC at startup",
+                    market_name(),
+                    count
+                );
             }
             Err(e) => {
-                tracing::warn!("[{}] Failed to load pending orders at startup: {}", market_name(), e);
+                tracing::warn!(
+                    "[{}] Failed to load pending orders at startup: {}",
+                    market_name(),
+                    e
+                );
             }
         }
     }
 
     let app = Router::new()
-        .route("/",            get(root_handler))
-        .route("/login",       get(login_page_handler))
-        .route("/app",         get(app_handler))
-        .route("/api/login",   post(api_login_handler))
+        .route("/", get(root_handler))
+        .route("/login", get(login_page_handler))
+        .route("/app", get(app_handler))
+        .route("/api/login", post(api_login_handler))
         .route("/api/markets", get(api_markets_handler))
-        .route("/api/trades",  get(crate::login::api_trades_handler))
-        .route("/ws",          get(ws_handler))
+        .route("/api/trades", get(crate::login::api_trades_handler))
+        .route("/ws", get(ws_handler))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -201,7 +239,7 @@ async fn serve(
     let addr: SocketAddr = format!("0.0.0.0:{}", port)
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
-    // 
+    //
     let listener = match TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(e) => {
@@ -210,9 +248,12 @@ async fn serve(
     };
 
     tracing::info!("[{}] Web terminal → http://{}:{}", market_name(), ip, port);
-    match axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal(shutdown))
-        .await
+    match axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown))
+    .await
     {
         Ok(_) => (),
         Err(e) => {
@@ -247,12 +288,15 @@ async fn shutdown_signal(shutdown: Arc<AtomicBool>) {
 async fn load_initial_order_book(
     grpc_addr: &str,
     order_book: Arc<Mutex<OrderBookState>>,
-    player_store: &PlayerStore,
 ) -> Result<usize, String> {
-    use grpc::proto::market_control_client::MarketControlClient;
     use grpc::proto::DumpOrderBookRequest;
+    use grpc::proto::market_control_client::MarketControlClient;
 
-    tracing::info!("[{}] Loading initial pending orders from gRPC at {}", market_name(), grpc_addr);
+    tracing::info!(
+        "[{}] Loading initial pending orders from gRPC at {}",
+        market_name(),
+        grpc_addr
+    );
 
     let mut client = MarketControlClient::connect(grpc_addr.to_string())
         .await
@@ -265,16 +309,23 @@ async fn load_initial_order_book(
 
     let dump_response = response.into_inner();
 
-    tracing::debug!("[{}] DumpOrderBook returned: success={}, message={}, order_count={}", 
-        market_name(), dump_response.success, dump_response.message, dump_response.orders.len());
+    tracing::debug!(
+        "[{}] DumpOrderBook returned: success={}, message={}, order_count={}",
+        market_name(),
+        dump_response.success,
+        dump_response.message,
+        dump_response.orders.len()
+    );
 
     if !dump_response.success {
-        return Err(format!("DumpOrderBook returned success=false: {}", dump_response.message));
+        return Err(format!(
+            "DumpOrderBook returned success=false: {}",
+            dump_response.message
+        ));
     }
 
     let mut book_state = order_book.lock().unwrap();
     let mut count = 0u64;
-    let mut owner_hydration_entries: Vec<(String, String)> = Vec::new();
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -303,11 +354,14 @@ async fn load_initial_order_book(
         // so follow-up delete updates match this bootstrapped entry exactly.
         let order_id = stable_order_id_from_cl_ord_id(&pending_order.cl_ord_id);
 
-        tracing::trace!("[{}] Loading order: {} {} @ {} x {}", 
-            market_name(), symbol, 
+        tracing::trace!(
+            "[{}] Loading order: {} {} @ {} x {}",
+            market_name(),
+            symbol,
             if side == 1 { "BID" } else { "ASK" },
             pending_order.price,
-            pending_order.quantity);
+            pending_order.quantity
+        );
 
         book.add_or_update_order(
             order_id,
@@ -318,23 +372,15 @@ async fn load_initial_order_book(
             timestamp_ms,
         );
 
-        owner_hydration_entries.push((
-            pending_order.cl_ord_id.clone(),
-            pending_order.sender_id.clone(),
-        ));
-
         count += 1;
     }
 
     drop(book_state);
 
-    let hydrated = player_store.hydrate_order_owners_from_sender_ids(&owner_hydration_entries);
-
     tracing::info!(
-        "[{}] Successfully loaded {} pending orders into order book state ({} owner mapping(s) hydrated)",
+        "[{}] Successfully loaded {} pending orders into order book state",
         market_name(),
-        count,
-        hydrated
+        count
     );
 
     Ok(count as usize)

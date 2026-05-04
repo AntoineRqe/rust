@@ -10,7 +10,9 @@ members = [
     "crates/server",
     "crates/execution-report",
     "crates/types",
-    "crates/web",
+    "crates/web/backend",
+    "crates/web/players",
+    "crates/web/frontend",
     "crates/db",
     "crates/grpc",
     "crates/config",
@@ -32,13 +34,16 @@ crossbeam-channel = "0.5.15"
 lazy_static = "1.4.0"
 tokio    = { version = "1", features = ["full"] }
 serde    = { version = "1", features = ["derive"] }
-serde_json = "1" 
+serde_json = "1"
 core_affinity = "0.8.3"
 arc-swap = "1.9.1"
 axum = { version = "0.8", features = ["ws"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 hyper = { version = "1.9.0", features = ["full"] }
 socket2 = "0.6"
+tonic = "0.13"
+prost = "0.13"
+prost-build = "0.13"
 
 # Main binary crate
 [package]
@@ -55,7 +60,9 @@ memory = { path = "crates/memory" }
 execution-report = { path = "crates/execution-report" }
 types = { path = "crates/types" }
 db = { path = "crates/db" }
-web   = { path = "crates/web" }
+backend = { path = "crates/web/backend" }
+players = { path = "crates/web/players" }
+frontend = { path = "crates/web/frontend" }
 market-feed = { path = "crates/market-feed" }
 snapshot = { path = "crates/snapshot" }
 utils = { path = "crates/utils" }

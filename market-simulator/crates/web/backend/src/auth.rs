@@ -1,31 +1,14 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use crate::state::EventBus;
 
-/// Information for an authenticated session, stored in the server's session registry.
+/// Information for an authenticated player.
+/// Token validation is now delegated to the Player Service (gRPC).
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
     /// The username associated with this session (e.g. "alice").
     pub username: String,
     /// Whether this session belongs to the admin user (which has special privileges).
     pub is_admin: bool,
-}
-
-/// Generate a cryptographically random 128-bit hex token.
-pub fn generate_token() -> String {
-    let mut bytes = [0u8; 16];
-    rand_core::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Look up a session token and return the associated session metadata.
-pub fn authenticate_token(
-    sessions: &Arc<Mutex<HashMap<String, SessionInfo>>>,
-    token: &str,
-) -> Option<SessionInfo> {
-    sessions.lock().unwrap().get(token).cloned()
 }
 
 /// Retrieve the admin password from the environment variable.

@@ -6,12 +6,13 @@ use axum::{
 };
 use serde::Deserialize;
 use crate::server::AppState;
-use crate::auth::{SessionInfo, generate_token, authenticate_token, admin_password};
+use crate::auth::admin_password;
 use utils::market_name;
 
 /// Serve the login page (always accessible, no auth required).
 #[derive(Deserialize)]
 pub struct LoginPageParams {
+    #[allow(dead_code)]
     token: Option<String>,
 }
 
@@ -23,18 +24,12 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-/// Serve the login page. If a valid token is provided, redirect to the app.
+/// Serve the login page. Always show the login page - no local token validation.
 pub async fn login_page_handler(
-    State(state): State<AppState>,
-    Query(params): Query<LoginPageParams>,
+    _state: State<AppState>,
+    _params: Query<LoginPageParams>,
 ) -> impl IntoResponse {
-    if let Some(token) = params.token {
-        if authenticate_token(&state.sessions, &token).is_some() {
-            return Redirect::to(&format!("/app?token={token}")).into_response();
-        }
-    }
-
-    Html(include_str!("../frontend/login.html")).into_response()
+    Html(frontend::LOGIN_HTML).into_response()
 }
 
 /// Redirect the root URL to the canonical app route.
@@ -52,7 +47,7 @@ pub async fn app_handler(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or_else(|_| "http://127.0.0.1:9875".to_string());
     let markets_json = serde_json::to_string(&advertised_markets(&state.known_markets))
         .unwrap_or_else(|_| "[]".to_string());
-    let html = include_str!("../frontend/index.html")
+    let html = frontend::APP_HTML
         .replace("{{MARKET_NAME}}", market)
         .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url)
         .replace("{{CURRENT_MARKET_NAME}}", market)
@@ -62,6 +57,7 @@ pub async fn app_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Handle login requests. Supports both admin login (with MARKET_SIMULATOR_ADMIN_PWD env var)
 /// and player login (with username/password registration or authentication).
+/// Returns a token issued by the Player Service.
 pub async fn api_login_handler(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -70,48 +66,40 @@ pub async fn api_login_handler(
         && admin_password().as_deref() == Some(body.password.as_str());
 
     if admin_login {
-        let created = state.player_store.ensure_player_exists("admin");
-        if created {
-            tracing::info!("[{}] Admin player profile initialized", market_name());
+        match state.player_client.lock().await.authenticate_or_register("admin", &body.password).await {
+            Ok(auth_result) => {
+                tracing::info!("[{}] Admin authenticated", market_name());
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "token": auth_result.token,
+                        "username": auth_result.username,
+                        "is_admin": auth_result.is_admin
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": format!("Admin authentication failed: {}", e),
+                    })),
+                )
+                    .into_response();
+            }
         }
-
-        let token = generate_token();
-        state.sessions.lock().unwrap().insert(
-            token.clone(),
-            SessionInfo {
-                username: "admin".to_string(),
-                is_admin: true,
-            },
-        );
-        tracing::info!("[{}] Admin session created", market_name());
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "token": token,
-                "username": "admin",
-                "is_admin": true
-            })),
-        )
-            .into_response();
     }
 
-    match state.player_store.authenticate_or_register(&body.username, &body.password) {
-        Ok(username) => {
-            let token = generate_token();
-            state.sessions.lock().unwrap().insert(
-                token.clone(),
-                SessionInfo {
-                    username: username.clone(),
-                    is_admin: false,
-                },
-            );
-            tracing::info!("[{}] Session created for '{username}'", market_name());
+    match state.player_client.lock().await.authenticate_or_register(&body.username, &body.password).await {
+        Ok(auth_result) => {
+            tracing::info!("[{}] Player '{}' authenticated", market_name(), auth_result.username);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "token": token,
-                    "username": username,
-                    "is_admin": false
+                    "token": auth_result.token,
+                    "username": auth_result.username,
+                    "is_admin": auth_result.is_admin
                 })),
             )
                 .into_response()
@@ -119,8 +107,7 @@ pub async fn api_login_handler(
         Err(e) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
-                "error": e.message(),
-                "code": e.code(),
+                "error": e,
             })),
         )
             .into_response(),
@@ -137,12 +124,7 @@ pub async fn api_trades_handler(State(state): State<AppState>) -> impl IntoRespo
     let trades_queue = state.trades_queue.lock().unwrap();
     let trades: Vec<crate::state::TradeView> = trades_queue
         .iter()
-        .map(|t| crate::state::TradeView {
-            id: t.id,
-            price: t.price.to_f64(),
-            quantity: t.quantity.to_f64(),
-            cl_ord_id: t.cl_ord_id.to_string(),
-        })
+        .cloned()
         .collect();
     
     Json(serde_json::json!({

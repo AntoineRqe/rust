@@ -48,8 +48,9 @@ Requests to the market web server are routed here.
 - Runs on a dedicated thread with its own tokio runtime
 
 #### **server.rs** (Market Web Server Setup)
-- `AppState`: Shared application state (sessions, order book, player store, event bus)
+- `AppState`: Shared application state (sessions, order book, player client, event bus)
 - `run_web_server()`: Main entry point to start the market web server
+- `PlayerClient`: gRPC client wrapper for player service (connection pooling with HTTP/2)
 - Router setup for all HTTP and WebSocket endpoints
 - Initial order book loading from gRPC at startup
 - Graceful shutdown handling
@@ -76,15 +77,11 @@ GET  /ws         → ws_handler (WebSocket upgrade)
   - Market data requests
 - Visitor counting and analytics
 
-#### **players.rs** (Player State Management)
-- `PlayerStore`: Manages player accounts, portfolios, and authentication
-- `ensure_player_exists()`: Create player account if needed
-- `authenticate_or_register()`: Login or auto-register with username/password
-- `add_pending_order()`: Track pending orders locally
-- `apply_execution()`: Update portfolio on order fill
-- `reset_market_state()`: Clear all orders and state
-- `reset_all_tokens()`: Reset token balances to initial values
-- Portfolio tracking: holdings, cash balances, order history
+#### **players.rs** (Deprecated - Replaced by gRPC Player Client)
+- Legacy player state management module
+- Functionality now provided by `PlayerClient` via gRPC calls to player-server
+- Player service runs as a separate microservice (port 50052)
+- All player operations use gRPC instead of direct PlayerStore access
 
 #### **state.rs** (Event Broadcasting & Order Book)
 - `EventBus`: Publish/subscribe for real-time events
@@ -100,6 +97,49 @@ GET  /ws         → ws_handler (WebSocket upgrade)
 - Applies fills to player portfolios
 - Publishes updates to browser via event bus
 - Handles offline portfolio updates (session persists when browser disconnects)
+
+#### **player_client.rs** (gRPC Player Service Client)
+- `PlayerClient`: Wrapper around `PlayerServiceClient` for gRPC communication
+- Connection pooling with HTTP/2 multiplexing (single connection, multiple streams)
+- Async methods mirroring PlayerStore API for transparent migration
+- Configurable timeouts: connection (5s), request (30s), keepalive (15s)
+- Methods:
+  - `authenticate_or_register()`: User login/registration via gRPC
+  - `get_player_state()`: Fetch complete player state (tokens, orders, holdings)
+  - `add_pending_order()` / `remove_pending_order()`: Order tracking
+  - `reset_all_tokens()`, `reset_market_state()`: Admin commands
+- Handles gRPC errors gracefully with logging
+
+## Architecture: Backend ↔ Player Service
+
+The backend is fully decoupled from player data via gRPC:
+
+```
+┌─────────────────────────────────┐
+│  Market Web Server (Backend)    │
+│  - Handles WebSocket clients    │
+│  - Manages sessions & auth      │
+│  - Routes orders to FIX engine  │
+│                                 │
+│  AppState.player_client ─────────────┐
+└─────────────────────────────────┘     │ gRPC (HTTP/2)
+                                        ↓
+                          ┌──────────────────────────┐
+                          │  Player Service (port    │
+                          │  50052)                  │
+                          │                          │
+                          │  - PostgreSQL player DB  │
+                          │  - Portfolio state       │
+                          │  - Order history         │
+                          │  - Authentication        │
+                          └──────────────────────────┘
+```
+
+**Key Benefits**:
+- Independent scaling of backend and player services
+- Player database isolated from market feed/order processing
+- Connection pooling reduces per-request overhead
+- HTTP/2 multiplexing allows concurrent gRPC calls
 
 ## Workflow of a Message
 
@@ -161,7 +201,7 @@ GET  /ws         → ws_handler (WebSocket upgrade)
    - Returns success/failure
 
 4. On success:
-   - player_store.reset_market_state() clears all orders
+   - player_client.reset_market_state() clears all orders via gRPC
    - order_book.clear() removes all symbols
    - For each symbol, publish empty OrderBook event
 
@@ -234,7 +274,7 @@ GET  /ws         → ws_handler (WebSocket upgrade)
      b. Password matches MARKET_SIMULATOR_ADMIN_PWD env var
      c. If both true: create SessionInfo with is_admin=true
    
-   - Otherwise: authenticate_or_register()
+   - Otherwise: call player_client.authenticate_or_register() via gRPC
      a. Try authenticate with credentials
      b. If fails: auto-register new player with username/password
      c. Create SessionInfo with is_admin=false
@@ -450,13 +490,13 @@ Shared mutable state wrapped in Arc for thread-safe access:
 pub struct AppState {
     pub bus: EventBus,                    // Event broadcasting
     pub sessions: Arc<Mutex<HashMap>>,    // Active sessions
-    pub player_store: PlayerStore,        // Player accounts & portfolios
+    pub player_client: Arc<tokio::sync::Mutex<PlayerClient>>, // gRPC player service client
     pub fix_session_manager: FIXSessionManager,  // Persistent FIX connections
     pub order_book: Arc<Mutex<OrderBookState>>, // Current market state
     pub active_visitors: Arc<AtomicUsize>,      // Connected browsers count
     pub total_visitors: Arc<AtomicUsize>,       // All-time connections count
-    pub grpc_addr: String,                       // Market control service
-    pub known_markets: Vec<MarketInfo>,          // Market configuration
+    pub grpc_addr: String,                      // Market control service
+    pub known_markets: Vec<MarketInfo>,         // Market configuration
 }
 ```
 
@@ -481,7 +521,8 @@ Tokio broadcast channel for real-time updates:
 | `MARKET_SIMULATOR_ADMIN_PWD` | Admin login password | `super-secret` |
 | `MARKET_SIM_PUBLIC_MARKETS_ONLY` | Filter non-public URLs | `1` (true) |
 | `LOGIN_GATEWAY_URL` | Client redirect after login | `http://market.example.com:8080` |
-| `DATABASE_URL` | Postgres connection for players | `postgres://...` |
+| `GRPC_PLAYER_SERVICE_PORT` | Player service gRPC port | `50052` (default) |
+| `DATABASE_URL_MARKET_SIMULATOR` | PostgreSQL connection for players | `postgres://...` |
 
 ## Client Connection Flow (Step-by-Step)
 

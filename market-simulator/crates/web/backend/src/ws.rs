@@ -5,14 +5,14 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use std::net::SocketAddr;
-use tokio::net::tcp::OwnedWriteHalf;
 use std::sync::Arc;
 use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 use crate::server::AppState;
-use crate::auth::{SessionInfo, authenticate_token, require_admin};
+use crate::auth::require_admin;
 use crate::state::{WsEvent, BrowserCommand};
-use crate::players::PendingOrder;
-use crate::fix_session::{pretty_fix, send_fix_over_tcp};
+use players::players::PendingOrder;
+use crate::fix_session::pretty_fix;
 use utils::market_name;
 
 struct VisitorCounterGuard {
@@ -43,13 +43,14 @@ fn is_expected_ws_disconnect(err_text: &str) -> bool {
 #[derive(Deserialize)]
 pub struct WsParams {
     token: Option<String>,
+    username: Option<String>,
 }
 
-/// WebSocket handler for incoming browser connections. Authenticates the session token, sets up the FIX session, and enters a loop to handle messages in both directions.
+/// WebSocket handler for incoming browser connections. Authenticates the token, sets up the FIX session, and enters a loop to handle messages in both directions.
 /// Arguments:
 /// - `ws`: The WebSocket upgrade request from Axum.
 /// - `state`: Shared application state containing the event bus, player store, FIX session manager, and order book.
-/// - `params`: Query parameters from the WebSocket connection URL, expected to contain a `token` for authentication.
+/// - `params`: Query parameters from the WebSocket connection URL, expected to contain `token` and `username` for authentication.
 /// - `addr`: The client's socket address, used for logging and recording connection info in the player store.
 /// Returns:
 /// - An HTTP response that upgrades to a WebSocket connection if authentication succeeds, or an error
@@ -60,31 +61,38 @@ pub async fn ws_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let token = params.token.unwrap_or_default();
-    let Some(session) = authenticate_token(&state.sessions, &token) else {
-        return (StatusCode::UNAUTHORIZED, "Invalid or missing session token").into_response();
+    let username = match params.username {
+        Some(u) if !u.is_empty() => u,
+        _ => return (StatusCode::UNAUTHORIZED, "Missing username parameter").into_response(),
     };
+    
+    if token.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "Missing token parameter").into_response();
+    }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, session, addr))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, username, token, addr))
 }
 
 /// Main loop for handling a WebSocket connection with a browser client. Listens for events from the FIX engine and messages from the browser, and routes them appropriately.
 /// Arguments:
 /// - `socket`: The WebSocket connection to the browser client.
 /// - `state`: Shared application state containing the event bus, player store, FIX session manager, and order book.
-/// - `session`: Authenticated session information for this connection, including username and admin status.
+/// - `username`: The authenticated username (sent by the browser after login).
+/// - `token`: The bearer token from the Player Service (sent by the browser).
 /// - `addr`: The client's socket address, used for logging and recording connection info in the player store.
-async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo, addr: SocketAddr) {
+async fn handle_socket(socket: WebSocket, state: AppState, username: String, _token: String, _addr: SocketAddr) {
     // Split into sender and receiver so we can use both concurrently
     let (mut sender, mut receiver) = socket.split();
     let mut rx: tokio::sync::broadcast::Receiver<WsEvent> = state.bus.subscribe();
-    let username = session.username.clone();
-    let is_admin = session.is_admin;
+    let is_admin = username.eq_ignore_ascii_case("admin");
 
     let current_visitors = state
         .active_visitors
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         .saturating_add(1);
-    let all_time_visitors = state.player_store.record_visit();
+    
+    // Record the visit with the gRPC player service
+    let all_time_visitors = state.player_client.lock().await.record_visit().await;
     // Sync the in-memory AtomicUsize with the newly persisted total
     state.total_visitors.store(all_time_visitors as usize, std::sync::atomic::Ordering::Relaxed);
 
@@ -99,35 +107,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo,
         bus: state.bus.clone(),
     };
 
-    // Record the connection in the player store with the client's IP address. This is used for analytics and can be displayed in the admin dashboard.
-    state
-        .player_store
-        .record_connection(&username, Some(&addr.ip().to_string()));
-
-    // Get or create a persistent FIX session for this player.
-    // The session thread lives beyond this WebSocket connection, so fills are
-    // processed and persisted to the portfolio DB even when offline.
-    let tcp_writer = match state.fix_session_manager.get_or_create_session(
-        &username,
-        &state.fix_tcp_addr,
-        &state.player_store,
-        &state.bus,
-    ) {
-        Ok(writer) => writer,
-        Err(e) => {
-            tracing::warn!("[{}] FIX session connect failed for '{username}': {e}", market_name());
-            let err = serde_json::to_string(&WsEvent::FixMessage {
-                label: "ERROR".into(),
-                body: format!("Unable to connect to FIX TCP server: {e}"),
-                tag: "err".into(),
-                recipient: Some(username.clone()),
-            }).unwrap();
-            let _ = sender.send(Message::Text(err.into())).await;
-            let status = serde_json::to_string(&WsEvent::Status { connected: false }).unwrap();
-            let _ = sender.send(Message::Text(status.into())).await;
-            return;
-        }
-    };
+    // NOTE: FIX session handling is being refactored to use gRPC player client
+    // For now, FIX message sending is disabled
+    // TODO: Implement FIX session with gRPC player client integration
 
     // Browser connected — tell it the FIX engine is ready
     // The web server IS the FIX gateway now, no separate TCP client needed
@@ -191,7 +173,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SessionInfo,
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         // Handle the browser command, which may involve sending FIX messages over TCP to the engine. The FIX session thread will process those messages and publish events back to the bus, which will then be sent to this browser as needed.
-                        handle_browser_message(&text, &state, &username, is_admin, &tcp_writer).await;
+                        handle_browser_message(&text, &state, &username, is_admin).await;
                         // After every command, push the updated player state to this client.
                         send_player_state(&mut sender, &state, &username, is_admin).await;
                     }
@@ -226,35 +208,39 @@ async fn send_player_state(
     username: &str,
     is_admin: bool,
 ) {
-    let event = if let Some(player) = state.player_store.get_player(username) {
-        let id_suffix = player.password.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>();
-        WsEvent::PlayerState {
-            username: player.username.clone(),
-            tokens: player.tokens,
-            pending_orders: player.pending_orders.clone(),
-            holdings: state.player_store.get_holdings_summary(&player.username),
-            order_owners: state.player_store.get_order_owners(),
-            is_admin,
-            visitor_count: state.active_visitors.load(std::sync::atomic::Ordering::Relaxed),
-            total_visitor_count: state.total_visitors.load(std::sync::atomic::Ordering::Relaxed),
-            id_suffix,
+    match state.player_client.lock().await.get_player_state(username).await {
+        Some(player_state) => {
+            let event = WsEvent::PlayerState {
+                username: player_state.username,
+                tokens: player_state.tokens,
+                pending_orders: player_state.pending_orders,
+                holdings: player_state.holdings,
+                order_owners: player_state.order_owners,
+                is_admin,
+                visitor_count: state.active_visitors.load(std::sync::atomic::Ordering::Relaxed),
+                total_visitor_count: state.total_visitors.load(std::sync::atomic::Ordering::Relaxed),
+                id_suffix: player_state.id_suffix,
+            };
+            let json = serde_json::to_string(&event).unwrap();
+            let _ = sender.send(Message::Text(json.into())).await;
         }
-    } else {
-        WsEvent::PlayerState {
-            username: username.to_string(),
-            tokens: 0.0,
-            pending_orders: Vec::new(),
-            holdings: std::collections::HashMap::new(),
-            order_owners: state.player_store.get_order_owners(),
-            is_admin,
-            visitor_count: state.active_visitors.load(std::sync::atomic::Ordering::Relaxed),
-            total_visitor_count: state.total_visitors.load(std::sync::atomic::Ordering::Relaxed),
-            id_suffix: String::new(),
+        None => {
+            // Player not found, send empty state
+            let event = WsEvent::PlayerState {
+                username: username.to_string(),
+                tokens: 0.0,
+                pending_orders: Vec::new(),
+                holdings: std::collections::HashMap::new(),
+                order_owners: state.player_client.lock().await.get_order_owners().await,
+                is_admin,
+                visitor_count: state.active_visitors.load(std::sync::atomic::Ordering::Relaxed),
+                total_visitor_count: state.total_visitors.load(std::sync::atomic::Ordering::Relaxed),
+                id_suffix: String::new(),
+            };
+            let json = serde_json::to_string(&event).unwrap();
+            let _ = sender.send(Message::Text(json.into())).await;
         }
-    };
-
-    let json = serde_json::to_string(&event).unwrap();
-    let _ = sender.send(Message::Text(json.into())).await;
+    }
 }
 
 /// Send the full order book snapshots to the browser client. This is called on every new connection and after every relevant event (like order updates or executions) to keep the browser in sync with the latest state.
@@ -310,12 +296,7 @@ async fn send_trades_snapshot(
         let trades_queue = state.trades_queue.lock().unwrap();
         let trades: Vec<crate::state::TradeView> = trades_queue
             .iter()
-            .map(|t| crate::state::TradeView {
-                id: t.id,
-                price: t.price.to_f64(),
-                quantity: t.quantity.to_f64(),
-                cl_ord_id: t.cl_ord_id.to_string(),
-            })
+            .cloned()
             .collect();
         let count = trades.len();
         (trades, count)
@@ -331,7 +312,7 @@ async fn send_trades_snapshot(
 }
 
 /// Handle a command received from the browser client. This may involve sending FIX messages over TCP to the engine, which will then process them and publish events back to the bus.
-async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool, tcp_writer: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>) {
+async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool) {
     tracing::debug!("[{}] Received message from browser: {text}", market_name());
     let cmd: BrowserCommand = match serde_json::from_str(text) {
         Ok(c)  => c,
@@ -348,10 +329,13 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 if side == "1" { "BUY" } else { "SELL" },
                 qty as u32, symbol, price);
 
+            // Fetch player state once for validation
+            let player_state = state.player_client.lock().await.get_player_state(username).await;
+
             if side == "1" {
                 let required_notional = qty * price;
                 if required_notional.is_finite() && required_notional > 0.0 {
-                    if let Some(player) = state.player_store.get_player(username) {
+                    if let Some(player) = &player_state {
                         // Calculate the notional value of the player's existing pending BUY orders to determine how many tokens are currently reserved.
                         // This ensures that the player cannot exceed their token balance by placing multiple pending orders.
                         let reserved_notional: f64 = player
@@ -381,10 +365,10 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 if qty.is_finite() && qty > 0.0 {
                     // Admin bypass: admins can generate SELL orders without owning inventory
                     if !is_admin {
-                        if let Some(player) = state.player_store.get_player(username) {
+                        if let Some(player) = &player_state {
                             let normalized_symbol = symbol.to_uppercase();
-                            let holdings = state.player_store.get_holdings_summary(username);
-                            let owned_qty = holdings
+                            let owned_qty = player
+                                .holdings
                                 .get(&normalized_symbol)
                                 .map(|holding| holding.quantity)
                                 .unwrap_or(0.0);
@@ -428,13 +412,13 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
 
             // Record the order in the player's pending list.
             // Token balance is updated only on transaction (execution reports).
-            state.player_store.add_pending_order(username, PendingOrder {
+            state.player_client.lock().await.add_pending_order(username, PendingOrder {
                 cl_ord_id: clord_id.clone(),
                 symbol: symbol.clone(),
                 side: side.clone(),
                 qty,
                 price,
-            });
+            }).await;
 
             let fix_bytes = build_new_order_single(
                 &sender_id, &target_id, &symbol,
@@ -453,16 +437,43 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 recipient: Some(username.to_string()),
             });
 
-            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes).await {
-                state.bus.publish(WsEvent::FixMessage {
-                    label: "ERROR".into(),
-                    body: format!("Unable to send FIX order over TCP: {e}"),
-                    tag: "err".into(),
-                    recipient: Some(username.to_string()),
-                });
+            // Send FIX order through TCP to the FIX engine
+            match state.fix_session_manager.get_or_create_session(
+                &username,
+                &state.fix_tcp_addr,
+                state.player_client.clone(),
+                &state.bus,
+            ) {
+                Ok(writer) => {
+                    let mut writer_guard = writer.lock().await;
+                    match writer_guard.write_all(&fix_bytes).await {
+                        Ok(_) => {
+                            tracing::info!("[{}] FIX order sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));
+                        }
+                        Err(e) => {
+                            tracing::error!("[{}] Failed to send FIX order for '{}': {}", market_name(), username, e);
+                            state.bus.publish(WsEvent::FixMessage {
+                                label: "ERROR".into(),
+                                body: format!("Failed to send FIX order: {}", e),
+                                tag: "error".into(),
+                                recipient: Some(username.to_string()),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("[{}] Failed to get FIX session for '{}': {}", market_name(), username, e);
+                    state.bus.publish(WsEvent::FixMessage {
+                        label: "ERROR".into(),
+                        body: format!("Failed to connect to FIX engine: {}", e),
+                        tag: "error".into(),
+                        recipient: Some(username.to_string()),
+                    });
+                }
             }
 
             tracing::debug!("[{}] Browser order injected into FIX engine", market_name());
+
         }
 
         BrowserCommand::Cancel { clord_id, symbol, qty } => {
@@ -470,7 +481,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
             let qty = qty.unwrap_or(0.0);
 
             // Drop the pending order. Token balance is not changed on cancel.
-            state.player_store.remove_pending_order(username, &clord_id);
+            state.player_client.lock().await.remove_pending_order(username, &clord_id).await;
 
             let fix_bytes = build_order_cancel_request(
                 username, "SERVER1",
@@ -485,13 +496,39 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 recipient: Some(username.to_string()),
             });
 
-            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes).await {
-                state.bus.publish(WsEvent::FixMessage {
-                    label: "ERROR".into(),
-                    body: format!("Unable to send FIX cancel over TCP: {e}"),
-                    tag: "err".into(),
-                    recipient: Some(username.to_string()),
-                });
+            // Send FIX cancel through TCP to the FIX engine
+            match state.fix_session_manager.get_or_create_session(
+                &username,
+                &state.fix_tcp_addr,
+                state.player_client.clone(),
+                &state.bus,
+            ) {
+                Ok(writer) => {
+                    let mut writer_guard = writer.lock().await;
+                    match writer_guard.write_all(&fix_bytes).await {
+                        Ok(_) => {
+                            tracing::info!("[{}] FIX cancel sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));
+                        }
+                        Err(e) => {
+                            tracing::error!("[{}] Failed to send FIX cancel for '{}': {}", market_name(), username, e);
+                            state.bus.publish(WsEvent::FixMessage {
+                                label: "ERROR".into(),
+                                body: format!("Failed to send FIX cancel: {}", e),
+                                tag: "error".into(),
+                                recipient: Some(username.to_string()),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("[{}] Failed to get FIX session for '{}': {}", market_name(), username, e);
+                    state.bus.publish(WsEvent::FixMessage {
+                        label: "ERROR".into(),
+                        body: format!("Failed to connect to FIX engine: {}", e),
+                        tag: "error".into(),
+                        recipient: Some(username.to_string()),
+                    });
+                }
             }
         }
 
@@ -521,7 +558,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                         Ok(resp) => {
                             let r = resp.into_inner();
                             let (tag, label, body, recipient) = if r.success {
-                                let (players_touched, orders_removed) = state.player_store.reset_market_state();
+                                let (players_touched, orders_removed) = state.player_client.lock().await.reset_market_state().await;
                                 let cleared_symbols = {
                                     let mut order_book = state.order_book.lock().unwrap();
                                     let symbols: Vec<String> = order_book.books.keys().cloned().collect();
@@ -595,7 +632,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 return;
             }
 
-            let players_reset = state.player_store.reset_all_tokens();
+            let players_reset = state.player_client.lock().await.reset_all_tokens().await;
             if players_reset > 0 {
                 state.bus.publish(WsEvent::FixMessage {
                     label: "INFO".into(),
@@ -620,14 +657,14 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
         BrowserCommand::MdRequest { symbol, depth } => {
             let fix_bytes = build_md_request("BROWSER", "SERVER1",
                                              &symbol, depth.unwrap_or(1));
-            if let Err(e) = send_fix_over_tcp(tcp_writer, &fix_bytes).await {
-                state.bus.publish(WsEvent::FixMessage {
-                    label: "ERROR".into(),
-                    body: format!("Unable to send market data request over TCP: {e}"),
-                    tag: "err".into(),
-                    recipient: Some(username.to_string()),
-                });
-            }
+            // TODO: Send market data request through gRPC player service
+            tracing::info!("[{}] Market data request would be sent: {}", market_name(), pretty_fix(&fix_bytes));
+            state.bus.publish(WsEvent::FixMessage {
+                label: "INFO".into(),
+                body: "Market data request routing through gRPC (not yet implemented)".to_string(),
+                tag: "info".into(),
+                recipient: Some(username.to_string()),
+            });
         }
     }
 }

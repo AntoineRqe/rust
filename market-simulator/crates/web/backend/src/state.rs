@@ -1,9 +1,8 @@
-use serde::Serialize;
-use tokio::sync::broadcast;
-use std::collections::HashMap;
-use crate::players::{HoldingSummary, PendingOrder};
 use crate::order_book::L3OrderView;
-
+use players::players::{HoldingSummary, PendingOrder};
+use serde::Serialize;
+use std::collections::HashMap;
+use tokio::sync::broadcast;
 
 /// Trade data for WebSocket transmission
 #[derive(Debug, Clone, Serialize)]
@@ -23,16 +22,14 @@ pub enum WsEvent {
     /// We send the human-readable form — SOH replaced by " | "
     FixMessage {
         label: String, // e.g. "EXEC_REPORT", "MARKET_DATA_SNAPSHOT"
-        body:  String, // e.g. "8=FIX.4.2 | 9=123 | 35=8 | ..."
-        tag:   String, // e.g. "exec_report", "market_data" — useful for CSS styling in the browser
+        body: String,  // e.g. "8=FIX.4.2 | 9=123 | 35=8 | ..."
+        tag: String,   // e.g. "exec_report", "market_data" — useful for CSS styling in the browser
         #[serde(skip_serializing_if = "Option::is_none")]
         recipient: Option<String>, // targeted browser username; None means broadcast to all
     },
 
     /// Connection status changed
-    Status {
-        connected: bool,
-    },
+    Status { connected: bool },
 
     /// Sent to the browser immediately after a WebSocket connection is
     /// established, and after every order / cancel to keep the UI in sync.
@@ -51,10 +48,7 @@ pub enum WsEvent {
     },
 
     /// Active number of websocket visitors currently connected.
-    VisitorCount {
-        count: usize,
-        total_count: usize,
-    },
+    VisitorCount { count: usize, total_count: usize },
 
     /// Order book snapshot for a symbol (updated with market feed data).
     OrderBook {
@@ -66,10 +60,38 @@ pub enum WsEvent {
 
     /// Trades snapshot for price chart initialization.
     /// Sent once when a client connects to populate the price chart with historical trades.
-    Trades {
-        trades: Vec<TradeView>,
-    },
+    Trades { trades: Vec<TradeView> },
 }
+
+/// Commands the browser can send over WebSocket.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum BrowserCommand {
+    Order {
+        clord_id: String,
+        symbol: String,
+        qty: f64,
+        price: f64,
+        side: String, // "1" = buy, "2" = sell
+        sender: Option<String>,
+        target: Option<String>,
+    },
+    Cancel {
+        clord_id: String,
+        symbol: Option<String>,
+        qty: Option<f64>,
+    },
+    MdRequest {
+        symbol: String,
+        depth: Option<u32>,
+    },
+    ResetTokens,
+    ResetSeq,
+    ClearBook,
+    Disconnect,
+}
+
+// ── Event Bus ─────────────────────────────────────────────────────────
 
 /// Capacity of the broadcast channel.
 /// If a slow browser client falls this many events behind, it gets dropped.
@@ -100,32 +122,4 @@ impl EventBus {
     pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
         self.tx.subscribe()
     }
-}
-
-/// Commands the browser can send over WebSocket.
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum BrowserCommand {
-    Order {
-        clord_id: String,
-        symbol: String,
-        qty:    f64,
-        price:  f64,
-        side:   String,   // "1" = buy, "2" = sell
-        sender: Option<String>,
-        target: Option<String>,
-    },
-    Cancel {
-        clord_id: String,
-        symbol:   Option<String>,
-        qty:      Option<f64>,
-    },
-    MdRequest {
-        symbol: String,
-        depth:  Option<u32>,
-    },
-    ResetTokens,
-    ResetSeq,
-    ClearBook,
-    Disconnect,
 }

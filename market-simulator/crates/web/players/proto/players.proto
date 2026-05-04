@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package players.v1;
+
+// Player service provides authentication and player state management.
+// Markets query this service instead of directly accessing the player database.
+service PlayerService {
+  rpc Authenticate(AuthRequest) returns (AuthResponse);
+  rpc GetPlayerState(GetPlayerStateRequest) returns (PlayerState);
+  rpc UpdatePendingOrders(UpdatePendingOrdersRequest) returns (UpdateResult);
+  rpc AddTrade(AddTradeRequest) returns (UpdateResult);
+  rpc ApplyFixExecutionReport(ApplyFixExecutionReportRequest) returns (UpdateResult);
+  rpc RecordVisit(RecordVisitRequest) returns (RecordVisitResponse);
+  rpc ResetTokens(ResetTokensRequest) returns (UpdateResult);
+  rpc ResetSeq(ResetSeqRequest) returns (UpdateResult);
+  rpc ResetMarketState(ResetMarketStateRequest) returns (ResetMarketStateResponse);
+  rpc ResetAllTokens(ResetAllTokensRequest) returns (ResetAllTokensResponse);
+  rpc UpdateVisitors(UpdateVisitorsRequest) returns (UpdateResult);
+}
+
+// ── Authentication ───────────────────────────────────────────────────
+
+message AuthRequest {
+  string username = 1;
+  string password = 2;
+}
+
+enum AuthErrorCode {
+  AUTH_ERROR_CODE_UNSPECIFIED = 0;
+  USERNAME_REQUIRED = 1;
+  PASSWORD_REQUIRED = 2;
+  USER_EXISTS_WRONG_PASSWORD = 3;
+  PASSWORD_HASH_FAILED = 4;
+  INVALID_CREDENTIALS = 5;
+}
+
+message AuthResponse {
+  bool success = 1;
+  string token = 2;                    // Bearer token for subsequent requests
+  string id_suffix = 3;                // Last 4 chars of password hash for ClOrdID generation
+  string username = 4;
+  bool is_admin = 5;
+  AuthErrorCode error_code = 6;
+  string error_message = 7;
+}
+
+// ── Player State ─────────────────────────────────────────────────────
+
+message Holding {
+  string symbol = 1;
+  double quantity = 2;
+  double avg_price = 3;
+}
+
+message PendingOrder {
+  string cl_ord_id = 1;
+  string symbol = 2;
+  string side = 3;                     // "1" = buy, "2" = sell
+  double qty = 4;
+  double price = 5;
+}
+
+message PlayerState {
+  string username = 1;
+  double tokens = 2;
+  repeated PendingOrder pending_orders = 3;
+  map<string, Holding> holdings = 4;
+  map<string, string> order_owners = 5;         // clord_id -> username
+  bool is_admin = 6;
+  int32 visitor_count = 7;             // Currently connected visitors
+  int32 total_visitor_count = 8;       // All-time total visitors
+  string id_suffix = 9;                // For ClOrdID generation
+}
+
+message GetPlayerStateRequest {
+  string username = 1;
+  string token = 2;                    // Bearer token for validation
+}
+
+// ── Order Management ─────────────────────────────────────────────────
+
+message UpdatePendingOrdersRequest {
+  string username = 1;
+  repeated PendingOrder pending_orders = 2;
+}
+
+message AddTradeRequest {
+  string username = 1;
+  string symbol = 2;
+  double quantity = 3;
+  double price = 4;
+  string side = 5;                     // "1" = buy, "2" = sell
+  string cl_ord_id = 6;
+}
+
+message ApplyFixExecutionReportRequest {
+  string username = 1;
+  string fix_body = 2;                 // Raw FIX message body
+}
+
+message UpdateResult {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// ── Visitor Tracking ─────────────────────────────────────────────────
+
+message RecordVisitRequest {
+  // No parameters - just increments the global all-time visitor counter
+}
+
+message RecordVisitResponse {
+  int64 total_visitor_count = 1;        // Updated all-time total
+}
+
+// ── Admin Commands ───────────────────────────────────────────────────
+
+message ResetTokensRequest {
+  string username = 1;
+  string token = 2;                    // Bearer token (admin-only)
+}
+
+message ResetSeqRequest {
+  string username = 1;
+  string token = 2;                    // Bearer token (admin-only)
+}
+
+message ResetMarketStateRequest {
+  string token = 1;                    // Bearer token (admin-only)
+}
+
+message ResetMarketStateResponse {
+  int32 players_touched = 1;           // Number of players affected
+  int32 orders_removed = 2;            // Total number of orders cleared
+}
+
+message ResetAllTokensRequest {
+  string token = 1;                    // Bearer token (admin-only)
+}
+
+message ResetAllTokensResponse {
+  int32 players_reset = 1;             // Number of players whose tokens were reset
+}
+
+message UpdateVisitorsRequest {
+  int32 active_count = 1;
+  int32 total_count = 2;
+  string token = 3;                    // Bearer token (admin-only)
+}

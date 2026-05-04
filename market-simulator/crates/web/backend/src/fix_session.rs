@@ -2,9 +2,9 @@
 ///
 /// Each player gets exactly one long-lived TCP connection to the FIX engine.
 /// The background reader task lives independently of any WebSocket connection:
-/// it continuously applies execution reports to the player store even when the
-/// browser is offline, and publishes them to the event bus for display when the
-/// browser reconnects.
+/// it continuously applies execution reports via gRPC to the player service
+/// even when the browser is offline, and publishes them to the event bus for
+/// display when the browser reconnects.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::players::PlayerStore;
+use crate::player_client::PlayerClient;
 use crate::state::{EventBus, WsEvent};
 use utils::market_name;
 
@@ -48,7 +48,7 @@ impl FIXSessionManager {
     ///
     /// The background reader task is spawned automatically and handles:
     ///
-    /// - Calling `player_store.apply_fix_execution_report()` for every
+    /// - Calling `player_client.apply_fix_execution_report()` via gRPC for every
     ///   execution report received, regardless of WebSocket state.
     /// - Publishing every received message to the event bus so connected
     ///   browser clients can display it.
@@ -58,7 +58,7 @@ impl FIXSessionManager {
         &self,
         username: &str,
         fix_tcp_addr: &str,
-        player_store: &PlayerStore,
+        player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         bus: &EventBus,
     ) -> Result<Arc<AsyncMutex<OwnedWriteHalf>>, std::io::Error> {
         let mut sessions = self.inner.lock().unwrap();
@@ -86,7 +86,7 @@ impl FIXSessionManager {
         {
             let username = username.to_string();
             let stop_flag = Arc::clone(&stop);
-            let player_store = player_store.clone();
+            let player_client = player_client.clone();
             let bus = bus.clone();
             let sessions_ref = Arc::clone(&self.inner);
 
@@ -118,8 +118,15 @@ impl FIXSessionManager {
                             for raw_msg in extract_fix_messages(&mut stream_buf) {
                                 let body = pretty_fix(&raw_msg);
 
-                                // Always update the portfolio DB, even when browser is offline.
-                                player_store.apply_fix_execution_report(&body);
+                                // Apply execution report via gRPC to player service
+                                let mut client = player_client.lock().await;
+                                if let Err(e) = client.apply_fix_execution_report(&username, &body).await {
+                                    tracing::error!(
+                                        "[{}] Failed to apply execution report for '{username}': {e}",
+                                        market_name()
+                                    );
+                                }
+                                drop(client); // Release lock before publishing
 
                                 // Broadcast so connected browser clients can display it.
                                 bus.publish(WsEvent::FixMessage {

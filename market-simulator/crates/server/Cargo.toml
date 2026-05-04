@@ -9,7 +9,8 @@ spsc.workspace = true
 crossbeam.workspace = true
 crossbeam-channel.workspace = true
 types = { path = "../types" }
-web = { path = "../web" }
+backend = { path = "../web/backend" }
+players = { path = "../web/players" }
 market-feed = { path = "../market-feed" }
 utils = { path = "../utils" }
 tracing.workspace = true

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use crossbeam::{channel};
 use fix::engine::{FixRawMsg};
 use memory;
-use web::state::EventBus;
-use web::order_book::OrderBookState;
+use backend::state::EventBus;
+use backend::order_book::OrderBookState;
 use config::{MarketConfig, MarketsConfig};
 use std::sync::atomic::{AtomicBool};
 use types::consts::RB_SIZE;
@@ -62,7 +62,7 @@ pub struct MarketSimulator {
     market_feed_sources: Vec<MulticastSource>,
     snapshot_feed_sources: Vec<MulticastSource>,
     /// All configured markets — passed to the web server for the login page.
-    known_markets: Vec<web::MarketInfo>,
+    known_markets: Vec<backend::MarketInfo>,
     // Error channel for threads to report startup errors back to main thread for logging.
     err_rx: crossbeam::channel::Receiver<String>,
     err_tx: Arc<crossbeam::channel::Sender<String>>,
@@ -122,7 +122,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let database_url = config.resolve_database_url().map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
     })?;
-    let player_store = web::players::PlayerStore::load_postgres(&player_database_url);
+    let player_store = players::PlayerStore::load_postgres(&player_database_url);
 
     // Initialization of shared queues for inter-thread communication
     let mut queues = QueueHandle::new(&config.name);
@@ -143,7 +143,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 
     // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
     market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
-
 
     // Start the multicast receiver thread(s) for this market.  This thread will subscribe to the configured multicast sources for this market and push incoming market feed messages into the event bus, which other threads can subscribe to.
     startup::start_multicast_receiver(
@@ -235,7 +234,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     startup::start_web_server(
         &mut market_simulator,
         Arc::clone(&order_book),
-        player_database_url.clone(),
         database_url.clone(),    
         bus.clone(),
         Arc::clone(&global_shutdown),
@@ -318,7 +316,7 @@ fn main() {
     // ── Single-market mode (child process) ──────────────────────────────────
     if let Some(index) = cli.market_index {
         // Build the list of all markets for the login page.
-        let known_markets: Vec<web::MarketInfo> = config.markets.iter().map(|m| web::MarketInfo {
+        let known_markets: Vec<backend::MarketInfo> = config.markets.iter().map(|m| backend::MarketInfo {
             name: m.name.clone(),
             url: format!("http://{}:{}", m.web.ip, m.web.port),
         }).collect();
@@ -387,10 +385,10 @@ fn main() {
     // ── Multi-market mode (parent process) ──────────────────────────────────
     let gateway_ip = config.entry_point.ip.clone();
     let gateway_port = config.entry_point.port;
-    let gateway_markets: Vec<web::MarketInfo> = config
+    let gateway_markets: Vec<backend::MarketInfo> = config
         .markets
         .iter()
-        .map(|m| web::MarketInfo {
+        .map(|m| backend::MarketInfo {
             name: m.name.clone(),
             url: format!("http://{}:{}", m.web.ip, m.web.port),
         })
@@ -402,11 +400,39 @@ fn main() {
         gateway_port
     );
 
+    // Start the player service once in parent process
+    let player_database_url = config
+        .resolve_player_database_url(config.markets.get(0).unwrap_or(&config.markets[0]))
+        .unwrap_or_else(|e| {
+            tracing::warn!("[gateway] Could not resolve player database URL: {e}");
+            "postgresql://localhost/players".to_string()
+        });
+    
+    let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
+    
+    {
+        let mut dummy_simulator = crate::MarketSimulator {
+            config: config.markets[0].clone(),
+            player_database_url: player_database_url.clone(),
+            thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
+            shutdown: None,
+            market_feed_sources: vec![],
+            snapshot_feed_sources: vec![],
+            known_markets: gateway_markets.clone(),
+            err_tx: Arc::new(err_tx.clone()),
+            err_rx: err_rx.clone(),
+        };
+        
+        if let Err(e) = startup::start_player_service(&mut dummy_simulator, &player_database_url) {
+            tracing::error!("[gateway] Failed to start player service: {e}");
+        }
+    }
+
     {
         let login_ip = gateway_ip.clone();
         let login_port = gateway_port;
         std::thread::spawn(move || {
-            web::run_login_gateway(gateway_markets, &login_ip, login_port);
+            backend::run_login_gateway(gateway_markets, &login_ip, login_port);
         });
     }
 
@@ -414,7 +440,7 @@ fn main() {
     // with --market-index <n> so it runs in single-market mode above.
     let exe = std::env::current_exe().expect("Cannot determine current executable path");
 
-    let mut children: Vec<std::process::Child> = config
+    let children: Vec<std::process::Child> = config
         .markets
         .iter()
         .enumerate()
@@ -431,7 +457,27 @@ fn main() {
 
     // Ctrl+C from the terminal goes to the whole process group, so every
     // child's own ctrlc handler will fire.  Just wait for them here.
-    for child in &mut children {
+    let children_to_wait = Arc::new(Mutex::new(children));
+    let children_clone = Arc::clone(&children_to_wait);
+    
+    ctrlc::set_handler(move || {
+        // Kill the player service (cargo run process)
+        let _ = std::process::Command::new("pkill")
+            .args(&["-f", "cargo.*run.*-p.*players"])
+            .output();
+        
+        // Terminate market processes
+        if let Ok(mut children) = children_clone.lock() {
+            for child in children.iter_mut() {
+                let _ = child.kill();
+            }
+        }
+        std::process::exit(0);
+    })
+    .expect("Error setting Ctrl-C handler");
+    
+    let mut children_guard = children_to_wait.lock().unwrap();
+    for child in children_guard.iter_mut() {
         let _ = child.wait();
     }
 }

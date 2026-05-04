@@ -1,5 +1,5 @@
 [package]
-name = "web"
+name = "backend"
 version = "0.1.0"
 edition = "2024"
 
@@ -20,12 +20,14 @@ argon2          = "0.5"
 rand_core       = { version = "0.6", features = ["getrandom"] }
 core_affinity   = "0.8"
 
-types           = { path = "../types" }
-utils          = { path = "../utils" }
-order-book      = { path = "../order-book" }
-execution-report = { path = "../execution-report" }
-fix            = { path = "../protocol/FIX" }
-grpc           = { path = "../grpc" }
-tonic          = "0.12"
-db             = { path = "../db" }
-sqlx           = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "chrono"] }
+players        = { path = "../players" }
+frontend        = { path = "../frontend" }
+utils           = { path = "../../utils" }
+order-book      = { path = "../../order-book" }
+execution-report = { path = "../../execution-report" }
+fix             = { path = "../../protocol/FIX" }
+grpc            = { path = "../../grpc" }
+tonic           = "0.13"
+db              = { path = "../../db" }
+types           = { path = "../../types" }
+sqlx            = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "chrono"] }

@@ -66,7 +66,7 @@ pub fn run_login_gateway(markets: Vec<MarketInfo>, ip: &str, port: u16) {
 }
 
 async fn gateway_login_page_handler() -> Html<&'static str> {
-    Html(include_str!("../frontend/login.html"))
+    Html(frontend::LOGIN_HTML)
 }
 
 async fn gateway_app_handler(
@@ -94,7 +94,7 @@ async fn gateway_app_handler(
     let markets_json = serde_json::to_string(&markets_for_client)
         .unwrap_or_else(|_| "[]".to_string());
 
-    let html = include_str!("../frontend/index.html")
+    let html = frontend::APP_HTML
         .replace("{{MARKET_NAME}}", "gateway")
         .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url)
         .replace("{{CURRENT_MARKET_NAME}}", current_market_name)

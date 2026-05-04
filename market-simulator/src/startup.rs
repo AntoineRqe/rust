@@ -1,8 +1,8 @@
 use config::Connection;
 use execution_report::{ExecutionReportEngine};
 use server::multicast::{spawn_market_feed_receiver};
-use web::state::EventBus;
-use web::order_book::OrderBookState;
+use backend::state::EventBus;
+use backend::order_book::OrderBookState;
 
 use types::multicast::MulticastSource;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool}};
@@ -24,7 +24,7 @@ pub fn start_multicast_receiver(
     sources: Vec<MulticastSource>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
-    player_store: web::players::PlayerStore,
+    player_store: players::PlayerStore,
     core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     
@@ -410,7 +410,6 @@ pub fn start_order_book_engine(
 pub fn start_web_server(
     market_simulator: &mut crate::MarketSimulator,
     order_book: Arc<Mutex<OrderBookState>>,
-    player_database_url: String,
     market_database_url: String,
     bus: EventBus,
     global_shutdown: Arc<AtomicBool>,
@@ -426,7 +425,6 @@ pub fn start_web_server(
         let grpc_addr    = format!("http://127.0.0.1:{}", grpc_addr.port);
         let web_ip = web_addr.ip.clone();
         let web_port = web_addr.port;
-        let web_player_database_url = player_database_url.clone();
         let web_market_database_url = market_database_url.clone();
         let web_shutdown = Arc::clone(&global_shutdown);
         let known_markets = market_simulator.known_markets.clone();
@@ -435,13 +433,12 @@ pub fn start_web_server(
 
         move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-            match web::run_web_server(
+            match backend::run_web_server(
                 bus,
                 fix_tcp_addr,
                 grpc_addr,
                 &web_ip,
                 web_port,
-                web_player_database_url,
                 web_market_database_url,
                 known_markets,
                 web_shutdown,
@@ -537,6 +534,86 @@ pub fn start_market_data_proxy(
     });
 
     market_simulator.add_thread_handle(proxy_thread);
+
+    Ok(())
+}
+// ────────────── Player Service ──────────────
+pub fn start_player_service(
+    simulator: &mut crate::MarketSimulator,
+    player_database_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let err_tx = Arc::clone(&simulator.err_tx);
+
+    let player_db_url = player_database_url.to_string();
+    let grpc_port = std::env::var("GRPC_PLAYER_SERVICE_PORT")
+        .unwrap_or_else(|_| "50052".to_string());
+    let grpc_port_log = grpc_port.clone();
+
+    let _player_thread = std::thread::spawn(move || {
+        tracing::info!("Starting player service on port {}", grpc_port);
+        
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.args(&["run", "--release", "-p", "players"])
+            .env("DATABASE_URL", &player_db_url)
+            .env("PLAYER_SERVICE_PORT", &grpc_port)
+            .env("RUST_LOG", "debug,sqlx=warn");
+        
+        // Inherit current environment and override specific vars
+        for (key, value) in std::env::vars() {
+            if key.starts_with("DATABASE_URL_") || key == "RUST_LOG" || key == "GRPC_PLAYER_SERVICE_PORT" {
+                // Skip - we'll set these explicitly
+                continue;
+            }
+            cmd.env(&key, &value);
+        }
+        
+        match cmd.spawn()
+        {
+            Ok(mut child) => {
+                let child_id = child.id();
+                match child.wait() {
+                    Ok(status) => {
+                        if !status.success() {
+                            tracing::error!("Player service (pid {}) exited with status: {}", child_id, status);
+                            let _ = err_tx.send(format!("Player service failed: {}", status));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to wait on player service (pid {}): {}", child_id, e);
+                        let _ = err_tx.send(format!("Player service error: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn player service: {}", e);
+                let _ = err_tx.send(format!("Failed to start player service: {}", e));
+            }
+        }
+    });
+
+    simulator.add_thread_handle(_player_thread);
+    
+    // Wait for player service to be ready by attempting connection with retries
+    let grpc_addr = format!("[::1]:{}", grpc_port_log);
+    let mut attempts = 0;
+    const MAX_ATTEMPTS: u32 = 30;  // ~3 seconds at 100ms intervals
+    
+    loop {
+        match std::net::TcpStream::connect(&grpc_addr) {
+            Ok(_) => {
+                tracing::info!("Player service is ready on port {}", grpc_port_log);
+                break;
+            }
+            Err(_) => {
+                attempts += 1;
+                if attempts >= MAX_ATTEMPTS {
+                    tracing::warn!("Player service did not respond within 3 seconds; proceeding anyway");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
 
     Ok(())
 }
