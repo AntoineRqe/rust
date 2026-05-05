@@ -24,8 +24,7 @@ pub struct SnapshotConfig {
 #[derive(Clone, Deserialize)]
 pub struct MarketConfig {
     pub name: String,
-    pub database_url: Option<String>,
-    pub database_url_env: Option<String>,
+    pub database_url_env: String,
     pub web: Connection,
     pub tcp: Connection,
     pub grpc: Connection,
@@ -39,19 +38,13 @@ pub struct MarketConfig {
 
 impl MarketConfig {
     pub fn resolve_database_url(&self) -> Result<String, String> {
-        if let Some(env_key) = &self.database_url_env {
-            return env::var(env_key).map_err(|_| {
-                format!(
-                    "missing env var '{}' for market '{}'",
-                    env_key,
-                    self.name
-                )
-            });
-        }
-
-        self.database_url
-            .clone()
-            .ok_or_else(|| format!("missing database_url for market '{}'", self.name))
+        env::var(&self.database_url_env).map_err(|_| {
+            format!(
+                "missing env var '{}' for market '{}'",
+                self.database_url_env,
+                self.name
+            )
+        })
     }
 }
 
@@ -59,8 +52,7 @@ impl MarketConfig {
 pub struct MarketsConfig {
     pub ring_buffer_size: usize,
     pub entry_point: Connection,
-    pub player_database_url: Option<String>,
-    pub player_database_url_env: Option<String>,
+    pub player_database_url_env: String,
     pub markets: Vec<MarketConfig>,
 }
 
@@ -89,23 +81,14 @@ impl MarketsConfig {
                 ip: "127.0.0.1".to_string(),
                 port: 9875,
             },
-            player_database_url: None,
-            player_database_url_env: None,
+            player_database_url_env: String::new(),
             markets: vec![],
         }
     }
 
-    pub fn resolve_player_database_url(&self, market: &MarketConfig) -> Result<String, String> {
-        if let Some(env_key) = &self.player_database_url_env {
-            return env::var(env_key)
-                .map_err(|_| format!("missing env var '{}' for global player database", env_key));
-        }
-
-        if let Some(url) = &self.player_database_url {
-            return Ok(url.clone());
-        }
-
-        market.resolve_database_url()
+    pub fn resolve_player_database_url(&self) -> Result<String, String> {
+        env::var(&self.player_database_url_env)
+            .map_err(|_| format!("missing env var '{}' for global player database", self.player_database_url_env))
     }
 
     pub fn parse_from_file(file_path: &str) -> Self {

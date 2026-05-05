@@ -331,7 +331,7 @@ fn main() {
             });
 
         let player_database_url = config
-            .resolve_player_database_url(&market_config)
+            .resolve_player_database_url()
             .unwrap_or_else(|e| {
                 tracing::error!("{e}");
                 std::process::exit(1);
@@ -402,10 +402,10 @@ fn main() {
 
     // Start the player service once in parent process
     let player_database_url = config
-        .resolve_player_database_url(config.markets.get(0).unwrap_or(&config.markets[0]))
+        .resolve_player_database_url()
         .unwrap_or_else(|e| {
-            tracing::warn!("[gateway] Could not resolve player database URL: {e}");
-            "postgresql://localhost/players".to_string()
+            tracing::error!("[gateway] Could not resolve player database URL: {e}");
+            std::process::exit(1);
         });
     
     let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
