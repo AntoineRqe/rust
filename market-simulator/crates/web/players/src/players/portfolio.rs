@@ -120,6 +120,7 @@ impl PlayerStore {
 
         // Capture owner now — before it may be removed from order_owners below.
         let owner = inner.order_owners.get(cl_ord_id).cloned();
+        let found_order = owner.is_some();
 
         // Portfolio lot operation to perform after releasing the lock.
         // We determine it here while `owner` is still available.
@@ -230,7 +231,9 @@ impl PlayerStore {
             }
         }
 
-        changed
+        // Return true if we found and processed the order (even if no state changed).
+        // Return false only if the order owner wasn't found.
+        changed || found_order
     }
 
     /// Apply the passive side of a trade reconstructed from the multicast
