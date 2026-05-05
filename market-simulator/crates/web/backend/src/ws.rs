@@ -420,6 +420,9 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 price,
             }).await;
 
+            // Track the order event for metrics
+            state.metrics.order_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
             let fix_bytes = build_new_order_single(
                 &sender_id, &target_id, &symbol,
                 side.parse().unwrap_or(1),
@@ -443,6 +446,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 &state.fix_tcp_addr,
                 state.player_client.clone(),
                 &state.bus,
+                state.metrics.clone(),
             ) {
                 Ok(writer) => {
                     let mut writer_guard = writer.lock().await;
@@ -483,6 +487,9 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
             // Drop the pending order. Token balance is not changed on cancel.
             state.player_client.lock().await.remove_pending_order(username, &clord_id).await;
 
+            // Track the cancel order event for metrics
+            state.metrics.cancel_orders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
             let fix_bytes = build_order_cancel_request(
                 username, "SERVER1",
                 &clord_id, &symbol, qty,
@@ -502,6 +509,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 &state.fix_tcp_addr,
                 state.player_client.clone(),
                 &state.bus,
+                state.metrics.clone(),
             ) {
                 Ok(writer) => {
                     let mut writer_guard = writer.lock().await;

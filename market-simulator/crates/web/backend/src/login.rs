@@ -62,12 +62,17 @@ pub async fn api_login_handler(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    // Track login attempt
+    state.metrics.login_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    
     let admin_login = body.username.eq_ignore_ascii_case("admin")
         && admin_password().as_deref() == Some(body.password.as_str());
 
     if admin_login {
         match state.player_client.lock().await.authenticate_or_register("admin", &body.password).await {
             Ok(auth_result) => {
+                // Track successful login
+                state.metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!("[{}] Admin authenticated", market_name());
                 return (
                     StatusCode::OK,
@@ -80,6 +85,8 @@ pub async fn api_login_handler(
                     .into_response();
             }
             Err(e) => {
+                // Track failed login
+                state.metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -93,6 +100,8 @@ pub async fn api_login_handler(
 
     match state.player_client.lock().await.authenticate_or_register(&body.username, &body.password).await {
         Ok(auth_result) => {
+            // Track successful login
+            state.metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("[{}] Player '{}' authenticated", market_name(), auth_result.username);
             (
                 StatusCode::OK,
@@ -104,13 +113,17 @@ pub async fn api_login_handler(
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({
-                "error": e,
-            })),
-        )
-            .into_response(),
+        Err(e) => {
+            // Track failed login
+            state.metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": e,
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

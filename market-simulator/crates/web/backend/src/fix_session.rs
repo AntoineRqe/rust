@@ -17,6 +17,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::player_client::PlayerClient;
 use crate::state::{EventBus, WsEvent};
+use crate::server::Metrics;
 use utils::market_name;
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ impl FIXSessionManager {
         fix_tcp_addr: &str,
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         bus: &EventBus,
+        metrics: Metrics,
     ) -> Result<Arc<AsyncMutex<OwnedWriteHalf>>, std::io::Error> {
         let mut sessions = self.inner.lock().unwrap();
 
@@ -89,6 +91,7 @@ impl FIXSessionManager {
             let player_client = player_client.clone();
             let bus = bus.clone();
             let sessions_ref = Arc::clone(&self.inner);
+            let metrics = metrics.clone();
 
             // Spawn the background reader task for this session.
             tokio::spawn(async move {
@@ -127,6 +130,11 @@ impl FIXSessionManager {
                                     );
                                 }
                                 drop(client); // Release lock before publishing
+
+                                // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
+                                if is_trade_execution(&body) {
+                                    metrics.trades.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
 
                                 // Broadcast so connected browser clients can display it.
                                 bus.publish(WsEvent::FixMessage {
@@ -287,4 +295,12 @@ pub async fn send_fix_over_tcp(
 ) -> std::io::Result<()> {
     let mut stream = tcp_writer.lock().await;
     stream.write_all(bytes).await
+}
+
+/// Detect if an execution report indicates a trade execution.
+/// Trades have ExecType=F (FIX field 150) in the execution report.
+fn is_trade_execution(body: &str) -> bool {
+    // ExecType=F means a trade was executed
+    // The pretty_fix format contains fields like "150=F" for ExecType
+    body.contains("150=F") || body.contains("ExecType=F")
 }

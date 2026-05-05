@@ -25,6 +25,37 @@ use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use utils::market_name;
 
+/// All application metrics for monitoring and observability
+#[derive(Clone)]
+pub struct Metrics {
+    /// Total login attempts
+    pub login_attempts: Arc<AtomicUsize>,
+    /// Successful logins
+    pub login_success: Arc<AtomicUsize>,
+    /// Failed login attempts
+    pub login_failure: Arc<AtomicUsize>,
+    /// Total order events processed
+    pub order_events: Arc<AtomicUsize>,
+    /// Total trades executed
+    pub trades: Arc<AtomicUsize>,
+    /// Total cancel orders submitted
+    pub cancel_orders: Arc<AtomicUsize>,
+}
+
+impl Metrics {
+    /// Create a new Metrics instance with all counters initialized to zero
+    pub fn new() -> Self {
+        Self {
+            login_attempts: Arc::new(AtomicUsize::new(0)),
+            login_success: Arc::new(AtomicUsize::new(0)),
+            login_failure: Arc::new(AtomicUsize::new(0)),
+            order_events: Arc::new(AtomicUsize::new(0)),
+            trades: Arc::new(AtomicUsize::new(0)),
+            cancel_orders: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
 #[derive(Clone)]
 pub struct AppState {
@@ -48,6 +79,8 @@ pub struct AppState {
     pub fix_session_manager: FIXSessionManager,
     /// Recent trades for price chart initialization.
     pub trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
+    /// Application metrics for monitoring (login, orders, trades, etc.)
+    pub metrics: Metrics,
 }
 
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
@@ -195,11 +228,17 @@ async fn serve(
         total_visitors: Arc::new(AtomicUsize::new(0)),
         fix_session_manager: FIXSessionManager::new(),
         trades_queue,
+        metrics: Metrics::new(),
     };
 
     // Initialize Prometheus metrics registry
     let metrics_registry = Arc::new(create_metrics_registry());
-    tracing::info!("[{}] Prometheus metrics enabled at /metrics", market_name());
+    tracing::info!(
+        "[{}] Prometheus metrics enabled at http://{}:{}/metrics",
+        market_name(),
+        ip,
+        port
+    );
 
     // Load initial pending orders from gRPC at startup
     {
