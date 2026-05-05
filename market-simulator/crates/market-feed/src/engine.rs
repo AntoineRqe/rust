@@ -40,26 +40,33 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         Ok(Self { fifo_in, shutdown, seq_num: 0, source: SourceSocket::new(ip, port, market_name())? })
     }
 
-    fn build_add_order_event(&self, order_event: &OrderEvent) -> AddOrder {
-        AddOrder::from_order_event(order_event)
+    fn build_add_order_event(&self, order_event: &OrderEvent, order_result: &OrderResult) -> AddOrder {
+        let mut add_order = AddOrder::from_order_event(order_event);
+        add_order.order_id = order_result.internal_order_id;
+        add_order
     }
 
-    fn build_modify_order_event(&self, order_event: &OrderEvent) -> ModifyOrder {
-        ModifyOrder::from_order_event(order_event)
+    fn build_modify_order_event(&self, order_event: &OrderEvent, order_result: &OrderResult) -> ModifyOrder {
+        let mut modify_order = ModifyOrder::from_order_event(order_event);
+        modify_order.order_id = order_result.internal_order_id;
+        modify_order
     }
 
     fn build_add_order_event_with_quantity(
         &self,
         order_event: &OrderEvent,
         quantity: types::FixedPointArithmetic,
+        order_result: &OrderResult,
     ) -> AddOrder {
-        let mut add_order = AddOrder::from_order_event(order_event);
+        let mut add_order = self.build_add_order_event(order_event, order_result);
         add_order.quantity = quantity;
         add_order
     }
 
-    fn build_delete_order_event(&self, order_event: &OrderEvent) -> DeleteOrder {
-        DeleteOrder::from_order_event(order_event)
+    fn build_delete_order_event(&self, order_event: &OrderEvent, order_result: &OrderResult) -> DeleteOrder {
+        let mut delete_order = DeleteOrder::from_order_event(order_event);
+        delete_order.order_id = order_result.internal_order_id;
+        delete_order
     }
 
     fn build_trade_events(&self, order_event: &OrderEvent, order_result: &OrderResult) -> Vec<Trade> {
@@ -89,8 +96,8 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
 
     fn build_market_data_feed_events(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<Vec<MarketEvent>> {
         if order_event.order_type == types::OrderType::CancelOrder {
-            let delete_order = self.build_delete_order_event(order_event);
-            let header = self.build_header(order_event, MessageType::DeleteOrder, 8);
+            let delete_order = self.build_delete_order_event(order_event, order_result);
+            let header = self.build_header(order_event, MessageType::DeleteOrder, 28);
             return Some(vec![MarketEvent::Delete(header, delete_order)]);
         }
 
@@ -99,8 +106,8 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         }
 
         if order_result.status == types::OrderStatus::PartiallyFilled && order_result.trades.len() == 0 {
-            let modify_order = self.build_modify_order_event(order_event);
-            let header = self.build_header(order_event, MessageType::ModifyOrder, 48);
+            let modify_order = self.build_modify_order_event(order_event, order_result);
+            let header = self.build_header(order_event, MessageType::ModifyOrder, 68);
             return Some(vec![MarketEvent::Modify(header, modify_order)]);
         }
 
@@ -120,14 +127,14 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         if order_event.order_type == types::OrderType::LimitOrder
             && remaining_qty > types::FixedPointArithmetic::ZERO
         {
-            let add_order = self.build_add_order_event_with_quantity(order_event, remaining_qty);
-            let header = self.build_header(order_event, MessageType::AddOrder, 49);
+            let add_order = self.build_add_order_event_with_quantity(order_event, remaining_qty, order_result);
+            let header = self.build_header(order_event, MessageType::AddOrder, 69);
             events.push(MarketEvent::Add(header, add_order));
         }
 
         if events.is_empty() {
-            let add_order = self.build_add_order_event(order_event);
-            let header = self.build_header(order_event, MessageType::AddOrder, 49);
+            let add_order = self.build_add_order_event(order_event, order_result);
+            let header = self.build_header(order_event, MessageType::AddOrder, 69);
             events.push(MarketEvent::Add(header, add_order));
         }
 
@@ -137,8 +144,8 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
     pub fn build_market_data_feed_from_order(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<MarketEvent> {
         if let Some(events) = self.build_market_data_feed_events(order_event, order_result) {
             events.into_iter().next().or_else(|| {
-                let add_order = self.build_add_order_event(order_event);
-                let header = self.build_header(order_event, MessageType::AddOrder, 49);
+                let add_order = self.build_add_order_event(order_event, order_result);
+                let header = self.build_header(order_event, MessageType::AddOrder, 69);
                 Some(MarketEvent::Add(header, add_order))
             })
         } else {
@@ -316,7 +323,7 @@ mod tests {
         let timestamp_ns = header.timestamp_ns;
         let symbol = header.symbol;
 
-        assert_eq!(length, 24 + payload_len);
+        assert_eq!(length, 24 + payload_len, "Header length mismatch: expected {} + 24 = {}, got {}", payload_len, 24 + payload_len, length);
         assert_eq!(header_msg_type, msg_type as u8);
         assert_eq!(version, 1);
         assert_eq!(seq_num, expected_seq_num);
@@ -351,6 +358,7 @@ mod tests {
         };
 
         let order_result = OrderResult {
+            internal_order_id: 111222,
             status: types::OrderStatus::PartiallyFilled,
             ..OrderResult::default()
         };
@@ -358,13 +366,13 @@ mod tests {
         let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
         match event {
             MarketEvent::Modify(header, modify_order) => {
-                assert_header_fields(&header, &order_event, MessageType::ModifyOrder, 48, 0);
+                assert_header_fields(&header, &order_event, MessageType::ModifyOrder, 68, 0);
 
                 let order_id = modify_order.order_id;
                 let new_price = modify_order.new_price;
                 let new_quantity = modify_order.new_quantity;
 
-                assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
+                assert_eq!(order_id, 111222);
                 assert_eq!(new_price, order_event.price);
                 assert_eq!(new_quantity, order_event.quantity);
             }
@@ -388,6 +396,7 @@ mod tests {
         };
 
         let order_result = OrderResult {
+            internal_order_id: 999888,
             status: types::OrderStatus::Cancelled,
             ..OrderResult::default()
         };
@@ -396,9 +405,9 @@ mod tests {
 
         match event {
             MarketEvent::Delete(header, delete_order) => {
-                assert_header_fields(&header, &order_event, MessageType::DeleteOrder, 8, 0);
+                assert_header_fields(&header, &order_event, MessageType::DeleteOrder, 28, 0);
                 let order_id = delete_order.order_id;
-                assert_eq!(order_id, stable_u64_from_fixed_20(&OrderId::from_ascii("orig1234").0));
+                assert_eq!(order_id, 999888);
             }
             _ => panic!("Expected DeleteOrder event"),
         }
@@ -442,7 +451,7 @@ mod tests {
         let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
         match event {
             MarketEvent::Trade(header, trade) => {
-                assert_header_fields(&header, &order_event, MessageType::Trade, 49, 0);
+                assert_header_fields(&header, &order_event, MessageType::Trade, 89, 0);
 
                 let side = trade.side;
                 let trade_id = trade.trade_id;
@@ -471,7 +480,7 @@ mod tests {
         };
 
         let order_result = OrderResult {
-            internal_order_id: 0,
+            internal_order_id: 777888,
             trades: types::Trades::default(),
             status: types::OrderStatus::Filled,
             ..Default::default()
@@ -479,7 +488,7 @@ mod tests {
 
         let (header, event) = run_engine_once_and_receive(order_event, order_result);
 
-        assert_header_fields(&header, &order_event, MessageType::AddOrder, 49, 0);
+        assert_header_fields(&header, &order_event, MessageType::AddOrder, 69, 0);
         match event {
             MarketEvent::Add(_, add_order) => {
                 let order_id = add_order.order_id;
@@ -487,7 +496,7 @@ mod tests {
                 let price = add_order.price;
                 let quantity = add_order.quantity;
 
-                assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
+                assert_eq!(order_id, 777888);
                 assert_eq!(side, 1);
                 assert_eq!(price, order_event.price);
                 assert_eq!(quantity, order_event.quantity);
@@ -510,19 +519,20 @@ mod tests {
         };
 
         let order_result = OrderResult {
+            internal_order_id: 444555,
             status: types::OrderStatus::PartiallyFilled,
             ..OrderResult::default()
         };
 
         let (header, event) = run_engine_once_and_receive(order_event, order_result);
-        assert_header_fields(&header, &order_event, MessageType::ModifyOrder, 48, 0);
+        assert_header_fields(&header, &order_event, MessageType::ModifyOrder, 68, 0);
         match event {
             MarketEvent::Modify(_, modify_order) => {
                 let order_id = modify_order.order_id;
                 let new_price = modify_order.new_price;
                 let new_quantity = modify_order.new_quantity;
 
-                assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
+                assert_eq!(order_id, 444555);
                 assert_eq!(new_price, order_event.price);
                 assert_eq!(new_quantity, order_event.quantity);
             }
@@ -541,12 +551,18 @@ mod tests {
             ..Default::default()
         };
 
-        let (header, event) = run_engine_once_and_receive(order_event, OrderResult::default());
-        assert_header_fields(&header, &order_event, MessageType::DeleteOrder, 8, 0);
+        let order_result = OrderResult {
+            internal_order_id: 666777,
+            status: types::OrderStatus::Cancelled,
+            ..Default::default()
+        };
+
+        let (header, event) = run_engine_once_and_receive(order_event, order_result);
+        assert_header_fields(&header, &order_event, MessageType::DeleteOrder, 28, 0);
         match event {
             MarketEvent::Delete(_, delete_order) => {
                 let order_id = delete_order.order_id;
-                assert_eq!(order_id, stable_u64_from_fixed_20(&OrderId::from_ascii("orig1234").0));
+                assert_eq!(order_id, 666777);
             }
             _ => panic!("Expected DeleteOrder event"),
         }
@@ -577,14 +593,14 @@ mod tests {
             .unwrap();
 
         let order_result = OrderResult {
-            internal_order_id: 0,
+            internal_order_id: 888999,
             trades,
             status: types::OrderStatus::Filled,
             ..Default::default()
         };
 
         let (header, event) = run_engine_once_and_receive(order_event, order_result);
-        assert_header_fields(&header, &order_event, MessageType::Trade, 49, 0);
+        assert_header_fields(&header, &order_event, MessageType::Trade, 89, 0);
         match event {
             MarketEvent::Trade(_, trade) => {
                 let side = trade.side;

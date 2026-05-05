@@ -324,6 +324,8 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
 
     match cmd {
         BrowserCommand::Order { clord_id, symbol, qty, price, side, sender, target } => {
+            let order_start_time = std::time::Instant::now();
+            
             tracing::info!("[{}] Browser order: {} {} {} @ {}",
                 market_name(),
                 if side == "1" { "BUY" } else { "SELL" },
@@ -348,7 +350,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                         let available_tokens = player.tokens - reserved_notional;
                         if available_tokens + 1e-9 < required_notional {
                             state.bus.publish(WsEvent::FixMessage {
-                                label: "REJECTED ✕".into(),
+                                label: format!("REJECTED ✕ [{}]", clord_id),
                                 body: format!(
                                     "Insufficient tokens for BUY order: required {:.2}, available {:.2}.",
                                     required_notional,
@@ -384,7 +386,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                             let available_qty = (owned_qty - reserved_sell_qty).max(0.0);
                             if available_qty + 1e-9 < qty {
                                 state.bus.publish(WsEvent::FixMessage {
-                                    label: "REJECTED ✕".into(),
+                                    label: format!("REJECTED ✕ [{}]", clord_id),
                                     body: format!(
                                         "Insufficient equity inventory for SELL {}: required {:.0}, available {:.0}.",
                                         normalized_symbol,
@@ -420,8 +422,12 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 price,
             }).await;
 
-            // Track the order event for metrics
+            // Track the order event for metrics and latency
             state.metrics.order_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let order_elapsed_ms = order_start_time.elapsed().as_millis() as u64;
+            if let Ok(mut samples) = state.metrics.order_latency_ms.lock() {
+                samples.push(order_elapsed_ms);
+            }
 
             let fix_bytes = build_new_order_single(
                 &sender_id, &target_id, &symbol,
@@ -447,6 +453,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 state.player_client.clone(),
                 &state.bus,
                 state.metrics.clone(),
+                state.order_book.clone(),
             ) {
                 Ok(writer) => {
                     let mut writer_guard = writer.lock().await;
@@ -510,6 +517,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 state.player_client.clone(),
                 &state.bus,
                 state.metrics.clone(),
+                state.order_book.clone(),
             ) {
                 Ok(writer) => {
                     let mut writer_guard = writer.lock().await;

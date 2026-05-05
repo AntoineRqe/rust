@@ -310,6 +310,13 @@ impl SymbolOrderBook {
             })
             .collect()
     }
+
+    pub fn all_orders(&self) -> Vec<(&u64, &L3Order)> {
+        let mut orders = Vec::new();
+        orders.extend(self.bids.iter());
+        orders.extend(self.asks.iter());
+        orders
+    }
 }
 
 /// Global order book state, indexed by symbol.

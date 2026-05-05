@@ -161,7 +161,7 @@ impl PlayerStore {
         }
     }
 
-    #[cfg(test)]
+     #[cfg(test)]
     fn from_storage_data(storage: StorageData) -> Self {
         PlayerStore {
             inner: Arc::new(Mutex::new(StoreInner {
@@ -696,10 +696,16 @@ mod tests {
             total_visitor_count: 0,
         });
 
+        // Status 0 (New): Deduct tokens for BUY order
+        let buyer_new = "35=8 │ 39=0 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 44=100 │ 38=5 │ 151=5 │ 17=E-BUY-0";
+        assert!(store.apply_fix_execution_report(buyer_new));
+
+        // Status 2 (Filled): Execute the fill (tokens already deducted)
         let buyer_fill =
             "35=8 │ 39=2 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-BUY-1";
         assert!(store.apply_fix_execution_report(buyer_fill));
 
+        // Status 2 (Filled): SELL order execution (credit tokens)
         let seller_fill =
             "35=8 │ 39=2 │ 11=ALICESELL1 │ 54=2 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-SELL-1";
         assert!(store.apply_fix_execution_report(seller_fill));
@@ -707,8 +713,11 @@ mod tests {
         let alice = store.get_player("alice").expect("alice exists");
         let bob = store.get_player("bob").expect("bob exists");
 
-        assert!((alice.tokens - 10500.0).abs() < 1e-9);
-        assert!((bob.tokens - 9500.0).abs() < 1e-9);
+        // Alice: started with 10000, filled 5 @ 100 (SELL) = +500 → 10500
+        assert!((alice.tokens - 10500.0).abs() < 1e-9, "alice tokens: {}", alice.tokens);
+        
+        // Bob: started with 10000, deducted 5*100=500 on status=0 → 9500
+        assert!((bob.tokens - 9500.0).abs() < 1e-9, "bob tokens: {}", bob.tokens);
 
         let owners = store.get_order_owners();
         assert!(!owners.contains_key("ALICESELL1"));

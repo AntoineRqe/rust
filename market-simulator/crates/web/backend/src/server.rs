@@ -40,6 +40,12 @@ pub struct Metrics {
     pub trades: Arc<AtomicUsize>,
     /// Total cancel orders submitted
     pub cancel_orders: Arc<AtomicUsize>,
+    /// Login latency histogram (milliseconds)
+    pub login_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Order submission latency histogram (milliseconds)
+    pub order_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Execution latency histogram (milliseconds)
+    pub execution_latency_ms: Arc<Mutex<Vec<u64>>>,
 }
 
 impl Metrics {
@@ -52,6 +58,9 @@ impl Metrics {
             order_events: Arc::new(AtomicUsize::new(0)),
             trades: Arc::new(AtomicUsize::new(0)),
             cancel_orders: Arc::new(AtomicUsize::new(0)),
+            login_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            order_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            execution_latency_ms: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

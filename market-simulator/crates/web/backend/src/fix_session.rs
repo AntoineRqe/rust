@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -18,7 +18,51 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::player_client::PlayerClient;
 use crate::state::{EventBus, WsEvent};
 use crate::server::Metrics;
+use crate::order_book::OrderBookState;
 use utils::market_name;
+
+/// Debounces OrderBook snapshot publishes to reduce bandwidth.
+/// Batches updates: publishes when 50ms has elapsed OR 5 orders processed, whichever first.
+#[derive(Default)]
+struct OrderBookDebouncer {
+    /// Symbols with dirty (changed) order books
+    dirty_symbols: std::collections::HashSet<String>,
+    /// Last publication time per symbol
+    last_publish_time: HashMap<String, Instant>,
+    /// Orders processed since last publish
+    orders_since_publish: usize,
+}
+
+impl OrderBookDebouncer {
+    fn mark_dirty(&mut self, symbol: &str) {
+        self.dirty_symbols.insert(symbol.to_string());
+    }
+
+    fn should_publish(&self, symbol: &str, now: Instant) -> bool {
+        if !self.dirty_symbols.contains(symbol) {
+            return false;
+        }
+        
+        let last_publish = self.last_publish_time.get(symbol);
+        let time_elapsed = match last_publish {
+            Some(last) => now.duration_since(*last),
+            None => Duration::from_millis(100), // Force publish on first update
+        };
+
+        // Publish if 50ms elapsed OR 5 orders processed
+        time_elapsed >= Duration::from_millis(50) || self.orders_since_publish >= 5
+    }
+
+    fn publish(&mut self, symbol: &str, now: Instant) {
+        self.dirty_symbols.remove(symbol);
+        self.last_publish_time.insert(symbol.to_string(), now);
+        self.orders_since_publish = 0;
+    }
+
+    fn increment_order_count(&mut self) {
+        self.orders_since_publish += 1;
+    }
+}
 
 // ── Session ───────────────────────────────────────────────────────────────────
 
@@ -53,6 +97,7 @@ impl FIXSessionManager {
     ///   execution report received, regardless of WebSocket state.
     /// - Publishing every received message to the event bus so connected
     ///   browser clients can display it.
+    /// - Updating the backend order book from ExecutionReport fields.
     ///
     /// Returns `Err` if a new TCP connection could not be established.
     pub fn get_or_create_session(
@@ -62,6 +107,7 @@ impl FIXSessionManager {
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         bus: &EventBus,
         metrics: Metrics,
+        order_book: Arc<Mutex<OrderBookState>>,
     ) -> Result<Arc<AsyncMutex<OwnedWriteHalf>>, std::io::Error> {
         let mut sessions = self.inner.lock().unwrap();
 
@@ -92,12 +138,14 @@ impl FIXSessionManager {
             let bus = bus.clone();
             let sessions_ref = Arc::clone(&self.inner);
             let metrics = metrics.clone();
+            let order_book = order_book.clone();
 
             // Spawn the background reader task for this session.
             tokio::spawn(async move {
                 let mut reader = reader;
                 let mut buf = [0u8; 4096];
                 let mut stream_buf: Vec<u8> = Vec::with_capacity(8192);
+                let mut debouncer = OrderBookDebouncer::default();
 
                 tracing::info!(
                     "[{}] FIX session reader started for '{username}'",
@@ -120,6 +168,7 @@ impl FIXSessionManager {
                             stream_buf.extend_from_slice(&buf[..n]);
                             for raw_msg in extract_fix_messages(&mut stream_buf) {
                                 let body = pretty_fix(&raw_msg);
+                                let exec_start_time = std::time::Instant::now();
 
                                 // Apply execution report via gRPC to player service
                                 let mut client = player_client.lock().await;
@@ -130,6 +179,42 @@ impl FIXSessionManager {
                                     );
                                 }
                                 drop(client); // Release lock before publishing
+
+                                // Update backend order book from ExecutionReport
+                                if let Some(exec_data) = parse_execution_report(&body) {
+                                    update_backend_order_book_from_exec_report(
+                                        &exec_data,
+                                        &order_book,
+                                    );
+
+                                    // Mark symbol as dirty (debounced publish)
+                                    debouncer.mark_dirty(&exec_data.symbol);
+                                    debouncer.increment_order_count();
+
+                                    // Publish if debounce conditions met (50ms elapsed OR 5 orders)
+                                    let now = Instant::now();
+                                    if debouncer.should_publish(&exec_data.symbol, now) {
+                                        let book = order_book.lock().unwrap();
+                                        if let Some(symbol_book) = book.get(&exec_data.symbol) {
+                                            bus.publish(WsEvent::OrderBook {
+                                                symbol: exec_data.symbol.clone(),
+                                                bids: symbol_book.l3_bids_sorted(),
+                                                asks: symbol_book.l3_asks_sorted(),
+                                                timestamp_ms: std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_millis() as u64)
+                                                    .unwrap_or(0),
+                                            });
+                                        }
+                                        debouncer.publish(&exec_data.symbol, now);
+                                    }
+                                }
+
+                                // Track execution latency
+                                let exec_elapsed_ms = exec_start_time.elapsed().as_millis() as u64;
+                                if let Ok(mut samples) = metrics.execution_latency_ms.lock() {
+                                    samples.push(exec_elapsed_ms);
+                                }
 
                                 // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
                                 if is_trade_execution(&body) {
@@ -159,7 +244,23 @@ impl FIXSessionManager {
                             break;
                         }
                         Err(_) => {
-                            // Timeout is expected on idle - just continue
+                            // Timeout is expected on idle - flush any pending dirty symbols
+                            let now = Instant::now();
+                            for symbol in debouncer.dirty_symbols.iter().cloned().collect::<Vec<_>>() {
+                                let book = order_book.lock().unwrap();
+                                if let Some(symbol_book) = book.get(&symbol) {
+                                    bus.publish(WsEvent::OrderBook {
+                                        symbol: symbol.clone(),
+                                        bids: symbol_book.l3_bids_sorted(),
+                                        asks: symbol_book.l3_asks_sorted(),
+                                        timestamp_ms: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as u64)
+                                            .unwrap_or(0),
+                                    });
+                                }
+                                debouncer.publish(&symbol, now);
+                            }
                         }
                     }
                 }
@@ -278,6 +379,7 @@ pub fn classify_fix_msg(raw: &[u8]) -> String {
 
     match msg_type {
         "8" => "◀ EXEC REPORT (8)".into(),
+        "9" => "◀ CANCEL REJECT (9)".into(),
         "W" => "◀ MD SNAPSHOT (W)".into(),
         "X" => "◀ MD INCREMENTAL (X)".into(),
         "Y" => "◀ MD REJECT (Y)".into(),
@@ -303,4 +405,199 @@ fn is_trade_execution(body: &str) -> bool {
     // ExecType=F means a trade was executed
     // The pretty_fix format contains fields like "150=F" for ExecType
     body.contains("150=F") || body.contains("ExecType=F")
+}
+
+/// ExecutionReport data extracted from FIX message
+#[derive(Debug, Clone)]
+struct ExecReportData {
+    order_id: u64,       // FIX field 11
+    cl_ord_id: String,   // FIX field 41
+    symbol: String,      // FIX field 55
+    side: u8,            // FIX field 54
+    ord_status: u8,      // FIX field 39 (0=New, 1=PartialFill, 2=Fill, 3=DoneForDay, 4=Canceled)
+    price: f64,          // FIX field 44
+    qty: f64,            // FIX field 38
+    leaves_qty: f64,     // FIX field 151
+}
+
+/// Extract a single FIX field value from pretty_fix format.
+/// Example: "35=8 | 11=ORDER123" -> extract_field("11") -> Some("ORDER123")
+fn extract_field(body: &str, field_num: &str) -> Option<String> {
+    // Split by | and find the field
+    for part in body.split('│').chain(body.split('|')) {
+        let trimmed = part.trim();
+        if let Some(value) = trimmed.strip_prefix(&format!("{}=", field_num)) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Parse ExecutionReport FIX message and extract relevant fields for order book update.
+fn parse_execution_report(body: &str) -> Option<ExecReportData> {
+    // Only process execution reports (35=8)
+    if !body.contains("35=8") {
+        return None;
+    }
+
+    let order_id = extract_field(body, "11")?.parse::<u64>().ok()?;
+    let cl_ord_id = extract_field(body, "41")?;
+    let symbol = extract_field(body, "55")?;
+    let side = extract_field(body, "54")?.parse::<u8>().ok()?;
+    let ord_status = extract_field(body, "39")?.parse::<u8>().ok()?;
+    let price = extract_field(body, "44")?.parse::<f64>().ok()?;
+    let qty = extract_field(body, "38")?.parse::<f64>().ok()?;
+    let leaves_qty = extract_field(body, "151")?.parse::<f64>().ok()?;
+
+    Some(ExecReportData {
+        order_id,
+        cl_ord_id,
+        symbol,
+        side,
+        ord_status,
+        price,
+        qty,
+        leaves_qty,
+    })
+}
+
+/// Update backend order book based on ExecutionReport status.
+fn update_backend_order_book_from_exec_report(
+    exec: &ExecReportData,
+    order_book: &Arc<Mutex<OrderBookState>>,
+) {
+    let mut book = order_book.lock().unwrap();
+    let symbol_book = book.get_or_create(&exec.symbol);
+
+    match exec.ord_status {
+        0 => {
+            // New: add or update order
+            symbol_book.add_or_update_order(
+                exec.order_id,
+                exec.side,
+                exec.price,
+                exec.qty,
+                Some(exec.cl_ord_id.clone()),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            );
+        }
+        1 => {
+            // PartialFill: update qty to leaves_qty
+            symbol_book.modify_order(
+                exec.order_id,
+                exec.price,
+                exec.leaves_qty,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            );
+        }
+        2 | 3 | 4 => {
+            // Filled (2), DoneForDay (3), Canceled (4): remove from order book
+            symbol_book.delete_order(
+                exec.order_id,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            );
+        }
+        _ => {}  // Unknown status, ignore
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_field_pretty_fix_format() {
+        let msg = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100";
+        assert_eq!(extract_field(msg, "35"), Some("8".to_string()));
+        assert_eq!(extract_field(msg, "11"), Some("5544843609372783994".to_string()));
+        assert_eq!(extract_field(msg, "41"), Some("ARETEST988945002".to_string()));
+        assert_eq!(extract_field(msg, "39"), Some("0".to_string()));
+        assert_eq!(extract_field(msg, "55"), Some("AAPL".to_string()));
+        assert_eq!(extract_field(msg, "54"), Some("1".to_string()));
+        assert_eq!(extract_field(msg, "44"), Some("150.25".to_string()));
+        assert_eq!(extract_field(msg, "38"), Some("100".to_string()));
+        assert_eq!(extract_field(msg, "999"), None);  // Non-existent field
+    }
+
+    #[test]
+    fn test_parse_execution_report_new_order() {
+        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
+        
+        let exec_data = parse_execution_report(body);
+        assert!(exec_data.is_some());
+        
+        let data = exec_data.unwrap();
+        assert_eq!(data.order_id, 5544843609372783994);
+        assert_eq!(data.cl_ord_id, "ARETEST988945002");
+        assert_eq!(data.symbol, "AAPL");
+        assert_eq!(data.side, 1);
+        assert_eq!(data.ord_status, 0);  // New
+        assert_eq!(data.price, 150.25);
+        assert_eq!(data.qty, 100.0);
+        assert_eq!(data.leaves_qty, 100.0);
+    }
+
+    #[test]
+    fn test_parse_execution_report_partial_fill() {
+        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=1 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=50";
+        
+        let data = parse_execution_report(body).unwrap();
+        assert_eq!(data.ord_status, 1);  // PartialFill
+        assert_eq!(data.leaves_qty, 50.0);
+    }
+
+    #[test]
+    fn test_parse_execution_report_filled() {
+        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=2 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=0";
+        
+        let data = parse_execution_report(body).unwrap();
+        assert_eq!(data.ord_status, 2);  // Filled
+        assert_eq!(data.leaves_qty, 0.0);
+    }
+
+    #[test]
+    fn test_parse_execution_report_canceled() {
+        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=4 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
+        
+        let data = parse_execution_report(body).unwrap();
+        assert_eq!(data.ord_status, 4);  // Canceled
+    }
+
+    #[test]
+    fn test_parse_non_execution_report_message() {
+        let body = "35=A │ 49=CLIENT │ 56=SERVER";  // Logon message, not exec report
+        
+        let exec_data = parse_execution_report(body);
+        assert!(exec_data.is_none());
+    }
+
+    #[test]
+    fn test_parse_execution_report_missing_fields() {
+        // Missing field 151 (leaves_qty)
+        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100";
+        
+        let exec_data = parse_execution_report(body);
+        assert!(exec_data.is_none());  // Missing required field
+    }
+
+    #[test]
+    fn test_is_trade_execution_with_field_150() {
+        let msg_with_trade = "35=8 │ 11=123 │ 41=ORDER1 │ 150=F │ 55=AAPL";
+        assert!(is_trade_execution(msg_with_trade));
+    }
+
+    #[test]
+    fn test_is_trade_execution_without_trade() {
+        let msg_without_trade = "35=8 │ 11=123 │ 41=ORDER1 │ 39=0 │ 55=AAPL";
+        assert!(!is_trade_execution(msg_without_trade));
+    }
 }

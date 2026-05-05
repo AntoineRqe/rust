@@ -62,6 +62,8 @@ pub async fn api_login_handler(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    let start_time = std::time::Instant::now();
+    
     // Track login attempt
     state.metrics.login_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     
@@ -73,6 +75,13 @@ pub async fn api_login_handler(
             Ok(auth_result) => {
                 // Track successful login
                 state.metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                
+                // Record latency sample (milliseconds)
+                let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+                    samples.push(elapsed_ms);
+                }
+                
                 tracing::info!("[{}] Admin authenticated", market_name());
                 return (
                     StatusCode::OK,
@@ -87,6 +96,13 @@ pub async fn api_login_handler(
             Err(e) => {
                 // Track failed login
                 state.metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                
+                // Record latency sample even for failures (milliseconds)
+                let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+                    samples.push(elapsed_ms);
+                }
+                
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -102,6 +118,13 @@ pub async fn api_login_handler(
         Ok(auth_result) => {
             // Track successful login
             state.metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            
+            // Record latency sample (milliseconds)
+            let elapsed_ms = start_time.elapsed().as_millis() as u64;
+            if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+                samples.push(elapsed_ms);
+            }
+            
             tracing::info!("[{}] Player '{}' authenticated", market_name(), auth_result.username);
             (
                 StatusCode::OK,
@@ -116,6 +139,13 @@ pub async fn api_login_handler(
         Err(e) => {
             // Track failed login
             state.metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            
+            // Record latency sample even for failures (milliseconds)
+            let elapsed_ms = start_time.elapsed().as_millis() as u64;
+            if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+                samples.push(elapsed_ms);
+            }
+            
             (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({

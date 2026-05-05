@@ -514,6 +514,7 @@ let lastTokenBalance = null;
 const currentHoldings = {}; // symbol -> { quantity, avgPrice }
 const orderOwners = {}; // cl_ord_id -> username
 const orderOwnersByOrderId = {}; // order_id(string) -> username
+const orderIdToBookLocation = {}; // order_id(string) -> { market, price, side }
 let playerStateTimer = null;    // debounce handle for handlePlayerState
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
@@ -743,6 +744,7 @@ const book = {
 const openOrders = {}; // clordId → {symbol, qty, price, side}
 const openOrderFirstSeen = {}; // clordId → first-seen timestamp (ms)
 const orderTimeouts = {}; // clordId → timeout handle
+const orderTerminalStatus = {}; // clordId → terminal status (2,3,4,8,C) - once set, order won't be re-added from player_state
 
 // chart history
 let chartPts = [], lastTradeCount = 0;
@@ -1222,6 +1224,17 @@ function handleServerEvent(msg, marketName) {
     case 'fix_message':
       updateBookFromFix(msg.body, msg.tag, marketName);
       appendLog({ ts: now(), label: msg.label, body: msg.body, tag: msg.tag });
+      // Clean up rejected orders from UI
+      if (msg.tag === 'err' && msg.label && msg.label.includes('REJECTED')) {
+        const match = msg.label.match(/\[([^\]]+)\]/);
+        if (match) {
+          const clordId = match[1];
+          cleanupOrderState(clordId);
+          renderOrders(null, true);
+        }
+        // Request updated player state to show current token balance
+        requestPlayerState();
+      }
       if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
         resetClientMarketView(marketName);
       }
@@ -1246,9 +1259,55 @@ function applyOrderBookSnapshot(msg, marketName) {
   const market = markets[mn];
   if (!market) return;
 
+  console.log(`[BOOK SNAPSHOT] Received snapshot for ${mn}:`, { 
+    bidCount: (msg.bids || []).length, 
+    askCount: (msg.asks || []).length,
+    terminalStatuses: Object.keys(orderTerminalStatus),
+    trackingLocations: Object.keys(orderIdToBookLocation)
+  });
+
   market.book.symbol = msg.symbol || market.book.symbol;
-  market.book.bids = Array.isArray(msg.bids) ? msg.bids : [];
-  market.book.asks = Array.isArray(msg.asks) ? msg.asks : [];
+  
+  // Filter out orders with terminal status before applying snapshot
+  const filterTerminal = (rows, side) => {
+    const filtered = (Array.isArray(rows) ? rows : []).filter(row => {
+      const clOrdId = String((row && row.cl_ord_id) || '').trim();
+      const orderId = String((row && row.order_id) || '').trim();
+      const price = Number(row && row.price);
+      
+      // Check by clOrdId or orderId if present
+      if (clOrdId && orderTerminalStatus[clOrdId]) {
+        console.log(`[BOOK SNAPSHOT] Filtered out clOrdId ${clOrdId} - has terminal status`);
+        return false;
+      }
+      if (orderId && orderTerminalStatus[orderId]) {
+        console.log(`[BOOK SNAPSHOT] Filtered out orderId ${orderId} - has terminal status`);
+        return false;
+      }
+      
+      // Also check by price: if this price level has a tracked cancelled order, filter it
+      if (price > 0) {
+        for (const [trackId, location] of Object.entries(orderIdToBookLocation)) {
+          if (location.market === mn && 
+              Number(location.price) === price && 
+              location.side === String(side) &&
+              orderTerminalStatus[trackId]) {
+            console.log(`[BOOK SNAPSHOT] Filtered out row at price ${price} (tracked order ${trackId} has terminal status '${orderTerminalStatus[trackId]}')`);
+            return false;
+          }
+        }
+      }
+      
+      return true;
+    });
+    console.log(`[BOOK SNAPSHOT] Filtered ${side === '1' ? 'bids' : 'asks'}: ${rows.length} -> ${filtered.length}`);
+    return filtered;
+  };
+  
+  market.book.bids = filterTerminal(msg.bids, '1');
+  market.book.asks = filterTerminal(msg.asks, '2');
+  
+  console.log(`[BOOK SNAPSHOT] After filtering: bids=${market.book.bids.length}, asks=${market.book.asks.length}`);
 
   mergeClientOpenOrdersFromBook(mn, market.book.symbol);
 
@@ -1318,6 +1377,7 @@ function isOrderOwnedByCurrentUser(clordId) {
 }
 
 function mergeClientOpenOrdersFromBook(marketName, symbol) {
+  console.log(`[MERGE BOOK] Starting for market=${marketName}, currentOpenOrders=${Object.keys(openOrders).length}`);
   const mn = normalizeMarketName(marketName);
   const market = markets[mn];
   if (!market) return;
@@ -1341,9 +1401,38 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
   });
 
   const mergeRows = (rows, side) => {
-    (rows || []).forEach(row => {
-      const clOrdId = String((row && row.cl_ord_id) || '').trim();
-      const orderId = String((row && row.order_id) || '').trim();
+    (rows || []).forEach((row, idx) => {
+      let clOrdId = String((row && row.cl_ord_id) || '').trim();
+      let orderId = String((row && row.order_id) || '').trim();
+      
+      // If orderId is empty, try to find it from orderIdToBookLocation by price
+      if (!orderId && row && row.price) {
+        const price = Number(row.price);
+        for (const [trackId, location] of Object.entries(orderIdToBookLocation)) {
+          if (location.market === mn && Number(location.price) === price && location.side === String(side)) {
+            orderId = trackId;
+            row.order_id = trackId;  // Enrich the row so future lookups work
+            console.log(`[MERGE BOOK] Enriched row #${idx} at price ${price} with orderId ${orderId}`);
+            break;
+          }
+        }
+      }
+      
+      // Don't re-add orders that have already reached terminal status
+      // Check BOTH clOrdId and orderId because they might be different IDs for the same order
+      const termStatClOrd = orderTerminalStatus[clOrdId] || null;
+      const termStatOrdId = orderTerminalStatus[orderId] || null;
+      console.log(`[MERGE BOOK] Row #${idx}: clOrdId='${clOrdId}', orderId='${orderId}', termStatus[clOrd]=${termStatClOrd}, termStatus[ordId]=${termStatOrdId}, allTermStatuses=${JSON.stringify(Object.keys(orderTerminalStatus))}`);
+      
+      if (clOrdId && termStatClOrd) {
+        console.log(`[MERGE BOOK] >>SKIP<< clOrdId ${clOrdId} - has terminal status ${termStatClOrd}`);
+        return;
+      }
+      if (orderId && termStatOrdId) {
+        console.log(`[MERGE BOOK] >>SKIP<< orderId ${orderId} - has terminal status ${termStatOrdId}`);
+        return;
+      }
+      
       const ownerMeta = makerMetaFromOrderRow(row);
       const ownerByOrderId = orderId ? String(orderOwnersByOrderId[orderId] || '').trim().toLowerCase() : '';
       const ownerByClOrd = clOrdId
@@ -1384,8 +1473,15 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
         market: mn,
         source: 'book',
         cl_ord_id: clOrdId || null,
+        order_id: orderId || null,
         cancelable: !!clOrdId,
       };
+      console.log(`[MERGE BOOK] Added ${openOrderKey} from book (qty=${qty}, price=${price})`);
+      
+      // Map orderId to its book location for removal later
+      if (orderId) {
+        orderIdToBookLocation[orderId] = { market: mn, price: Number(price), side: String(side) };
+      }
 
       if (!openOrderFirstSeen[openOrderKey]) {
         openOrderFirstSeen[openOrderKey] = Date.now();
@@ -1403,10 +1499,12 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
     if (order.source !== 'book') return;
     if (presentOwnedIds.has(clOrdId)) return;
 
+    console.log(`[MERGE BOOK] Removing ${clOrdId} from openOrders (no longer in book)`);
     delete openOrders[clOrdId];
     delete openOrderFirstSeen[clOrdId];
   });
 
+  console.log(`[MERGE BOOK] Complete - openOrders now has ${Object.keys(openOrders).length} orders`);
   if (mn === getPrimaryMarketName()) {
     renderOrders(null, true);
   }
@@ -1526,6 +1624,11 @@ function handlePlayerState(msg) {
   const pending = Array.isArray(msg.pending_orders) ? msg.pending_orders : [];
   pending.forEach(o => {
     if (!o || !o.cl_ord_id) return;
+    // Don't re-add orders that have reached a terminal status (2,3,4,8,C)
+    // This prevents stale player_state from overriding terminal FIX updates
+    if (orderTerminalStatus[o.cl_ord_id]) {
+      return;
+    }
     clearPendingTimeout(o.cl_ord_id);
     nextOpenOrders[o.cl_ord_id] = {
       symbol: o.symbol || '',
@@ -1571,6 +1674,15 @@ function handlePlayerState(msg) {
 
   Object.keys(nextOpenOrders).forEach(id => {
     openOrders[id] = nextOpenOrders[id];
+  });
+
+  // Also remove orders that have reached terminal status but might still be in openOrders
+  Object.keys(orderTerminalStatus).forEach(id => {
+    if (nextOpenOrders[id]) return; // Already handled above
+    if (openOrders[id]) {
+      delete openOrders[id];
+      delete openOrderFirstSeen[id];
+    }
   });
 
   mergeClientOpenOrdersFromBook(primaryMarketName, (markets[primaryMarketName] && markets[primaryMarketName].book.symbol) || 'AAPL');
@@ -2079,6 +2191,8 @@ function renderOrders(marketName, immediate = false) {
     const firstSeen = openOrderFirstSeen[id] || nowMs;
     return (nowMs - firstSeen) >= PENDING_VISIBILITY_DELAY_MS;
   });
+  
+  console.log(`[RENDER ORDERS] Rendering ${orderIds.length} orders:`, orderIds.map(id => ({ id, terminalStatus: orderTerminalStatus[id] || 'none' })));
 
   const hiddenIds = Object.keys(openOrders).filter(id => {
     if (orderIds.includes(id)) return false;
@@ -2122,8 +2236,10 @@ function renderOrders(marketName, immediate = false) {
 }
 
 function cancelOrder(clordId, symbol, qty, marketName) {
+  console.log(`[CANCEL ORDER] User clicked cancel for ${clordId}`);
   clearPendingTimeout(clordId);
   send({ action: 'cancel', clord_id: clordId, symbol, qty }, normalizeMarketName(marketName || getPrimaryMarketName()));
+  console.log(`[CANCEL ORDER] Deleting ${clordId} from openOrders (before send)`);
   delete openOrders[clordId];
   delete openOrderFirstSeen[clordId];
   renderOrders(null, true);
@@ -2324,6 +2440,36 @@ function rmQtyForMarket(market, side, price, qty) {
   }
 }
 
+function removeOrderFromMarketBook(market, clordId) {
+  if (!clordId) return;
+  
+  // Try to find location from the mapping (orderId -> price)
+  const location = orderIdToBookLocation[clordId];
+  if (location && location.market === market.name) {
+    const levels = location.side === '1' ? (market.book.bids || []) : (market.book.asks || []);
+    const idx = levels.findIndex(row => Number(row.price) === Number(location.price));
+    if (idx >= 0) {
+      console.log(`[BOOK CLEANUP] Removed orderId ${clordId} from ${location.side === '1' ? 'bids' : 'asks'} at price ${location.price}`);
+      levels.splice(idx, 1);
+      delete orderIdToBookLocation[clordId];
+      return;
+    }
+  }
+  
+  // Fallback: search by cl_ord_id in both bids and asks
+  ['bids', 'asks'].forEach(side => {
+    const levels = market.book[side] || [];
+    const idx = levels.findIndex(row => {
+      const rowClOrd = String(row.cl_ord_id || '').trim();
+      return rowClOrd === clordId;
+    });
+    if (idx >= 0) {
+      console.log(`[BOOK CLEANUP] Removed clOrdId ${clordId} from ${side}`);
+      levels.splice(idx, 1);
+    }
+  });
+}
+
 function addQtyForMarket(market, side, price, qty) {
   const levels = side === '1' ? (market.book.bids || []) : (market.book.asks || []);
   const idx = levels.findIndex(level => Number(level.price) === Number(price));
@@ -2360,15 +2506,35 @@ function applyOrderLeavesForMarket(market, clordId, side, price, newLeaves) {
 
 function cleanupOrderStateForMarket(market, clordId) {
   if (!clordId) return;
+  
+  // clordId might be orderId or clOrdId depending on the message source
+  // Try direct match first
+  if (openOrders[clordId]) {
+    delete openOrders[clordId];
+    delete openOrderFirstSeen[clordId];
+  } else {
+    // Search for order by order_id if clordId didn't match
+    const matchingKey = Object.keys(openOrders).find(key => {
+      const order = openOrders[key];
+      return order && (order.order_id === clordId || order.cl_ord_id === clordId);
+    });
+    if (matchingKey) {
+      delete openOrders[matchingKey];
+      delete openOrderFirstSeen[matchingKey];
+    }
+  }
+  
   delete market.book.pending[clordId];
   delete market.book.orderState[clordId];
-  delete openOrders[clordId];
-  delete openOrderFirstSeen[clordId];
 }
 
+
 function updateBookFromFix(body, tag, marketName) {
-  // Order book widget is driven exclusively by the multicast MD feed.
-  // FIX execution reports ('feed') are handled server-side for token/player state only.
+  // ARCHITECTURE: Order book is now driven exclusively by OrderBook WebSocket (ExecutionReport-based).
+  // FIX market data is only used for:
+  // 1. Logging and debugging information
+  // 2. Real-time price/trade tracking (for display, not order book state)
+  // 3. Terminal status tracking (to prevent re-adding cancelled orders)
   if (tag !== 'md') return;
 
   // Use primary market if not specified
@@ -2376,11 +2542,10 @@ function updateBookFromFix(body, tag, marketName) {
   const market = markets[mn];
   if (!market) return;
   
-  const b = market.book; // Use market-specific book
-  
+  const b = market.book;
   const f = parseFix(body);
 
-  // ── debug: log every MD packet received ──────────────────────────────────
+  // ── Log every MD packet for debugging ──────────────────────────────────
   console.log(`[MD @ ${mn}]`, body, f);
   appendLog({
     ts: now(),
@@ -2402,24 +2567,32 @@ function updateBookFromFix(body, tag, marketName) {
   const leavesQty = sf(f['151']);
   const sym       = f['55'];
 
+  // Clear pending order timeout on any status update
   if (clordId && mn === getPrimaryMarketName()) {
-    clearPendingTimeout(clordId); // Only for primary market orders
+    clearPendingTimeout(clordId);
   }
-
-  // resolve price: tag 44 > tag 6 > pending cache
-  let price = sf(f['44'] || f['6']);
-  const cached = b.pending[clordId];
-  if (price === 0 && cached) price = cached.price;
 
   if (sym) b.symbol = sym;
 
-  if (status === '0' || status === 'A') {
-    // New: set leaves on book
-    const newLeaves = leavesQty > 0 ? leavesQty : qty;
-    applyOrderLeavesForMarket(market, clordId, side, price, newLeaves);
+  // Track terminal status to prevent re-adding cancelled orders (OrderBook snapshot filter)
+  if (status === '2') {
+    // Filled
+    orderTerminalStatus[clordId] = status;
+    console.log(`[STATUS 2] FILLED: ${clordId}`, { status, orderTerminalStatus: Object.keys(orderTerminalStatus) });
+    
+    // Add trade to display
+    const fillPx  = lastPx > 0 ? lastPx : sf(f['44'] || f['6']);
+    const fillQty = lastQty > 0 ? lastQty : qty;
+    if (fillPx > 0 && fillQty > 0) {
+      b.last = fillPx;
+      const ownerMeta = ownerMetaFromClOrdId(clordId);
+      b.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
+                           new Date().toTimeString().slice(0,8), ownerMeta.owner, ownerMeta.resolved]);
+      b.trades = b.trades.slice(0, 20);
+    }
 
   } else if (status === '1') {
-    // PartiallyFilled / Modify-like updates
+    // Partial fill - update price/trade display only
     if (lastPx > 0 && lastQty > 0) {
       b.last = lastPx;
       const ownerMeta = ownerMetaFromClOrdId(clordId);
@@ -2427,59 +2600,32 @@ function updateBookFromFix(body, tag, marketName) {
                            new Date().toTimeString().slice(0,8), ownerMeta.owner, ownerMeta.resolved]);
       b.trades = b.trades.slice(0, 20);
     }
-    applyOrderLeavesForMarket(market, clordId, side, price, leavesQty);
-    renderOrders(mn);
-
-  } else if (status === '2') {
-    // Filled / Trade-like updates
-    const fillPx  = lastPx  > 0 ? lastPx  : price;
-    const fillQty = lastQty > 0 ? lastQty : qty;
-    const isSyntheticMdTrade = clordId.startsWith('T');
-    if (fillPx > 0 && fillQty > 0) {
-      b.last = fillPx;
-      const ownerMeta = ownerMetaFromClOrdId(clordId);
-      b.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
-                           new Date().toTimeString().slice(0,8), ownerMeta.owner, ownerMeta.resolved]);
-      b.trades = b.trades.slice(0, 20);
-
-      if (isSyntheticMdTrade) {
-        // MD trade packets do not carry original maker/taker order IDs.
-        // Apply the executed quantity to both sides at trade price so
-        // the displayed aggregate book stays consistent after a match.
-        rmQtyForMarket(market, '1', fillPx, fillQty);
-        rmQtyForMarket(market, '2', fillPx, fillQty);
-      }
-    }
-    if (!isSyntheticMdTrade) {
-      applyOrderLeavesForMarket(market, clordId, side, price, 0);
-      cleanupOrderStateForMarket(market, clordId);
-    }
-    renderOrders(mn);
-
-  } else if (status === '3' && f['9000'] === 'SNAPSHOT') {
-    // Market-data snapshot refresh marker: reset local displayed book and wait
-    // for subsequent incremental/add events.
-    b.bids = [];
-    b.asks = [];
-    b.trades = [];
-    b.last = null;
-    b.orderState = {};
 
   } else if (status === '3' || status === '4' || status === 'C' || status === '8') {
-    // Cancelled/Expired
-    applyOrderLeavesForMarket(market, clordId, side, price, 0);
-    cleanupOrderStateForMarket(market, clordId);
+    // Cancelled/Expired/Rejected - mark as terminal to prevent re-add by OrderBook snapshot
+    orderTerminalStatus[clordId] = status;
+    console.log(`[STATUS ${status}] TERMINAL SET: ${clordId}`, { allTermStatuses: Object.keys(orderTerminalStatus) });
+    console.log(`[STATUS ${status}] After cleanup`, { 
+      allTermStatuses: Object.keys(orderTerminalStatus),
+      openOrdersAfter: Object.keys(openOrders)
+    });
+    
+    // Double-check that terminal status is still set
+    setTimeout(() => {
+      console.log(`[STATUS ${status}] CHECK (after 0ms)`, { 
+        allTermStatuses: Object.keys(orderTerminalStatus),
+        value: orderTerminalStatus[clordId]
+      });
+    }, 0);
+    
     renderOrders(mn);
   }
 
-  // For primary market, update main book and render on the right
-  if (mn === getPrimaryMarketName()) {
-    Object.assign(book, b);
-    renderBook();
-  }
-  
-  // Update multi-market display
-  renderMarketBook(mn);
+  // Note: Do NOT call renderBook() here. Order book state is exclusively driven by
+  // OrderBook WebSocket snapshots (from ExecutionReports). FIX messages only contribute
+  // price/trade display updates, which are automatically rendered by the snapshot handler.
+  // Calling renderBook() here could cause races where FIX updates temporarily appear
+  // before being overwritten by a subsequent OrderBook snapshot.
 }
 
 // ── render order book ─────────────────────────────────────────────────────────

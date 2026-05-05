@@ -73,7 +73,7 @@ impl PlayerClient {
     /// 
     /// Configures:
     /// - Connection timeout: 5 seconds
-    /// - Request timeout: 30 seconds
+    /// - Request timeout: 60 seconds (increased from 30s to handle database deadlocks)
     /// - Keepalive interval: 15 seconds
     /// - Keepalive timeout: 5 seconds
     /// - Connection pooling via shared Channel
@@ -82,7 +82,7 @@ impl PlayerClient {
     pub async fn connect(addr: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let endpoint = Endpoint::try_from(addr.to_string())?
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(60))
             .keep_alive_while_idle(true)
             .http2_keep_alive_interval(Duration::from_secs(15))
             .keep_alive_timeout(Duration::from_secs(5));
@@ -342,34 +342,57 @@ impl PlayerClient {
     /// Apply a FIX execution report to update player portfolio.
     /// This is called from the FIX session reader when an execution report is received.
     pub async fn apply_fix_execution_report(&mut self, username: &str, fix_body: &str) -> Result<(), String> {
-        tracing::debug!(
-            "[{}] Applying FIX execution report for '{}': {}",
-            utils::market_name(),
-            username,
-            fix_body
-        );
+        const MAX_RETRIES: usize = 3;
+        let mut attempt = 0;
         
-        let request = ApplyFixExecutionReportRequest {
-            username: username.to_string(),
-            fix_body: fix_body.to_string(),
-        };
-        
-        match self.client.apply_fix_execution_report(request).await {
-            Ok(response) => {
-                let result = response.into_inner();
-                if result.success {
-                    tracing::info!("[{}] FIX execution report applied for '{}'", utils::market_name(), username);
-                    Ok(())
-                } else {
-                    let msg = format!("FIX execution report failed: {}", result.error_message);
-                    tracing::error!("[{}] {}", utils::market_name(), msg);
-                    Err(msg)
+        loop {
+            attempt += 1;
+            tracing::debug!(
+                "[{}] Applying FIX execution report for '{}' (attempt {}/{}): {}",
+                utils::market_name(),
+                username,
+                attempt,
+                MAX_RETRIES,
+                fix_body
+            );
+            
+            let request = ApplyFixExecutionReportRequest {
+                username: username.to_string(),
+                fix_body: fix_body.to_string(),
+            };
+            
+            match self.client.apply_fix_execution_report(request).await {
+                Ok(response) => {
+                    let result = response.into_inner();
+                    if result.success {
+                        tracing::info!("[{}] FIX execution report applied for '{}'", utils::market_name(), username);
+                        return Ok(());
+                    } else {
+                        let msg = format!("FIX execution report failed: {}", result.error_message);
+                        tracing::error!("[{}] {}", utils::market_name(), msg);
+                        return Err(msg);
+                    }
                 }
-            }
-            Err(e) => {
-                let msg = format!("gRPC call failed: {}", e);
-                tracing::error!("[{}] apply_fix_execution_report error: {}", utils::market_name(), msg);
-                Err(msg)
+                Err(e) => {
+                    let msg = format!("gRPC call failed: {}", e);
+                    
+                    // Retry on timeout/cancelled errors
+                    if attempt < MAX_RETRIES && (e.to_string().contains("Timeout") || e.to_string().contains("Cancelled")) {
+                        let backoff_ms = 100 * (2_u64.pow((attempt - 1) as u32));
+                        tracing::warn!(
+                            "[{}] FIX execution report timeout, retrying in {}ms (attempt {}/{})",
+                            utils::market_name(),
+                            backoff_ms,
+                            attempt,
+                            MAX_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
+                    
+                    tracing::error!("[{}] apply_fix_execution_report error: {}", utils::market_name(), msg);
+                    return Err(msg);
+                }
             }
         }
     }

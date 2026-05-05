@@ -5,12 +5,12 @@ pub const MARKET_DATA_HEADER_SIZE: usize = 24;
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct MarketDataHeader {
-    pub msg_type: u8,        // MessageType
+    pub msg_type: u8, // MessageType
     pub version: u8,
     pub seq_num: u64,
     pub timestamp_ns: u64,
-    pub symbol: SymbolId,     // null-terminated ASCII symbol
-    pub length: u16,         // total message length
+    pub symbol: SymbolId, // null-terminated ASCII symbol
+    pub length: u16,      // total message length
 }
 
 impl Default for MarketDataHeader {
@@ -59,11 +59,11 @@ impl MarketDataHeader {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
 pub enum MessageType {
-    AddOrder    = 1,
+    AddOrder = 1,
     ModifyOrder = 2,
     DeleteOrder = 3,
-    Trade       = 4,
-    Snapshot    = 5,
+    Trade = 4,
+    Snapshot = 5,
 }
 
 #[derive(Debug)]
@@ -100,35 +100,35 @@ impl MarketEvent {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             MarketEvent::Add(header, add_order) => {
-                let mut bytes = Vec::with_capacity(24 + 49);
+                let mut bytes = Vec::with_capacity(24 + 69);
                 bytes.extend_from_slice(&header.to_bytes());
                 bytes.extend_from_slice(&add_order.to_bytes());
                 bytes
-            },
+            }
             MarketEvent::Modify(header, modify_order) => {
-                let mut bytes = Vec::with_capacity(24 + 48);
+                let mut bytes = Vec::with_capacity(24 + 68);
                 bytes.extend_from_slice(&header.to_bytes());
                 bytes.extend_from_slice(&modify_order.to_bytes());
                 bytes
-            },
+            }
             MarketEvent::Delete(header, delete_order) => {
-                let mut bytes = Vec::with_capacity(24 + 8);
+                let mut bytes = Vec::with_capacity(24 + 28);
                 bytes.extend_from_slice(&header.to_bytes());
                 bytes.extend_from_slice(&delete_order.to_bytes());
                 bytes
-            },
+            }
             MarketEvent::Trade(header, trade) => {
-                let mut bytes = Vec::with_capacity(24 + 49);
+                let mut bytes = Vec::with_capacity(24 + 89);
                 bytes.extend_from_slice(&header.to_bytes());
                 bytes.extend_from_slice(&trade.to_bytes());
                 bytes
-            },
+            }
             MarketEvent::Snapshot(header, snapshot) => {
                 let mut bytes = Vec::with_capacity(24 + SNAPSHOT_BYTES);
                 bytes.extend_from_slice(&header.to_bytes());
                 bytes.extend_from_slice(&snapshot.to_bytes());
                 bytes
-            },
+            }
         }
     }
 }
@@ -142,12 +142,14 @@ pub struct AddOrder {
     pub side: u8,       // 1 = bid, 2 = ask
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic,
+    pub cl_ord_id: OrderId,  // The original client order ID from the browser
 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct ModifyOrder {
     pub order_id: u64,
+    pub cl_ord_id: OrderId,  // The original client order ID from the browser
     pub new_price: FixedPointArithmetic,
     pub new_quantity: FixedPointArithmetic,
 }
@@ -156,6 +158,7 @@ pub struct ModifyOrder {
 #[derive(Clone, Copy, Debug)]
 pub struct DeleteOrder {
     pub order_id: u64,
+    pub cl_ord_id: OrderId,  // The original client order ID from the browser
 }
 
 #[repr(C, packed)]
@@ -195,19 +198,20 @@ pub struct OrderBookSnapshot {
 
 // ----------------- Add Order ------------------
 impl AddOrder {
-    pub fn to_bytes(&self) -> [u8; 49] {
-        let mut buf = [0u8; 49];
+    pub fn to_bytes(&self) -> [u8; 69] {
+        let mut buf = [0u8; 69];
 
         buf[0..8].copy_from_slice(&self.order_id.to_be_bytes());
         buf[8] = self.side;
         buf[9..29].copy_from_slice(&self.price.to_fix_bytes());
         buf[29..49].copy_from_slice(&self.quantity.to_fix_bytes());
+        buf[49..69].copy_from_slice(&self.cl_ord_id.0);
 
         buf
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 49 {
+        if bytes.len() < 69 {
             return None;
         }
 
@@ -221,6 +225,7 @@ impl AddOrder {
             side: bytes[8],
             price: FixedPointArithmetic::from_fix_bytes(trim_nul(&bytes[9..29]))?,
             quantity: FixedPointArithmetic::from_fix_bytes(trim_nul(&bytes[29..49]))?,
+            cl_ord_id: OrderId::from_bytes(&bytes[49..69])?,
         })
     }
 
@@ -233,23 +238,25 @@ impl AddOrder {
             },
             price: order_event.price,
             quantity: order_event.quantity,
+            cl_ord_id: order_event.cl_ord_id,  // Include the original clOrdId
         }
     }
 }
 
 // ------------------ Modify Order ------------------
 impl ModifyOrder {
-    pub fn to_bytes(&self) -> [u8; 48] {
-        let mut buf = [0u8; 48];
+    pub fn to_bytes(&self) -> [u8; 68] {
+        let mut buf = [0u8; 68];
         buf[0..8].copy_from_slice(&self.order_id.to_be_bytes());
         buf[8..28].copy_from_slice(&self.new_price.to_fix_bytes());
         buf[28..48].copy_from_slice(&self.new_quantity.to_fix_bytes());
+        buf[48..68].copy_from_slice(&self.cl_ord_id.0);
 
         buf
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 48 {
+        if bytes.len() < 68 {
             return None;
         }
 
@@ -260,6 +267,7 @@ impl ModifyOrder {
 
         Some(Self {
             order_id: u64::from_be_bytes(bytes[0..8].try_into().ok()?),
+            cl_ord_id: OrderId::from_bytes(&bytes[48..68])?,
             new_price: FixedPointArithmetic::from_fix_bytes(trim_nul(&bytes[8..28]))?,
             new_quantity: FixedPointArithmetic::from_fix_bytes(trim_nul(&bytes[28..48]))?,
         })
@@ -268,6 +276,7 @@ impl ModifyOrder {
     pub fn from_order_event(order_event: &types::OrderEvent) -> Self {
         Self {
             order_id: stable_u64_from_fixed_20(&order_event.cl_ord_id.0),
+            cl_ord_id: order_event.cl_ord_id,
             new_price: order_event.price,
             new_quantity: order_event.quantity,
         }
@@ -276,17 +285,21 @@ impl ModifyOrder {
 
 // ------------------ Delete Order ------------------
 impl DeleteOrder {
-    pub fn to_bytes(&self) -> [u8; 8] {
-        self.order_id.to_be_bytes()
+    pub fn to_bytes(&self) -> [u8; 28] {
+        let mut buf = [0u8; 28];
+        buf[0..8].copy_from_slice(&self.order_id.to_be_bytes());
+        buf[8..28].copy_from_slice(&self.cl_ord_id.0);
+        buf
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 8 {
+        if bytes.len() < 28 {
             return None;
         }
 
         Some(Self {
             order_id: u64::from_be_bytes(bytes[0..8].try_into().ok()?),
+            cl_ord_id: OrderId::from_bytes(&bytes[8..28])?,
         })
     }
 
@@ -296,7 +309,11 @@ impl DeleteOrder {
             .map(|id| stable_u64_from_fixed_20(&id.0))
             .unwrap_or_else(|| stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
 
-        Self { order_id }
+        let cl_ord_id = order_event
+            .orig_cl_ord_id
+            .unwrap_or(order_event.cl_ord_id);
+
+        Self { order_id, cl_ord_id }
     }
 }
 
@@ -333,7 +350,11 @@ impl Trade {
         })
     }
 
-    pub fn from_trade(aggressor_cl_ord_id: &OrderId, side: types::Side, trade: &types::Trade) -> Self {
+    pub fn from_trade(
+        aggressor_cl_ord_id: &OrderId,
+        side: types::Side,
+        trade: &types::Trade,
+    ) -> Self {
         Self {
             trade_id: trade.id,
             side: match side {
@@ -430,12 +451,11 @@ impl OrderBookSnapshot {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::FixedPointArithmetic;
-    use types::macros::{OrderId};
+    use types::macros::OrderId;
 
     #[test]
     fn test_add_order_serialization() {
@@ -444,6 +464,7 @@ mod tests {
             side: 1,
             price: FixedPointArithmetic::from_f64(123.45),
             quantity: FixedPointArithmetic::from_f64(1000.0),
+            cl_ord_id: OrderId::from_ascii("order123"),
         };
 
         let bytes = order.to_bytes();
@@ -454,21 +475,23 @@ mod tests {
         let expected_side = order.side;
         let expected_price = order.price;
         let expected_quantity = order.quantity;
+        let expected_cl_ord_id = order.cl_ord_id;
 
         let order_id = deserialized.order_id;
         let side = deserialized.side;
         let price = deserialized.price;
         let quantity = deserialized.quantity;
+        let cl_ord_id = deserialized.cl_ord_id;
 
         assert_eq!(expected_order_id, order_id);
         assert_eq!(expected_side, side);
         assert_eq!(expected_price.to_f64(), price.to_f64());
         assert_eq!(expected_quantity.to_f64(), quantity.to_f64());
+        assert_eq!(expected_cl_ord_id, cl_ord_id);
     }
 
     #[test]
     fn test_add_order_from_order_event() {
-
         let order_event = types::OrderEvent {
             cl_ord_id: OrderId::from_ascii("order123"), // market-feed uses cl_ord_id as the order identifier
             side: types::Side::Buy,
@@ -484,7 +507,6 @@ mod tests {
         let price = add_order.price;
         let quantity = add_order.quantity;
 
-
         assert_eq!(order_id, stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
         assert_eq!(side, 1);
         assert_eq!(price.to_f64(), 123.45);
@@ -495,6 +517,7 @@ mod tests {
     fn test_modify_order_serialization() {
         let order = ModifyOrder {
             order_id: 123456789,
+            cl_ord_id: OrderId::from_ascii("order123"),
             new_price: FixedPointArithmetic::from_f64(124.45),
             new_quantity: FixedPointArithmetic::from_f64(900.0),
         };
@@ -503,28 +526,37 @@ mod tests {
         let deserialized = ModifyOrder::from_bytes(&bytes).unwrap();
 
         let expected_order_id = order.order_id;
+        let expected_cl_ord_id = order.cl_ord_id;
         let expected_new_price = order.new_price;
         let expected_new_quantity = order.new_quantity;
 
         let order_id = deserialized.order_id;
+        let cl_ord_id = deserialized.cl_ord_id;
         let new_price = deserialized.new_price;
         let new_quantity = deserialized.new_quantity;
 
         assert_eq!(order_id, expected_order_id);
+        assert_eq!(cl_ord_id, expected_cl_ord_id);
         assert_eq!(new_price, expected_new_price);
         assert_eq!(new_quantity, expected_new_quantity);
     }
 
     #[test]
     fn test_delete_order_serialization() {
-        let order = DeleteOrder { order_id: 123456789 };
+        let order = DeleteOrder {
+            order_id: 123456789,
+            cl_ord_id: OrderId::from_ascii("order123"),
+        };
         let bytes = order.to_bytes();
         let deserialized = DeleteOrder::from_bytes(&bytes).unwrap();
 
         let expected_order_id = order.order_id;
+        let expected_cl_ord_id = order.cl_ord_id;
         let order_id = deserialized.order_id;
+        let cl_ord_id = deserialized.cl_ord_id;
 
         assert_eq!(order_id, expected_order_id);
+        assert_eq!(cl_ord_id, expected_cl_ord_id);
     }
 
     #[test]

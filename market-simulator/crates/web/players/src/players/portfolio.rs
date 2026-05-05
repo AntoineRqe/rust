@@ -76,20 +76,38 @@ impl PlayerStore {
     pub fn apply_fix_execution_report(&self, fix_body: &str) -> bool {
         let fields = parse_fix_fields(fix_body);
 
-        if fields.get("35").map(String::as_str) != Some("8") {
+        let msg_type = fields.get("35").map(String::as_str).unwrap_or("");
+        
+        // Treat Cancel/Replace Reject (type 9) as a rejection of the cancel operation
+        // The original order still exists and should remain in pending
+        let is_cancel_reject = msg_type == "9";
+        
+        // Only accept Execution Reports (type 8) and Cancel Rejects (type 9)
+        if msg_type != "8" && msg_type != "9" {
             return false;
         }
 
         let ord_status = fields.get("39").map(String::as_str).unwrap_or("");
         let cl_ord_id = fields
-            .get("41")
-            .or_else(|| fields.get("11"))
-            .map(String::as_str)
-            .unwrap_or("");
+            .get("41")  // Field 41 now contains clOrdId from market data
+            .or_else(|| fields.get("11"))  // Fallback to field 11 for backwards compatibility
+            .cloned()
+            .unwrap_or_default();
 
         if cl_ord_id.is_empty() {
             return false;
         }
+
+        let mut inner = self.inner.lock().unwrap();
+
+        let last_qty = parse_f64(fields.get("32").map(String::as_str));
+        let last_px = parse_f64(fields.get("31").map(String::as_str));
+        let leaves_qty = parse_f64(fields.get("151").map(String::as_str));
+        let side = fields.get("54").map(String::as_str).unwrap_or("");
+        let symbol = fields
+            .get("55")
+            .map(|s| s.trim().to_uppercase())
+            .unwrap_or_default();
 
         let exec_id = fields.get("17").cloned().unwrap_or_else(|| {
             format!(
@@ -102,25 +120,52 @@ impl PlayerStore {
             )
         });
 
-        let last_qty = parse_f64(fields.get("32").map(String::as_str));
-        let last_px = parse_f64(fields.get("31").map(String::as_str));
-        let leaves_qty = parse_f64(fields.get("151").map(String::as_str));
-        let side = fields.get("54").map(String::as_str).unwrap_or("");
-        let symbol = fields
-            .get("55")
-            .map(|s| s.trim().to_uppercase())
-            .unwrap_or_default();
-
         let mut changed = false;
-        let mut inner = self.inner.lock().unwrap();
 
         if !inner.processed_exec_ids.insert(exec_id) {
+            drop(inner);
             return false;
         }
 
         // Capture owner now — before it may be removed from order_owners below.
-        let owner = inner.order_owners.get(cl_ord_id).cloned();
+        let owner = inner.order_owners.get(&cl_ord_id).cloned();
         let found_order = owner.is_some();
+
+        // For admin user, handle orders specially
+        if let Some(ref uname) = owner {
+            if uname == "admin" {
+                // Remove order for successful fills, cancellations, rejections
+                if matches!(ord_status, "2" | "3" | "4" | "8" | "C") {
+                    inner.order_owners.remove(&cl_ord_id);
+                    // Also remove from pending_orders for admin users
+                    if let Some(player) = inner.players.get_mut(uname) {
+                        if let Some(pos) = player.pending_orders.iter().position(|o| o.cl_ord_id == cl_ord_id) {
+                            player.pending_orders.remove(pos);
+                        }
+                    }
+                }
+                // Also remove order for cancel rejections (type 9) to free up reserved tokens
+                if is_cancel_reject {
+                    inner.order_owners.remove(&cl_ord_id);
+                    // Also remove from pending_orders for admin users
+                    if let Some(player) = inner.players.get_mut(uname) {
+                        if let Some(pos) = player.pending_orders.iter().position(|o| o.cl_ord_id == cl_ord_id) {
+                            player.pending_orders.remove(pos);
+                        }
+                    }
+                }
+                drop(inner);
+                self.flush();
+                return true;
+            }
+        }
+
+        // If no owner found (order doesn't exist in our tracking), allow it anyway
+        // This can happen with pre-existing orders or orders from other systems
+        if !found_order {
+            drop(inner);
+            return true;
+        }
 
         // Portfolio lot operation to perform after releasing the lock.
         // We determine it here while `owner` is still available.
@@ -147,16 +192,70 @@ impl PlayerStore {
 
         if let Some(owner_username) = owner {
             if let Some(player) = inner.players.get_mut(&owner_username) {
-                if (ord_status == "1" || ord_status == "2") && last_qty > 0.0 && last_px > 0.0 {
-                    let traded_notional = last_qty * last_px;
-                    if side == "1" {
-                        player.tokens -= traded_notional;
-                    } else if side == "2" {
-                        player.tokens += traded_notional;
+                // Token management: deduct on new BUY (status=0), refund on cancel (status=4), 
+                // credit on SELL execution (status=1,2). Never deduct on fill—already deducted at status=0.
+                match ord_status {
+                    "0" => {
+                        // Status 0 (New): Deduct tokens for BUY orders to reserve them
+                        if side == "1" {
+                            let qty = parse_f64(fields.get("38").map(String::as_str));
+                            let price = parse_f64(fields.get("44").map(String::as_str).or_else(|| fields.get("6").map(String::as_str)));
+                            if qty > 0.0 && price > 0.0 {
+                                let notional = qty * price;
+                                player.tokens -= notional;
+                                changed = true;
+                                tracing::debug!(
+                                    "[Players] Deducted {:.2} tokens for new BUY order {}, remaining: {:.2}",
+                                    notional,
+                                    cl_ord_id,
+                                    player.tokens
+                                );
+                            }
+                        }
+                        // SELL orders don't deduct tokens (they reserve equity instead)
                     }
-                    changed = true;
+                    "4" => {
+                        // Status 4 (Cancelled): Refund reserved tokens if this was a BUY order
+                        if let Some(pos) = player
+                            .pending_orders
+                            .iter()
+                            .position(|o| o.cl_ord_id == cl_ord_id)
+                        {
+                            let pending_order = &player.pending_orders[pos];
+                            if pending_order.side == "1" {
+                                let notional = pending_order.qty * pending_order.price;
+                                player.tokens += notional;
+                                changed = true;
+                                tracing::debug!(
+                                    "[Players] Refunded {:.2} tokens for cancelled BUY order {}, new balance: {:.2}",
+                                    notional,
+                                    cl_ord_id,
+                                    player.tokens
+                                );
+                            }
+                        }
+                    }
+                    "1" | "2" => {
+                        // Partial fill or complete fill: credit SELL orders only
+                        // BUY orders already had tokens deducted at status=0, so no change here
+                        if last_qty > 0.0 && last_px > 0.0 && side == "2" {
+                            let traded_notional = last_qty * last_px;
+                            player.tokens += traded_notional;
+                            changed = true;
+                            tracing::debug!(
+                                "[Players] Credited {:.2} tokens for SELL execution {}, new balance: {:.2}",
+                                traded_notional,
+                                cl_ord_id,
+                                player.tokens
+                            );
+                        }
+                    }
+                    _ => {
+                        // Other statuses don't affect tokens
+                    }
                 }
 
+                // Update pending order quantities
                 if let Some(pos) = player
                     .pending_orders
                     .iter()
@@ -177,13 +276,19 @@ impl PlayerStore {
                                 changed = true;
                             }
                         }
-                        _ => {}
+                        _ => {
+                            // For cancel rejections (type 9), also remove from pending to free up tokens
+                            if is_cancel_reject {
+                                player.pending_orders.remove(pos);
+                                changed = true;
+                            }
+                        }
                     }
                 }
             }
 
             if matches!(ord_status, "2" | "3" | "4" | "8" | "C") {
-                inner.order_owners.remove(cl_ord_id);
+                inner.order_owners.remove(&cl_ord_id);
                 changed = true;
             }
         }

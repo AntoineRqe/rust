@@ -1,15 +1,15 @@
-use std::net::{Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use utils::market_name;
 
-use market_feed::types::{
-    AddOrder, DeleteOrder, MarketDataHeader, MessageType, ModifyOrder, OrderBookSnapshot,
-    SNAPSHOT_BYTES, Trade, MARKET_DATA_HEADER_SIZE,
-};
+use backend::order_book::{OrderBookState, PriceLevel};
 use backend::state::{EventBus, WsEvent};
-use backend::order_book::{PriceLevel, OrderBookState};
+use market_feed::types::{
+    AddOrder, DeleteOrder, MARKET_DATA_HEADER_SIZE, MarketDataHeader, MessageType, ModifyOrder,
+    OrderBookSnapshot, SNAPSHOT_BYTES, Trade,
+};
 use players::players::PlayerStore;
 
 use types::multicast::{MulticastSource, SourceSocket};
@@ -17,17 +17,20 @@ use types::multicast::{MulticastSource, SourceSocket};
 enum ParsedMarketDataKind {
     Add {
         order_id: u64,
+        cl_ord_id: String,
         side: u8,
         price: f64,
         quantity: f64,
     },
     Modify {
         order_id: u64,
+        cl_ord_id: String,
         new_price: f64,
         new_quantity: f64,
     },
     Delete {
         order_id: u64,
+        cl_ord_id: String,
     },
     Trade {
         trade_id: u64,
@@ -89,13 +92,15 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
         x if x == MessageType::AddOrder as u8 => {
             let msg = AddOrder::from_bytes(body)?;
             let order_id = msg.order_id;
+            let cl_ord_id = msg.cl_ord_id.to_string();
             let side = msg.side;
             let price = msg.price.to_f64();
             let quantity = msg.quantity.to_f64();
             (
                 format!(
-                    "35=8 │ 39=0 │ 11={} │ 54={} │ 44={} │ 38={} │ 151={} │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
+                    "35=8 │ 39=0 │ 11={} │ 41={} │ 54={} │ 44={} │ 38={} │ 151={} │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
                     order_id,
+                    cl_ord_id,
                     side,
                     price,
                     quantity,
@@ -109,6 +114,7 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
                 ),
                 ParsedMarketDataKind::Add {
                     order_id,
+                    cl_ord_id,
                     side,
                     price,
                     quantity,
@@ -118,12 +124,14 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
         x if x == MessageType::ModifyOrder as u8 => {
             let msg = ModifyOrder::from_bytes(body)?;
             let order_id = msg.order_id;
+            let cl_ord_id = msg.cl_ord_id.to_string();
             let new_price = msg.new_price.to_f64();
             let new_quantity = msg.new_quantity.to_f64();
             (
                 format!(
-                    "35=8 │ 39=1 │ 11={} │ 44={} │ 151={} │ 38={} │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
+                    "35=8 │ 39=1 │ 11={} │ 41={} │ 44={} │ 151={} │ 38={} │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
                     order_id,
+                    cl_ord_id,
                     new_price,
                     new_quantity,
                     new_quantity,
@@ -136,6 +144,7 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
                 ),
                 ParsedMarketDataKind::Modify {
                     order_id,
+                    cl_ord_id,
                     new_price,
                     new_quantity,
                 },
@@ -144,10 +153,12 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
         x if x == MessageType::DeleteOrder as u8 => {
             let msg = DeleteOrder::from_bytes(body)?;
             let order_id = msg.order_id;
+            let cl_ord_id = msg.cl_ord_id.to_string();
             (
                 format!(
-                    "35=8 │ 39=4 │ 11={} │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
+                    "35=8 │ 39=4 │ 11={} │ 41={} │ 55={} │ 9001={} │ 9002={} │ 9003={} │ 9004={} │ 9005={}",
                     order_id,
+                    cl_ord_id,
                     symbol_for_log,
                     market,
                     header_seq_num,
@@ -155,7 +166,10 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
                     header_version,
                     header_length,
                 ),
-                ParsedMarketDataKind::Delete { order_id },
+                ParsedMarketDataKind::Delete {
+                    order_id,
+                    cl_ord_id,
+                },
             )
         }
         x if x == MessageType::Trade as u8 => {
@@ -251,7 +265,6 @@ pub fn spawn_market_feed_receiver(
     order_book: Arc<std::sync::Mutex<OrderBookState>>,
     player_store: PlayerStore,
 ) -> Result<std::thread::JoinHandle<()>, Box<dyn std::error::Error>> {
-
     Ok(std::thread::spawn(move || {
         let mut sockets = Vec::<SourceSocket>::new();
 
@@ -325,7 +338,10 @@ pub fn spawn_market_feed_receiver(
                         {
                             // Publish the parsed FIX message to WebSocket clients for logging and updates.
                             bus.publish(WsEvent::FixMessage {
-                                label: format!("{} [{}]", parsed.label, source_socket.source.market),
+                                label: format!(
+                                    "{} [{}]",
+                                    parsed.label, source_socket.source.market
+                                ),
                                 body: parsed.details,
                                 tag: "md".into(),
                                 recipient: None,
@@ -333,12 +349,14 @@ pub fn spawn_market_feed_receiver(
 
                             // TODO  : Handle snapshots separately to avoid blocking the order book updates with potentially large snapshot messages, and to ensure we apply snapshots atomically to avoid inconsistent state during snapshot application.
                             // In HFT scenarios, snapshots can be large and frequent, so it's important to handle them efficiently.
-                            let mut passive_trade_update: Option<(u64, String, String, f64, f64)> = None;
+                            let mut passive_trade_update: Option<(u64, String, String, f64, f64)> =
+                                None;
                             if let Ok(mut ob) = order_book.lock() {
                                 let book = ob.get_or_create(&parsed.symbol);
                                 match parsed.kind {
                                     ParsedMarketDataKind::Add {
                                         order_id,
+                                        cl_ord_id,
                                         side,
                                         price,
                                         quantity,
@@ -348,12 +366,13 @@ pub fn spawn_market_feed_receiver(
                                             side,
                                             price,
                                             quantity,
-                                            None,
+                                            Some(cl_ord_id),
                                             parsed.timestamp_ms,
                                         );
                                     }
                                     ParsedMarketDataKind::Modify {
                                         order_id,
+                                        cl_ord_id: _,
                                         new_price,
                                         new_quantity,
                                     } => {
@@ -364,7 +383,10 @@ pub fn spawn_market_feed_receiver(
                                             parsed.timestamp_ms,
                                         );
                                     }
-                                    ParsedMarketDataKind::Delete { order_id } => {
+                                    ParsedMarketDataKind::Delete {
+                                        order_id,
+                                        cl_ord_id: _,
+                                    } => {
                                         book.delete_order(order_id, parsed.timestamp_ms);
                                     }
                                     ParsedMarketDataKind::Trade {
@@ -410,7 +432,9 @@ pub fn spawn_market_feed_receiver(
                                 });
                             }
 
-                            if let Some((trade_id, passive_cl_ord_id, symbol, quantity, price)) = passive_trade_update {
+                            if let Some((trade_id, passive_cl_ord_id, symbol, quantity, price)) =
+                                passive_trade_update
+                            {
                                 player_store.apply_trade_from_feed(
                                     trade_id,
                                     &passive_cl_ord_id,
@@ -446,14 +470,17 @@ pub fn spawn_market_feed_receiver(
 mod tests {
     use super::*;
     use types::FixedPointArithmetic;
-    use types::macros::{SymbolId, OrderId};
+    use types::macros::{OrderId, SymbolId};
 
-    use market_feed::types::{
-        MAX_LEVELS,
-        PriceLevel as MdPriceLevel,
-    };
+    use market_feed::types::{MAX_LEVELS, PriceLevel as MdPriceLevel};
 
-    fn build_packet(msg_type: MessageType, symbol: SymbolId, seq_num: u64, timestamp_ns: u64, body: &[u8]) -> Vec<u8> {
+    fn build_packet(
+        msg_type: MessageType,
+        symbol: SymbolId,
+        seq_num: u64,
+        timestamp_ns: u64,
+        body: &[u8],
+    ) -> Vec<u8> {
         let header = MarketDataHeader {
             msg_type: msg_type as u8,
             version: 1,
@@ -480,6 +507,7 @@ mod tests {
             side: 1,
             price: FixedPointArithmetic::from_f64(101.25),
             quantity: FixedPointArithmetic::from_f64(7.5),
+            cl_ord_id: types::macros::OrderId::from_ascii("order123"),
         };
         let add_packet = build_packet(
             MessageType::AddOrder,
@@ -488,7 +516,8 @@ mod tests {
             2_000_000,
             &add.to_bytes(),
         );
-        let add_parsed = parse_market_data_message(&add_packet, market).expect("add packet should parse");
+        let add_parsed =
+            parse_market_data_message(&add_packet, market).expect("add packet should parse");
         assert_eq!(add_parsed.label, "◀ MD ADD");
         assert_eq!(add_parsed.symbol, "ABCD");
         assert_eq!(add_parsed.timestamp_ms, 2);
@@ -500,11 +529,13 @@ mod tests {
         match add_parsed.kind {
             ParsedMarketDataKind::Add {
                 order_id,
+                cl_ord_id,
                 side,
                 price,
                 quantity,
             } => {
                 assert_eq!(order_id, 42);
+                assert_eq!(cl_ord_id, "order123");
                 assert_eq!(side, 1);
                 assert_eq!(price, 101.25);
                 assert_eq!(quantity, 7.5);
@@ -528,7 +559,8 @@ mod tests {
             5_500_000,
             &trade.to_bytes(),
         );
-        let trade_parsed = parse_market_data_message(&trade_packet, market).expect("trade packet should parse");
+        let trade_parsed =
+            parse_market_data_message(&trade_packet, market).expect("trade packet should parse");
         assert_eq!(trade_parsed.label, "◀ MD TRADE");
         assert_eq!(trade_parsed.symbol, "ABCD");
         assert_eq!(trade_parsed.timestamp_ms, 5);
@@ -601,6 +633,7 @@ mod tests {
             order_id: 99,
             new_price: FixedPointArithmetic::from_f64(102.75),
             new_quantity: FixedPointArithmetic::from_f64(4.25),
+            cl_ord_id: types::macros::OrderId::from_ascii("order456"),
         };
         let modify_packet = build_packet(
             MessageType::ModifyOrder,
@@ -609,8 +642,8 @@ mod tests {
             10_000_000,
             &modify.to_bytes(),
         );
-        let modify_parsed = parse_market_data_message(&modify_packet, market)
-            .expect("modify packet should parse");
+        let modify_parsed =
+            parse_market_data_message(&modify_packet, market).expect("modify packet should parse");
         assert_eq!(modify_parsed.label, "◀ MD MODIFY");
         assert_eq!(modify_parsed.symbol, "ABCD");
         assert_eq!(modify_parsed.timestamp_ms, 10);
@@ -619,10 +652,12 @@ mod tests {
         match modify_parsed.kind {
             ParsedMarketDataKind::Modify {
                 order_id,
+                cl_ord_id,
                 new_price,
                 new_quantity,
             } => {
                 assert_eq!(order_id, 99);
+                assert_eq!(cl_ord_id, "order456");
                 assert_eq!(new_price, 102.75);
                 assert_eq!(new_quantity, 4.25);
             }
@@ -630,7 +665,10 @@ mod tests {
         }
 
         // --- DeleteOrder ---
-        let delete = DeleteOrder { order_id: 1234 };
+        let delete = DeleteOrder {
+            order_id: 1234,
+            cl_ord_id: types::macros::OrderId::from_ascii("delete01"),
+        };
         let delete_packet = build_packet(
             MessageType::DeleteOrder,
             symbol,
@@ -638,16 +676,20 @@ mod tests {
             11_000_000,
             &delete.to_bytes(),
         );
-        let delete_parsed = parse_market_data_message(&delete_packet, market)
-            .expect("delete packet should parse");
+        let delete_parsed =
+            parse_market_data_message(&delete_packet, market).expect("delete packet should parse");
         assert_eq!(delete_parsed.label, "◀ MD DELETE");
         assert_eq!(delete_parsed.symbol, "ABCD");
         assert_eq!(delete_parsed.timestamp_ms, 11);
         assert!(delete_parsed.details.contains("39=4"));
         assert!(delete_parsed.details.contains("11=1234"));
         match delete_parsed.kind {
-            ParsedMarketDataKind::Delete { order_id } => {
+            ParsedMarketDataKind::Delete {
+                order_id,
+                cl_ord_id,
+            } => {
                 assert_eq!(order_id, 1234);
+                assert_eq!(cl_ord_id, "delete01");
             }
             _ => panic!("expected ParsedMarketDataKind::Delete"),
         }
@@ -662,13 +704,8 @@ mod tests {
         assert!(parse_market_data_message(&[0u8; MARKET_DATA_HEADER_SIZE - 1], market).is_none());
 
         // Header is present but body is too short for AddOrder payload.
-        let short_body_packet = build_packet(
-            MessageType::AddOrder,
-            symbol,
-            3001,
-            12_000_000,
-            &[0u8; 8],
-        );
+        let short_body_packet =
+            build_packet(MessageType::AddOrder, symbol, 3001, 12_000_000, &[0u8; 8]);
         assert!(parse_market_data_message(&short_body_packet, market).is_none());
     }
 }
