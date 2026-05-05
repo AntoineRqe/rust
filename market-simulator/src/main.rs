@@ -56,6 +56,7 @@ impl ThreadHandles {
 pub struct MarketSimulator {
     config: MarketConfig,
     player_database_url: String,
+    player_service_addr: String,
     thread_handles: Arc<Mutex<ThreadHandles>>,
     shutdown: Option<Arc<AtomicBool>>,
     /// Multicast endpoints for order book snapshots to forward to GUI websockets.
@@ -114,6 +115,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
 
     let config = market_simulator.config.clone();
     let player_database_url = market_simulator.player_database_url.clone();
+    let player_service_addr = market_simulator.player_service_addr.clone();
     let market_feed_sources = market_simulator.market_feed_sources.clone();
     let snapshot_feed_sources = market_simulator.snapshot_feed_sources.clone();
     let bus = EventBus::new();
@@ -240,6 +242,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         config.web.clone(),
         config.tcp.clone(),
         config.grpc.clone(),
+        player_service_addr,
         config.core_mapping.web_core,
 
     )?;
@@ -352,10 +355,17 @@ fn main() {
 
         let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
         let err_tx = Arc::new(err_tx);
+        
+        let player_service_addr = format!(
+            "http://{}:{}",
+            config.players_service.grpc.ip,
+            config.players_service.grpc.port
+        );
     
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,
             player_database_url,
+            player_service_addr,
             thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
             shutdown: None,
             market_feed_sources,
@@ -410,10 +420,17 @@ fn main() {
     
     let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
     
+    let player_service_addr = format!(
+        "http://{}:{}",
+        config.players_service.grpc.ip,
+        config.players_service.grpc.port
+    );
+    
     {
         let mut dummy_simulator = crate::MarketSimulator {
             config: config.markets[0].clone(),
             player_database_url: player_database_url.clone(),
+            player_service_addr,
             thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
             shutdown: None,
             market_feed_sources: vec![],
@@ -423,7 +440,7 @@ fn main() {
             err_rx: err_rx.clone(),
         };
         
-        if let Err(e) = startup::start_player_service(&mut dummy_simulator, &player_database_url) {
+        if let Err(e) = startup::start_player_service(&mut dummy_simulator, &player_database_url, &config.players_service) {
             tracing::error!("[gateway] Failed to start player service: {e}");
         }
     }

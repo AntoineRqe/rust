@@ -334,7 +334,6 @@ Set all three before starting:
 export DATABASE_URL_MARKET_SIMULATOR=postgres://<user>:<password>@localhost:5432/market_simulator
 export DATABASE_URL_NASDAQ=postgres://<user>:<password>@localhost:5432/market_nasdaq
 export DATABASE_URL_NYSE=postgres://<user>:<password>@localhost:5432/market_nyse
-export GRPC_PLAYER_SERVICE_PORT=50053
 ```
 
 The simulator creates its tables on startup. The PostgreSQL user in each URL must therefore be able to create and alter tables in the active schema.

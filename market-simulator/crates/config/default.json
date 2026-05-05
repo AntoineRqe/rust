@@ -1,9 +1,16 @@
 {
   "ring_buffer_size": 1024,
-  "player_database_url_env": "DATABASE_URL_MARKET_SIMULATOR",
   "entry_point": {
     "ip": "127.0.0.1",
     "port": 9860
+  },
+  "players_service": {
+    "grpc": {
+      "ip": "127.0.0.1",
+      "port": 50053
+    },
+    "database_url_env": "DATABASE_URL_MARKET_SIMULATOR",
+    "core": 13
   },
   "markets": [
     {

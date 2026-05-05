@@ -71,6 +71,7 @@ pub fn run_web_server(
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
+    player_service_addr: String,
     core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match tokio::runtime::Builder::new_multi_thread()
@@ -91,6 +92,7 @@ pub fn run_web_server(
             known_markets,
             shutdown,
             order_book,
+            player_service_addr,
         )) {
         Ok(_) => (),
         Err(e) => {
@@ -112,17 +114,14 @@ async fn serve(
     known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
+    player_service_addr: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize player client connecting to the standalone player-server gRPC service
+    // Initialize player client connecting to the player-server gRPC service
     // The PlayerClient uses tonic::transport::Channel which automatically:
     // - Maintains HTTP/2 connection pooling
     // - Implements keepalive (15s interval, 5s timeout)
     // - Reuses connections across all requests
     // - Handles reconnection on failure
-    let player_service_port = std::env::var("GRPC_PLAYER_SERVICE_PORT")
-        .unwrap_or_else(|_| "50052".to_string());
-    let player_service_addr = format!("http://[::1]:{}", player_service_port);
-    
     let player_client = Arc::new(tokio::sync::Mutex::new(
         PlayerClient::connect(&player_service_addr).await?,
     ));

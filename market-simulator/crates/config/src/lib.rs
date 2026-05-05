@@ -1,5 +1,5 @@
-use std::fs;
 use std::env;
+use std::fs;
 
 use serde::Deserialize;
 
@@ -22,6 +22,13 @@ pub struct SnapshotConfig {
 }
 
 #[derive(Clone, Deserialize)]
+pub struct PlayerServiceConfig {
+    pub database_url_env: String,
+    pub grpc: Connection,
+    pub core: usize,
+}
+
+#[derive(Clone, Deserialize)]
 pub struct MarketConfig {
     pub name: String,
     pub database_url_env: String,
@@ -33,7 +40,6 @@ pub struct MarketConfig {
     pub snapshot_multicast: MulticastConfig,
     pub core_mapping: EngineCoreMapping,
     pub snapshot: SnapshotConfig,
-
 }
 
 impl MarketConfig {
@@ -41,8 +47,7 @@ impl MarketConfig {
         env::var(&self.database_url_env).map_err(|_| {
             format!(
                 "missing env var '{}' for market '{}'",
-                self.database_url_env,
-                self.name
+                self.database_url_env, self.name
             )
         })
     }
@@ -52,7 +57,7 @@ impl MarketConfig {
 pub struct MarketsConfig {
     pub ring_buffer_size: usize,
     pub entry_point: Connection,
-    pub player_database_url_env: String,
+    pub players_service: PlayerServiceConfig,
     pub markets: Vec<MarketConfig>,
 }
 
@@ -81,14 +86,25 @@ impl MarketsConfig {
                 ip: "127.0.0.1".to_string(),
                 port: 9875,
             },
-            player_database_url_env: String::new(),
+            players_service: PlayerServiceConfig {
+                database_url_env: "DATABASE_URL_MARKET_SIMULATOR".to_string(),
+                grpc: Connection {
+                    ip: "127.0.0.1".to_string(),
+                    port: 50053,
+                },
+                core: 13,
+            },
             markets: vec![],
         }
     }
 
     pub fn resolve_player_database_url(&self) -> Result<String, String> {
-        env::var(&self.player_database_url_env)
-            .map_err(|_| format!("missing env var '{}' for global player database", self.player_database_url_env))
+        env::var(&self.players_service.database_url_env).map_err(|_| {
+            format!(
+                "missing env var '{}' for global player database",
+                self.players_service.database_url_env
+            )
+        })
     }
 
     pub fn parse_from_file(file_path: &str) -> Self {

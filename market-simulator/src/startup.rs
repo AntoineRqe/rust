@@ -416,6 +416,7 @@ pub fn start_web_server(
     web_addr: Connection,
     tcp_addr: Connection,
     grpc_addr: Connection,
+    player_service_addr: String,
     core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
@@ -443,6 +444,7 @@ pub fn start_web_server(
                 known_markets,
                 web_shutdown,
                 order_book,
+                player_service_addr,
                 core_id
             ) {
                 Ok(_) => (),
@@ -541,52 +543,54 @@ pub fn start_market_data_proxy(
 pub fn start_player_service(
     simulator: &mut crate::MarketSimulator,
     player_database_url: &str,
+    player_service_config: &config::PlayerServiceConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let err_tx = Arc::clone(&simulator.err_tx);
-
     let player_db_url = player_database_url.to_string();
-    let grpc_port = std::env::var("GRPC_PLAYER_SERVICE_PORT")
-        .unwrap_or_else(|_| "50052".to_string());
-    let grpc_port_log = grpc_port.clone();
+    let grpc_ip = player_service_config.grpc.ip.clone();
+    let grpc_ip_for_thread = grpc_ip.clone();
+    let grpc_port = player_service_config.grpc.port;
+    let core_id = player_service_config.core;
 
     let _player_thread = std::thread::spawn(move || {
-        tracing::info!("Starting player service on port {}", grpc_port);
+        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
         
-        let mut cmd = std::process::Command::new("cargo");
-        cmd.args(&["run", "--release", "-p", "players"])
-            .env("DATABASE_URL", &player_db_url)
-            .env("PLAYER_SERVICE_PORT", &grpc_port)
-            .env("RUST_LOG", "debug,sqlx=warn");
-        
-        // Inherit current environment and override specific vars
-        for (key, value) in std::env::vars() {
-            if key.starts_with("DATABASE_URL_") || key == "RUST_LOG" || key == "GRPC_PLAYER_SERVICE_PORT" {
-                // Skip - we'll set these explicitly
-                continue;
-            }
-            cmd.env(&key, &value);
-        }
-        
-        match cmd.spawn()
+        match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .on_thread_start(move || {
+                core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+            })
+            .enable_all()
+            .build()
         {
-            Ok(mut child) => {
-                let child_id = child.id();
-                match child.wait() {
-                    Ok(status) => {
-                        if !status.success() {
-                            tracing::error!("Player service (pid {}) exited with status: {}", child_id, status);
-                            let _ = err_tx.send(format!("Player service failed: {}", status));
+            Ok(rt) => {
+                let addr_str = format!("{}:{}", grpc_ip_for_thread, grpc_port);
+                match addr_str.parse::<std::net::SocketAddr>() {
+                    Ok(addr) => {
+                        if let Err(e) = rt.block_on(async {
+                            tracing::info!("[player-service] Starting on {}", addr);
+                            
+                            let player_store = Arc::new(players::PlayerStore::load_postgres(&player_db_url));
+                            let service = players::PlayerServiceImpl::new(player_store);
+
+                            tonic::transport::Server::builder()
+                                .add_service(players::PlayerServiceServer::new(service))
+                                .serve(addr)
+                                .await
+                        }) {
+                            tracing::error!("[player-service] gRPC server error: {e:#}");
+                            let _ = err_tx.send(format!("Player service error: {e:#}"));
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Failed to wait on player service (pid {}): {}", child_id, e);
-                        let _ = err_tx.send(format!("Player service error: {}", e));
+                        tracing::error!("[player-service] Failed to parse server address: {e:#}");
+                        let _ = err_tx.send(format!("Failed to parse player service address: {e:#}"));
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to spawn player service: {}", e);
-                let _ = err_tx.send(format!("Failed to start player service: {}", e));
+                tracing::error!("[player-service] Failed to build tokio runtime: {e:#}");
+                let _ = err_tx.send(format!("Failed to build tokio runtime for player service: {e:#}"));
             }
         }
     });
@@ -594,20 +598,20 @@ pub fn start_player_service(
     simulator.add_thread_handle(_player_thread);
     
     // Wait for player service to be ready by attempting connection with retries
-    let grpc_addr = format!("[::1]:{}", grpc_port_log);
+    let grpc_addr = format!("{}:{}", grpc_ip, grpc_port);
     let mut attempts = 0;
     const MAX_ATTEMPTS: u32 = 30;  // ~3 seconds at 100ms intervals
     
     loop {
         match std::net::TcpStream::connect(&grpc_addr) {
             Ok(_) => {
-                tracing::info!("Player service is ready on port {}", grpc_port_log);
+                tracing::info!("[player-service] Ready on {}", grpc_addr);
                 break;
             }
             Err(_) => {
                 attempts += 1;
                 if attempts >= MAX_ATTEMPTS {
-                    tracing::warn!("Player service did not respond within 3 seconds; proceeding anyway");
+                    tracing::warn!("[player-service] Did not respond within 3 seconds; proceeding anyway");
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));

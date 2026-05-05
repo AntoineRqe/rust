@@ -521,7 +521,6 @@ Tokio broadcast channel for real-time updates:
 | `MARKET_SIMULATOR_ADMIN_PWD` | Admin login password | `super-secret` |
 | `MARKET_SIM_PUBLIC_MARKETS_ONLY` | Filter non-public URLs | `1` (true) |
 | `LOGIN_GATEWAY_URL` | Client redirect after login | `http://market.example.com:8080` |
-| `GRPC_PLAYER_SERVICE_PORT` | Player service gRPC port | `50052` (default) |
 | `DATABASE_URL_MARKET_SIMULATOR` | PostgreSQL connection for players | `postgres://...` |
 
 ## Client Connection Flow (Step-by-Step)
