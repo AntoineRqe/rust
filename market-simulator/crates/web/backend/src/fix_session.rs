@@ -110,8 +110,10 @@ impl FIXSessionManager {
         order_book: Arc<Mutex<OrderBookState>>,
     ) -> Result<Arc<AsyncMutex<OwnedWriteHalf>>, std::io::Error> {
         let mut sessions = self.inner.lock().unwrap();
+        // Cache sessions by both username and market to prevent cross-market session reuse
+        let session_key = format!("{}:{}", username, market_name());
 
-        if let Some(session) = sessions.get(username) {
+        if let Some(session) = sessions.get(&session_key) {
             tracing::debug!(
                 "[{}] Reusing existing FIX session for '{username}'",
                 market_name()
@@ -130,6 +132,8 @@ impl FIXSessionManager {
         let (reader, writer_half) = stream.into_split();
         let writer = Arc::new(AsyncMutex::new(writer_half));
         let stop = Arc::new(AtomicBool::new(false));
+        // Session cache key includes market to avoid cross-market session reuse
+        let session_key = format!("{}:{}", username, market_name());
 
         {
             let username = username.to_string();
@@ -139,6 +143,7 @@ impl FIXSessionManager {
             let sessions_ref = Arc::clone(&self.inner);
             let metrics = metrics.clone();
             let order_book = order_book.clone();
+            let session_key = session_key.clone();
 
             // Spawn the background reader task for this session.
             tokio::spawn(async move {
@@ -265,7 +270,7 @@ impl FIXSessionManager {
                     }
                 }
 
-                sessions_ref.lock().unwrap().remove(&username);
+                sessions_ref.lock().unwrap().remove(&session_key);
                 tracing::debug!(
                     "[{}] FIX session reader exited for '{username}'",
                     market_name()
@@ -279,7 +284,7 @@ impl FIXSessionManager {
             market_name()
         );
         sessions.insert(
-            username.to_string(),
+            session_key,
             FIXSession { writer: Arc::clone(&writer), stop },
         );
         Ok(writer)
