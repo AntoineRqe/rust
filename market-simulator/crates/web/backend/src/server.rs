@@ -3,6 +3,7 @@ use crate::fix_session::FIXSessionManager;
 use crate::login::{
     api_login_handler, api_markets_handler, app_handler, login_page_handler, root_handler,
 };
+use crate::metrics::{create_metrics_registry, metrics_handler};
 use crate::order_book::OrderBookState;
 use crate::player_client::PlayerClient;
 use crate::state::EventBus;
@@ -11,6 +12,7 @@ use crate::ws::ws_handler;
 use axum::{
     Router,
     routing::{get, post},
+    Extension,
 };
 use db;
 use std::collections::VecDeque;
@@ -196,6 +198,10 @@ async fn serve(
         trades_queue,
     };
 
+    // Initialize Prometheus metrics registry
+    let metrics_registry = Arc::new(create_metrics_registry());
+    tracing::info!("[{}] Prometheus metrics enabled at /metrics", market_name());
+
     // Load initial pending orders from gRPC at startup
     {
         let grpc_addr_clone = state.grpc_addr.clone();
@@ -227,12 +233,14 @@ async fn serve(
         .route("/api/markets", get(api_markets_handler))
         .route("/api/trades", get(crate::login::api_trades_handler))
         .route("/ws", get(ws_handler))
+        .route("/metrics", get(metrics_handler))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
+        .layer(Extension(metrics_registry))
         .with_state(state.clone());
 
     // Bind the TCP listener before starting the server to fail fast if the port is unavailable.

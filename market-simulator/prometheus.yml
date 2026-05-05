@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s # How often to ask for metrics
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "market-simulator"
+    static_configs:
+      - targets: ["localhost:9860"] # Your web server address
+    metrics_path: "/metrics" # Endpoint to scrape

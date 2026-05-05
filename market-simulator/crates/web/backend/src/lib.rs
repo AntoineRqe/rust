@@ -2,6 +2,7 @@ pub mod auth;
 pub mod fix_session;
 pub mod gateway;
 pub mod login;
+pub mod metrics;
 pub mod order_book;
 pub mod player_client;
 pub mod server;
