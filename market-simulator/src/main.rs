@@ -426,24 +426,8 @@ fn main() {
         config.players_service.grpc.port
     );
     
-    {
-        let mut dummy_simulator = crate::MarketSimulator {
-            config: config.markets[0].clone(),
-            player_database_url: player_database_url.clone(),
-            player_service_addr,
-            thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
-            shutdown: None,
-            market_feed_sources: vec![],
-            snapshot_feed_sources: vec![],
-            known_markets: gateway_markets.clone(),
-            err_tx: Arc::new(err_tx.clone()),
-            err_rx: err_rx.clone(),
-        };
-        
-        if let Err(e) = startup::start_player_service(&mut dummy_simulator, &player_database_url, &config.players_service) {
-            tracing::error!("[gateway] Failed to start player service: {e}");
-        }
-    }
+    // Player service is now run as a separate binary (players-server)
+    // Backend will connect to it at the configured address above
 
     {
         let login_ip = gateway_ip.clone();
