@@ -3,6 +3,7 @@ use order_book::OrderBookControl;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tonic::{transport::Server, Request, Response, Status};
 
 // Include the generated protobuf/gRPC bindings.
@@ -42,14 +43,36 @@ impl MarketControl for MarketControlService {
     ) -> Result<Response<ResetResponse>, Status> {
         tracing::info!("gRPC ResetMarket called");
 
-        // 1. Signal the order-book engine to reset.
-        if let Err(e) = self.ob_control_tx.send(OrderBookControl::Reset) {
-            let msg = format!("Failed to send reset to order book: {e}");
-            tracing::error!("{msg}");
-            return Ok(Response::new(ResetResponse {
-                success: false,
-                message: msg,
-            }));
+        // 1. Signal the order-book engine to reset and wait for an ack.
+        let ob_control_tx = self.ob_control_tx.clone();
+        let reset_result = tokio::task::spawn_blocking(move || {
+            let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(0);
+            ob_control_tx
+                .send(OrderBookControl::Reset { ack: ack_tx })
+                .map_err(|e| format!("Failed to send reset to order book: {e}"))?;
+            ack_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| "Order book reset timed out after 5 seconds".to_string())
+        })
+        .await;
+
+        match reset_result {
+            Ok(Ok(())) => {}
+            Ok(Err(msg)) => {
+                tracing::error!("{msg}");
+                return Ok(Response::new(ResetResponse {
+                    success: false,
+                    message: msg,
+                }));
+            }
+            Err(e) => {
+                let msg = format!("Reset task panicked: {e}");
+                tracing::error!("{msg}");
+                return Ok(Response::new(ResetResponse {
+                    success: false,
+                    message: msg,
+                }));
+            }
         }
 
         // 2. Reset the database.

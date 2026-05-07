@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 use types::{OrderEvent, OrderResult};
 
 use arc_swap::ArcSwap;
@@ -22,7 +23,7 @@ pub fn kill_order_book_engine<const N: usize>(fix_to_ob_tx: &Producer<OrderEvent
 }
 
 pub enum OrderBookControl {
-    Reset,
+    Reset { ack: crossbeam_channel::Sender<()> },
 }
 
 pub struct OrderBookSubscriber<'a, const N: usize> {
@@ -298,18 +299,19 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             // Process control messages first
             while let Ok(control) = self.control_rx.try_recv() {
                 match control {
-                    OrderBookControl::Reset => {
+                    OrderBookControl::Reset { ack } => {
                         self.order_book = OrderBook::new(self.order_book.symbol.as_str()); // Reset the order book by creating a new instance
                         tracing::info!(
                             "[{}][{}] Order book reset completed",
                             market_name(),
                             self.order_book.symbol
                         );
+                        let _ = ack.send(());
                     }
                 }
             }
 
-            if let Some(event) = self.fifo_in.pop() {
+            if let Some(event) = self.fifo_in.pop_timeout(Duration::from_millis(50)) {
                 // Process incoming order events from the input queue
                 let (event, result) = self.order_book.process_order(event);
                 // For now, I send a copy of the order event and result to each subscriber, but ideally I would like to avoid copying the order event and result in the hot path of processing orders.

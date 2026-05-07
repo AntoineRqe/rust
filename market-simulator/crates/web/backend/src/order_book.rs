@@ -1,6 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Stable u64 hash of a ClOrdId string, used as the order_id key in the backend order book.
+/// Must be consistent between server.rs (startup load) and fix_session.rs (live updates).
+pub fn stable_order_id_from_cl_ord_id(cl_ord_id: &str) -> u64 {
+    let mut fixed = [0u8; 20];
+    let bytes = cl_ord_id.as_bytes();
+    let len = bytes.len().min(20);
+    fixed[..len].copy_from_slice(&bytes[..len]);
+
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in &fixed {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// A price level in the order book with aggregate quantity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevel {

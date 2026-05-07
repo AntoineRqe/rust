@@ -23,7 +23,6 @@ pub fn start_multicast_receiver(
     bus: EventBus,
     sources: Vec<MulticastSource>,
     shutdown: Arc<AtomicBool>,
-    order_book: Arc<Mutex<OrderBookState>>,
     player_store: players::PlayerStore,
     core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -34,7 +33,7 @@ pub fn start_multicast_receiver(
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
         for source in sources {
             let err_tx = Arc::clone(&err_tx);
-            if let Err(e) = spawn_market_feed_receiver(bus.clone(), vec![source], Arc::clone(&shutdown), Arc::clone(&order_book), player_store.clone()) {
+            if let Err(e) = spawn_market_feed_receiver(bus.clone(), vec![source], Arc::clone(&shutdown), player_store.clone()) {
                 tracing::error!("[{}] Market feed receiver error: {e:#}", utils::market_name());
                 let _ = err_tx.send(format!("Market feed receiver error: {e:#}"));
             }

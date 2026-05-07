@@ -4,7 +4,7 @@ use crate::login::{
     api_login_handler, api_markets_handler, app_handler, login_page_handler, root_handler,
 };
 use crate::metrics::{create_metrics_registry, metrics_handler};
-use crate::order_book::OrderBookState;
+use crate::order_book::{OrderBookState, stable_order_id_from_cl_ord_id};
 use crate::player_client::PlayerClient;
 use crate::state::EventBus;
 use crate::state::TradeView;
@@ -439,18 +439,4 @@ async fn load_initial_order_book(
     );
 
     Ok(count as usize)
-}
-
-fn stable_order_id_from_cl_ord_id(cl_ord_id: &str) -> u64 {
-    let mut fixed = [0u8; 20];
-    let bytes = cl_ord_id.as_bytes();
-    let len = bytes.len().min(20);
-    fixed[..len].copy_from_slice(&bytes[..len]);
-
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in &fixed {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use utils::market_name;
 
-use backend::order_book::{OrderBookState, PriceLevel};
+use backend::order_book::PriceLevel;
 use backend::state::{EventBus, WsEvent};
 use market_feed::types::{
     AddOrder, DeleteOrder, MARKET_DATA_HEADER_SIZE, MarketDataHeader, MessageType, ModifyOrder,
@@ -256,13 +256,12 @@ fn parse_market_data_message(packet: &[u8], market: &str) -> Option<ParsedMarket
 /// - `bus`: The event bus used to publish events to WebSocket clients.
 /// - `sources`: A list of multicast sources to subscribe to for receiving market data.
 /// - `shutdown`: An atomic boolean used to signal the thread to shut down gracefully.
-/// - `order_book`: A shared, thread-safe reference to the order book state that will be updated with incoming market data messages.
+/// - `player_store`: Player store used to apply passive trade fills from the market feed.
 /// Returns: A `JoinHandle` for the spawned thread, which can be used to wait for the thread to finish when shutting down the server.
 pub fn spawn_market_feed_receiver(
     bus: EventBus,
     sources: Vec<MulticastSource>,
     shutdown: Arc<AtomicBool>,
-    order_book: Arc<std::sync::Mutex<OrderBookState>>,
     player_store: PlayerStore,
 ) -> Result<std::thread::JoinHandle<()>, Box<dyn std::error::Error>> {
     Ok(std::thread::spawn(move || {
@@ -347,101 +346,26 @@ pub fn spawn_market_feed_receiver(
                                 recipient: None,
                             });
 
-                            // TODO  : Handle snapshots separately to avoid blocking the order book updates with potentially large snapshot messages, and to ensure we apply snapshots atomically to avoid inconsistent state during snapshot application.
-                            // In HFT scenarios, snapshots can be large and frequent, so it's important to handle them efficiently.
-                            let mut passive_trade_update: Option<(u64, String, String, f64, f64)> =
-                                None;
-                            if let Ok(mut ob) = order_book.lock() {
-                                let book = ob.get_or_create(&parsed.symbol);
-                                match parsed.kind {
-                                    ParsedMarketDataKind::Add {
-                                        order_id,
-                                        cl_ord_id,
-                                        side,
-                                        price,
-                                        quantity,
-                                    } => {
-                                        book.add_or_update_order(
-                                            order_id,
-                                            side,
-                                            price,
-                                            quantity,
-                                            Some(cl_ord_id),
-                                            parsed.timestamp_ms,
-                                        );
-                                    }
-                                    ParsedMarketDataKind::Modify {
-                                        order_id,
-                                        cl_ord_id: _,
-                                        new_price,
-                                        new_quantity,
-                                    } => {
-                                        book.modify_order(
-                                            order_id,
-                                            new_price,
-                                            new_quantity,
-                                            parsed.timestamp_ms,
-                                        );
-                                    }
-                                    ParsedMarketDataKind::Delete {
-                                        order_id,
-                                        cl_ord_id: _,
-                                    } => {
-                                        book.delete_order(order_id, parsed.timestamp_ms);
-                                    }
-                                    ParsedMarketDataKind::Trade {
-                                        trade_id,
-                                        side,
-                                        price,
-                                        quantity,
-                                        passive_cl_ord_id,
-                                    } => {
-                                        book.apply_trade(
-                                            side,
-                                            price,
-                                            quantity,
-                                            parsed.timestamp_ms,
-                                        );
-                                        book.record_trade(
-                                            side,
-                                            price,
-                                            quantity,
-                                            parsed.timestamp_ms,
-                                        );
-                                        if !passive_cl_ord_id.is_empty() {
-                                            passive_trade_update = Some((
-                                                trade_id,
-                                                passive_cl_ord_id,
-                                                parsed.symbol.clone(),
-                                                quantity,
-                                                price,
-                                            ));
-                                        }
-                                    }
-                                    ParsedMarketDataKind::Snapshot { bids, asks } => {
-                                        book.apply_snapshot(bids, asks, parsed.timestamp_ms);
-                                    }
-                                    ParsedMarketDataKind::Unknown => {}
-                                }
-
-                                bus.publish(WsEvent::OrderBook {
-                                    symbol: parsed.symbol.clone(),
-                                    bids: book.l3_bids_sorted(),
-                                    asks: book.l3_asks_sorted(),
-                                    timestamp_ms: parsed.timestamp_ms,
-                                });
-                            }
-
-                            if let Some((trade_id, passive_cl_ord_id, symbol, quantity, price)) =
-                                passive_trade_update
+                            // Apply passive trade fills to the player store.
+                            // ExecutionReports (via fix_session.rs) are the source of truth for
+                            // the backend order book; multicast only drives passive fill accounting.
+                            if let ParsedMarketDataKind::Trade {
+                                trade_id,
+                                side: _,
+                                price,
+                                quantity,
+                                passive_cl_ord_id,
+                            } = parsed.kind
                             {
-                                player_store.apply_trade_from_feed(
-                                    trade_id,
-                                    &passive_cl_ord_id,
-                                    &symbol,
-                                    quantity,
-                                    price,
-                                );
+                                if !passive_cl_ord_id.is_empty() {
+                                    player_store.apply_trade_from_feed(
+                                        trade_id,
+                                        &passive_cl_ord_id,
+                                        &parsed.symbol,
+                                        quantity,
+                                        price,
+                                    );
+                                }
                             }
                         }
                     }

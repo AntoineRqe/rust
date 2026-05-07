@@ -96,6 +96,9 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
 
     fn build_market_data_feed_events(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<Vec<MarketEvent>> {
         if order_event.order_type == types::OrderType::CancelOrder {
+            if order_result.status != types::OrderStatus::Cancelled {
+                return None; // Cancel was rejected, no market data event
+            }
             let delete_order = self.build_delete_order_event(order_event, order_result);
             let header = self.build_header(order_event, MessageType::DeleteOrder, 28);
             return Some(vec![MarketEvent::Delete(header, delete_order)]);

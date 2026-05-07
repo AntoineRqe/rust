@@ -18,7 +18,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::player_client::PlayerClient;
 use crate::state::{EventBus, WsEvent};
 use crate::server::Metrics;
-use crate::order_book::OrderBookState;
+use crate::order_book::{OrderBookState, stable_order_id_from_cl_ord_id};
 use utils::market_name;
 
 /// Debounces OrderBook snapshot publishes to reduce bandwidth.
@@ -415,8 +415,8 @@ fn is_trade_execution(body: &str) -> bool {
 /// ExecutionReport data extracted from FIX message
 #[derive(Debug, Clone)]
 struct ExecReportData {
-    order_id: u64,       // FIX field 11
-    cl_ord_id: String,   // FIX field 41
+    order_id: u64,       // Stable hash of effective_cl_ord_id (consistent with startup load)
+    cl_ord_id: String,   // Effective ClOrdId of the target order (field 11 for new, field 41 for cancel ack)
     symbol: String,      // FIX field 55
     side: u8,            // FIX field 54
     ord_status: u8,      // FIX field 39 (0=New, 1=PartialFill, 2=Fill, 3=DoneForDay, 4=Canceled)
@@ -445,8 +445,8 @@ fn parse_execution_report(body: &str) -> Option<ExecReportData> {
         return None;
     }
 
-    let order_id = extract_field(body, "11")?.parse::<u64>().ok()?;
-    let cl_ord_id = extract_field(body, "41")?;
+    let cl_ord_id_raw = extract_field(body, "11")?; // ClOrdId of the request
+    let orig_cl_ord_id = extract_field(body, "41"); // OrigClOrdId (present in cancel acks)
     let symbol = extract_field(body, "55")?;
     let side = extract_field(body, "54")?.parse::<u8>().ok()?;
     let ord_status = extract_field(body, "39")?.parse::<u8>().ok()?;
@@ -454,9 +454,19 @@ fn parse_execution_report(body: &str) -> Option<ExecReportData> {
     let qty = extract_field(body, "38")?.parse::<f64>().ok()?;
     let leaves_qty = extract_field(body, "151")?.parse::<f64>().ok()?;
 
+    // For cancel acks (status=4), the target order's ClOrdId is in field 41 (OrigClOrdId).
+    // For new/fill reports, it's in field 11 (ClOrdId).
+    let effective_cl_ord_id = if ord_status == 4 {
+        orig_cl_ord_id.unwrap_or(cl_ord_id_raw)
+    } else {
+        cl_ord_id_raw
+    };
+
+    let order_id = stable_order_id_from_cl_ord_id(&effective_cl_ord_id);
+
     Some(ExecReportData {
         order_id,
-        cl_ord_id,
+        cl_ord_id: effective_cl_ord_id,
         symbol,
         side,
         ord_status,
@@ -535,14 +545,16 @@ mod tests {
 
     #[test]
     fn test_parse_execution_report_new_order() {
-        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
+        // Real FIX new order exec report: field 11 = ClOrdId string (not numeric), no field 41
+        let body = "35=8 │ 11=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
         
         let exec_data = parse_execution_report(body);
         assert!(exec_data.is_some());
         
         let data = exec_data.unwrap();
-        assert_eq!(data.order_id, 5544843609372783994);
+        // cl_ord_id = field 11 for new orders; order_id = stable hash of cl_ord_id
         assert_eq!(data.cl_ord_id, "ARETEST988945002");
+        assert_eq!(data.order_id, stable_order_id_from_cl_ord_id("ARETEST988945002"));
         assert_eq!(data.symbol, "AAPL");
         assert_eq!(data.side, 1);
         assert_eq!(data.ord_status, 0);  // New
@@ -553,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_parse_execution_report_partial_fill() {
-        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=1 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=50";
+        let body = "35=8 │ 11=ARETEST988945002 │ 39=1 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=50";
         
         let data = parse_execution_report(body).unwrap();
         assert_eq!(data.ord_status, 1);  // PartialFill
@@ -562,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_parse_execution_report_filled() {
-        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=2 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=0";
+        let body = "35=8 │ 11=ARETEST988945002 │ 39=2 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=0";
         
         let data = parse_execution_report(body).unwrap();
         assert_eq!(data.ord_status, 2);  // Filled
@@ -571,10 +583,14 @@ mod tests {
 
     #[test]
     fn test_parse_execution_report_canceled() {
-        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=4 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
+        // Cancel ack: field 11 = cancel req id, field 41 = original order's ClOrdId
+        let body = "35=8 │ 11=ORD-WEB-8 │ 41=ARETEST988945002 │ 39=4 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
         
         let data = parse_execution_report(body).unwrap();
         assert_eq!(data.ord_status, 4);  // Canceled
+        // For cancel acks, effective ClOrdId = field 41 (original order)
+        assert_eq!(data.cl_ord_id, "ARETEST988945002");
+        assert_eq!(data.order_id, stable_order_id_from_cl_ord_id("ARETEST988945002"));
     }
 
     #[test]
@@ -588,7 +604,7 @@ mod tests {
     #[test]
     fn test_parse_execution_report_missing_fields() {
         // Missing field 151 (leaves_qty)
-        let body = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100";
+        let body = "35=8 │ 11=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100";
         
         let exec_data = parse_execution_report(body);
         assert!(exec_data.is_none());  // Missing required field

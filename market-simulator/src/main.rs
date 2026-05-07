@@ -152,7 +152,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         bus.clone(),
         market_feed_sources.clone(),
         Arc::clone(&global_shutdown),
-        Arc::clone(&order_book),
         player_store.clone(),
         config.core_mapping.market_feed_multicast_core,
     )?;
