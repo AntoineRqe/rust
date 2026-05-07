@@ -42,8 +42,18 @@ impl PlayerStore {
     }
 
     /// Return a holdings summary (symbol → total remaining quantity) derived
-    /// from open portfolio lots for a player.
+    /// from open portfolio lots for a player. Result is cached until the
+    /// player's portfolio changes (buy or sell trade).
     pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, HoldingSummary> {
+        // Check cache first
+        {
+            let inner = self.inner.lock().unwrap();
+            if let Some(cached) = inner.holdings_cache.get(username) {
+                return cached.clone();
+            }
+        }
+
+        // Cache miss — query DB and compute
         let mut total_qty: HashMap<String, f64> = HashMap::new();
         let mut total_cost: HashMap<String, f64> = HashMap::new();
 
@@ -52,23 +62,34 @@ impl PlayerStore {
             *total_cost.entry(lot.symbol).or_insert(0.0) += lot.quantity * lot.price;
         }
 
-        total_qty
+        let summary: HashMap<String, HoldingSummary> = total_qty
             .into_iter()
             .filter_map(|(symbol, quantity)| {
                 if quantity <= 0.0 {
                     return None;
                 }
-
                 let avg_price = total_cost.get(&symbol).copied().unwrap_or(0.0) / quantity;
-                Some((
-                    symbol,
-                    HoldingSummary {
-                        quantity,
-                        avg_price,
-                    },
-                ))
+                Some((symbol, HoldingSummary { quantity, avg_price }))
             })
-            .collect()
+            .collect();
+
+        // Store in cache
+        self.inner
+            .lock()
+            .unwrap()
+            .holdings_cache
+            .insert(username.to_string(), summary.clone());
+
+        summary
+    }
+
+    /// Invalidate the holdings cache for a player (call after any trade).
+    pub fn invalidate_holdings_cache(&self, username: &str) {
+        self.inner
+            .lock()
+            .unwrap()
+            .holdings_cache
+            .remove(username);
     }
 
     /// Apply a FIX execution report to player state (tokens, pending orders).
@@ -318,6 +339,8 @@ impl PlayerStore {
                             "[{}] Failed to insert portfolio lot for {uname}: {e}",
                             market_name()
                         );
+                    } else {
+                        self.invalidate_holdings_cache(&uname);
                     }
                 } else if lot_side == "2" {
                     // Sell: FIFO consume from existing lots.
@@ -331,6 +354,8 @@ impl PlayerStore {
                             "[{}] Failed to consume portfolio lots for {uname}: {e}",
                             market_name()
                         );
+                    } else {
+                        self.invalidate_holdings_cache(&uname);
                     }
                 }
             }
@@ -425,6 +450,8 @@ impl PlayerStore {
                     lot_qty,
                 )) {
                     tracing::error!("[{}] Failed to consume passive-side portfolio lots for {owner_username}: {e}", market_name());
+                } else {
+                    self.invalidate_holdings_cache(&owner_username);
                 }
             }
         }

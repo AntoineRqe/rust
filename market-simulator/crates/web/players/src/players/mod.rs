@@ -89,6 +89,8 @@ pub struct StoreInner {
     pub processed_exec_ids: HashSet<String>,
     pub total_visitor_count: u64,
     pub pool: Option<Arc<PgPool>>,
+    /// Cached holdings summaries per player. Invalidated on every trade.
+    pub holdings_cache: HashMap<String, HashMap<String, crate::players::portfolio::HoldingSummary>>,
 }
 
 impl PlayerStore {
@@ -153,6 +155,7 @@ impl PlayerStore {
                 processed_exec_ids: HashSet::new(),
                 total_visitor_count,
                 pool,
+                holdings_cache: HashMap::new(),
             })),
         }
     }
@@ -166,6 +169,7 @@ impl PlayerStore {
                 processed_exec_ids: HashSet::new(),
                 total_visitor_count: storage.total_visitor_count,
                 pool: None,
+                holdings_cache: HashMap::new(),
             })),
         }
     }
@@ -318,6 +322,7 @@ impl PlayerStore {
 
         inner.order_owners.clear();
         inner.processed_exec_ids.clear();
+        inner.holdings_cache.clear();
         let pool = inner.pool.clone();
         drop(inner);
 
