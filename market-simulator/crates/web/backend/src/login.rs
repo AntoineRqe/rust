@@ -1,7 +1,7 @@
 use axum::{
     response::{Html, IntoResponse, Redirect},
     extract::{State, Query},
-    http::StatusCode,
+    http::{StatusCode, header},
     Json,
 };
 use serde::Deserialize;
@@ -29,7 +29,11 @@ pub async fn login_page_handler(
     _state: State<AppState>,
     _params: Query<LoginPageParams>,
 ) -> impl IntoResponse {
-    Html(frontend::LOGIN_HTML).into_response()
+    (
+        [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")],
+        Html(frontend::LOGIN_HTML),
+    )
+        .into_response()
 }
 
 /// Redirect the root URL to the canonical app route.
@@ -52,7 +56,10 @@ pub async fn app_handler(State(state): State<AppState>) -> impl IntoResponse {
         .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url)
         .replace("{{CURRENT_MARKET_NAME}}", market)
         .replace("{{MARKETS_JSON}}", &markets_json);
-    Html(html)
+    (
+        [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")],
+        Html(html),
+    )
 }
 
 /// Handle login requests. Supports both admin login (with MARKET_SIMULATOR_ADMIN_PWD env var)

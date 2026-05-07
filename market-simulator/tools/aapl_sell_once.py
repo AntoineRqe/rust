@@ -1,43 +1,37 @@
 #!/usr/bin/env python3
 """
-Fetches live AAPL price from NASDAQ (via TradeWatch),
-submits a SELL order for 100 AAPL to the NASDAQ market simulator at this price,
-and submits a SELL order for 100 AAPL to the NYSE market simulator at +/- a percentage of this price.
+Fetches live AAPL price from NASDAQ, then places (or refreshes) a SELL limit
+order on each market via the web-backend WebSocket API.
+
+Orders flow through the backend FIX session manager, so execution reports
+update the order book displayed in the browser.
 
 Usage:
-    python aapl_sell_once.py [--config CONFIG] [--nasdaq-market-name NASDAQ] [--nyse-market-name NYSE] [--delta-percent DELTA]
+    python aapl_sell_once.py [--nasdaq-url URL] [--nyse-url URL]
+                             [--username USER] [--password PASS]
+                             [--qty QTY] [--delta-percent DELTA]
+                             [--dry-run]
 
-- Requires TradeWatch API key in TRADEWATCH_API_KEY env variable.
-- Market endpoints are loaded from the config JSON (default: crates/config/default.json).
+Defaults connect to https://www.marketsim.site (path-based routing).
+Requires: pip install websockets
 """
-import os
 import argparse
 import json
-import socket
-from pathlib import Path
-from typing import Dict, Any
+import re
+import ssl
+import asyncio
+from urllib import request as urllib_request
 
-def build_cancel_order(sender, target, symbol, seq, cl_ord_id, orig_cl_ord_id) -> bytes:
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).strftime("%Y%m%d-%H:%M:%S")
-    body = (
-        fld(35, "F")  # Order Cancel Request
-        + fld(49, sender)
-        + fld(56, target)
-        + fld(34, seq)
-        + fld(52, now)
-        + fld(11, cl_ord_id)
-        + fld(41, orig_cl_ord_id)
-        + fld(55, symbol)
-        + fld(54, 2)  # Side: Sell
-    )
-    return wrap_fix(body)
+try:
+    import websockets
+except ImportError:
+    raise SystemExit("Missing dependency: pip install websockets")
+
+# ── price fetch ───────────────────────────────────────────────────────────────
 
 def fetch_nasdaq_price(symbol: str) -> float:
-    import re, json
-    from urllib import request
     url = f"https://api.nasdaq.com/api/quote/{symbol}/info?assetclass=stocks"
-    req = request.Request(
+    req = urllib_request.Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -46,9 +40,8 @@ def fetch_nasdaq_price(symbol: str) -> float:
             "Origin": "https://www.nasdaq.com",
         },
     )
-    with request.urlopen(req, timeout=15) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-        payload = json.loads(body)
+    with urllib_request.urlopen(req, timeout=15) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     data = (payload or {}).get("data") or {}
     primary = data.get("primaryData") or {}
     candidate = primary.get("lastSalePrice") or primary.get("lastTrade") or data.get("lastSalePrice")
@@ -59,164 +52,176 @@ def fetch_nasdaq_price(symbol: str) -> float:
         raise RuntimeError(f"Cannot parse price from value: {candidate!r}")
     return float(match.group(0))
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "crates" / "config" / "default.json"
-SOH = "\x01"
+# ── login ─────────────────────────────────────────────────────────────────────
 
-class MarketEndpoint:
-    def __init__(self, name: str, ip: str, port: int):
-        self.name = name
-        self.ip = ip
-        self.port = port
-
-def fld(tag: int, val: Any) -> str:
-    return f"{tag}={val}{SOH}"
-
-def checksum(raw: str) -> str:
-    return str(sum(ord(c) for c in raw) % 256).zfill(3)
-
-def wrap_fix(body: str) -> bytes:
-    begin = fld(8, "FIX.4.2")
-    blen = fld(9, len(begin) + len(body))
-    raw = begin + blen + body
-    raw += fld(10, checksum(raw))
-    return raw.encode("ascii")
-
-def build_sell_limit_order(sender, target, symbol, qty, price, seq, cl_ord_id) -> bytes:
-    import time
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).strftime("%Y%m%d-%H:%M:%S")
-    body = (
-        fld(35, "D")
-        + fld(49, sender)
-        + fld(56, target)
-        + fld(34, seq)
-        + fld(52, now)
-        + fld(11, cl_ord_id)
-        + fld(21, 1)
-        + fld(55, symbol)
-        + fld(54, 2)
-        + fld(60, now)
-        + fld(38, int(qty))
-        + fld(40, 2)
-        + fld(44, f"{price:.4f}")
+def gateway_login(gateway_url: str, username: str, password: str) -> dict:
+    """POST /api/login to the gateway. Returns dict of market_name -> token."""
+    login_url = gateway_url.rstrip("/") + "/api/login"
+    data = json.dumps({"username": username, "password": password}).encode()
+    req = urllib_request.Request(
+        login_url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    return wrap_fix(body)
+    ctx = ssl.create_default_context()
+    with urllib_request.urlopen(req, timeout=10, context=ctx) as resp:
+        body = json.loads(resp.read().decode())
 
-def load_market_endpoints(config_path: Path) -> Dict[str, MarketEndpoint]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    out = {}
-    for market in cfg.get("markets", []):
-        name = str(market.get("name", "")).strip().upper()
-        tcp = market.get("tcp") or {}
-        ip = str(tcp.get("ip", "127.0.0.1"))
-        port = int(tcp.get("port", 0))
-        if name and port > 0:
-            out[name] = MarketEndpoint(name, ip, port)
-    return out
+    # Multi-market gateway response: { markets: [{name, token, url}, ...] }
+    markets = body.get("markets")
+    if markets:
+        result = {m["name"].upper(): m["token"] for m in markets}
+        print(f"  Authenticated as '{username}', got tokens for: {list(result.keys())}")
+        return result
 
-def send_fix_message(endpoint: MarketEndpoint, msg: bytes) -> None:
-    with socket.create_connection((endpoint.ip, endpoint.port), timeout=8) as sock:
-        sock.sendall(msg)
-        sock.settimeout(0.2)
+    # Single-market fallback: { token: "..." }
+    token = body.get("token")
+    if not token:
+        raise RuntimeError(f"Login failed: {body}")
+    print(f"  Authenticated as '{username}' (single-market token)")
+    return {"__single__": token}
+
+# ── WebSocket order placement ─────────────────────────────────────────────────
+
+async def place_orders_via_ws(
+    ws_url: str,
+    token: str,
+    username: str,
+    cl_ord_id: str,
+    symbol: str,
+    qty: int,
+    price: float,
+    dry_run: bool,
+) -> None:
+    """Connect to the market WS, cancel any previous order with this cl_ord_id,
+    then place a fresh SELL limit order. Waits for the execution report."""
+    full_url = f"{ws_url}?token={token}&username={username}&market={_market_from_clordid(cl_ord_id)}"
+
+    if dry_run:
+        print(f"  [DRY RUN] Would connect to {ws_url} and SELL {qty} {symbol} @ {price:.4f} (clordid={cl_ord_id})")
+        return
+
+    ssl_ctx = ssl.create_default_context() if ws_url.startswith("wss://") else None
+
+    async with websockets.connect(full_url, ssl=ssl_ctx) as ws:
+        # Cancel the previous order with the same cl_ord_id (idempotent if absent)
+        cancel_cmd = json.dumps({
+            "action": "cancel",
+            "clord_id": cl_ord_id,
+            "symbol": symbol,
+            "qty": float(qty),
+        })
+        await ws.send(cancel_cmd)
+        print(f"  Sent CANCEL {cl_ord_id}")
+
+        # Brief pause so the cancel reaches the engine before the new order
+        await asyncio.sleep(0.1)
+
+        # Place the new SELL limit order
+        order_cmd = json.dumps({
+            "action": "order",
+            "clord_id": cl_ord_id,
+            "symbol": symbol,
+            "qty": float(qty),
+            "price": round(price, 4),
+            "side": "2",  # SELL
+        })
+        await ws.send(order_cmd)
+        print(f"  Sent SELL {qty} {symbol} @ {price:.4f} (clordid={cl_ord_id})")
+
+        # Wait for the execution report (39=0 New) or any ack, timeout 5s
         try:
-            _ = sock.recv(4096)
-        except OSError:
-            pass
+            async with asyncio.timeout(5):
+                while True:
+                    raw = await ws.recv()
+                    msg = json.loads(raw)
+                    if msg.get("type") == "fix_message":
+                        body = msg.get("body", "")
+                        label = msg.get("label", "")
+                        print(f"  << {label}: {body[:120]}")
+                        # Stop on execution report (35=8) for our order, or on the
+                        # backend's own "SENT ▶" ack.  Exclude cancel rejects (35=9)
+                        # which also carry orig_cl_ord_id in the body.
+                        if cl_ord_id in body and ("35=8" in body or "SENT \u25b6" in label):
+                            break
+        except TimeoutError:
+            print("  (no execution report within 5 s — order may still be processing)")
 
-def main():
-    parser = argparse.ArgumentParser(description="AAPL sell order bot (single run)")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Path to config JSON")
-    parser.add_argument("--nasdaq-market-name", default="NASDAQ", help="Market name for NASDAQ in config")
-    parser.add_argument("--nyse-market-name", default="NYSE", help="Market name for NYSE in config")
-    parser.add_argument("--delta-percent", type=float, default=0.1, help="Percent delta for NYSE price (default: 0.1)")
-    parser.add_argument("--qty", type=int, default=10, help="Sell quantity")
-    parser.add_argument("--sender", default="AUTO_BOT", help="FIX SenderCompID (49)")
-    parser.add_argument("--target", default="SERVER1", help="FIX TargetCompID (56)")
-    parser.add_argument("--dry-run", action="store_true", help="Print actions, do not send orders")
-    args = parser.parse_args()
 
-    endpoints = load_market_endpoints(args.config)
-    nasdaq_name = args.nasdaq_market_name.upper()
-    nyse_name = args.nyse_market_name.upper()
-    for name in (nasdaq_name, nyse_name):
-        if name not in endpoints:
-            raise RuntimeError(f"Market '{name}' not found in config endpoints")
+def _market_from_clordid(cl_ord_id: str) -> str:
+    """Extract market name from cl_ord_id like 'AUTOSELL-NASDAQ'."""
+    parts = cl_ord_id.upper().split("-")
+    return parts[-1] if len(parts) > 1 else "NASDAQ"
 
-    # Fetch price from official NASDAQ API
+# ── main ──────────────────────────────────────────────────────────────────────
+
+async def async_main(args: argparse.Namespace) -> None:
+    nasdaq_ws = args.nasdaq_ws_url
+    nyse_ws   = args.nyse_ws_url
+
+    # Fetch live price
     price = fetch_nasdaq_price("AAPL")
     print(f"AAPL NASDAQ price (official): {price:.4f}")
 
+    delta = price * (args.delta_percent / 100.0)
+    nyse_price = price + delta
 
-    # Cancel previous NASDAQ order
-    seq = 1
-    cl_ord_id_nasdaq = f"AUTOSELL-NASDAQ"
-    cancel_nasdaq = build_cancel_order(
-        sender=args.sender,
-        target=args.target,
-        symbol="AAPL",
-        seq=seq,
-        cl_ord_id=cl_ord_id_nasdaq+"-CANCEL",
-        orig_cl_ord_id=cl_ord_id_nasdaq,
-    )
-    if args.dry_run:
-        print(f"[DRY RUN] Would send CANCEL for {cl_ord_id_nasdaq} to {nasdaq_name}")
-    else:
-        send_fix_message(endpoints[nasdaq_name], cancel_nasdaq)
-        print(f"Sent CANCEL for {cl_ord_id_nasdaq} to {nasdaq_name}")
+    # Login once via the gateway to get per-market tokens
+    print(f"\nLogging in via gateway {args.gateway_url}...")
+    tokens = gateway_login(args.gateway_url, args.username, args.password)
 
-    # Send new NASDAQ order
-    seq += 1
-    msg_nasdaq = build_sell_limit_order(
-        sender=args.sender,
-        target=args.target,
+    nasdaq_token = tokens.get("NASDAQ") or tokens.get("__single__")
+    nyse_token   = tokens.get("NYSE")   or tokens.get("__single__")
+
+    if not nasdaq_token:
+        raise RuntimeError("No NASDAQ token in gateway login response")
+    if not nyse_token:
+        raise RuntimeError("No NYSE token in gateway login response")
+
+    # Place orders
+    print(f"\n[NASDAQ] Placing SELL {args.qty} AAPL @ {price:.4f}...")
+    await place_orders_via_ws(
+        ws_url=nasdaq_ws,
+        token=nasdaq_token,
+        username=args.username,
+        cl_ord_id="AUTOSELL-NASDAQ",
         symbol="AAPL",
         qty=args.qty,
         price=price,
-        seq=seq,
-        cl_ord_id=cl_ord_id_nasdaq,
+        dry_run=args.dry_run,
     )
-    if args.dry_run:
-        print(f"[DRY RUN] Would send SELL {args.qty} AAPL @ {price:.4f} to {nasdaq_name}")
-    else:
-        send_fix_message(endpoints[nasdaq_name], msg_nasdaq)
-        print(f"Sent SELL {args.qty} AAPL @ {price:.4f} to {nasdaq_name}")
 
-    # Cancel previous NYSE order
-    seq += 1
-    cl_ord_id_nyse = f"AUTOSELL-NYSE"
-    cancel_nyse = build_cancel_order(
-        sender=args.sender,
-        target=args.target,
-        symbol="AAPL",
-        seq=seq,
-        cl_ord_id=cl_ord_id_nyse+"-CANCEL",
-        orig_cl_ord_id=cl_ord_id_nyse,
-    )
-    if args.dry_run:
-        print(f"[DRY RUN] Would send CANCEL for {cl_ord_id_nyse} to {nyse_name}")
-    else:
-        send_fix_message(endpoints[nyse_name], cancel_nyse)
-        print(f"Sent CANCEL for {cl_ord_id_nyse} to {nyse_name}")
-
-    # Send new NYSE order at +/- delta percent
-    seq += 1
-    delta = price * (args.delta_percent / 100.0)
-    nyse_price = price + delta
-    msg_nyse = build_sell_limit_order(
-        sender=args.sender,
-        target=args.target,
+    print(f"\n[NYSE] Placing SELL {args.qty} AAPL @ {nyse_price:.4f} (+{args.delta_percent}%)...")
+    await place_orders_via_ws(
+        ws_url=nyse_ws,
+        token=nyse_token,
+        username=args.username,
+        cl_ord_id="AUTOSELL-NYSE",
         symbol="AAPL",
         qty=args.qty,
         price=nyse_price,
-        seq=seq,
-        cl_ord_id=cl_ord_id_nyse,
+        dry_run=args.dry_run,
     )
-    if args.dry_run:
-        print(f"[DRY RUN] Would send SELL {args.qty} AAPL @ {nyse_price:.4f} to {nyse_name}")
-    else:
-        send_fix_message(endpoints[nyse_name], msg_nyse)
-        print(f"Sent SELL {args.qty} AAPL @ {nyse_price:.4f} to {nyse_name}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="AAPL sell order bot — routes via backend WebSocket")
+    parser.add_argument("--gateway-url", default="https://www.marketsim.site",
+                        help="Base URL of the gateway (login) server")
+    parser.add_argument("--nasdaq-ws-url", default="wss://www.marketsim.site/nasdaq/ws",
+                        help="WebSocket URL for the NASDAQ market")
+    parser.add_argument("--nyse-ws-url", default="wss://www.marketsim.site/nyse/ws",
+                        help="WebSocket URL for the NYSE market")
+    parser.add_argument("--username", default="autosell", help="Login username")
+    parser.add_argument("--password", default="autosell", help="Login password")
+    parser.add_argument("--delta-percent", type=float, default=0.1,
+                        help="Percent delta applied to NYSE price vs NASDAQ (default: 0.1)")
+    parser.add_argument("--qty", type=int, default=10, help="Sell quantity (default: 10)")
+    parser.add_argument("--dry-run", action="store_true", help="Print actions without sending")
+    args = parser.parse_args()
+    asyncio.run(async_main(args))
+
 
 if __name__ == "__main__":
     main()

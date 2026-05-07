@@ -1,3 +1,5 @@
+name: market-simulator
+
 services:
   # PostgreSQL Database
   postgres:
@@ -76,7 +78,7 @@ services:
       RUST_LOG: info
       PLAYER_SERVICE_ADDR: http://players-service:50053
     ports:
-      - "9870:9870" # Web UI
+      - "19870:9870" # Web UI (nginx terminates TLS on :9870 → this port)
       - "9871:9871" # TCP FIX
       - "50051:50051" # gRPC order book
       - "9891:9891" # Market data proxy
@@ -108,7 +110,7 @@ services:
       RUST_LOG: info
       PLAYER_SERVICE_ADDR: http://players-service:50053
     ports:
-      - "9885:9885" # Web UI
+      - "19885:9885" # Web UI (nginx terminates TLS on :9885 → this port)
       - "9884:9884" # TCP FIX
       - "50052:50052" # gRPC order book
       - "9892:9892" # Market data proxy

@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
     extract::State,
     response::{Html, IntoResponse},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     Json,
 };
 use crate::auth::MarketInfo;
@@ -65,8 +65,11 @@ pub fn run_login_gateway(markets: Vec<MarketInfo>, ip: &str, port: u16) {
         });
 }
 
-async fn gateway_login_page_handler() -> Html<&'static str> {
-    Html(frontend::LOGIN_HTML)
+async fn gateway_login_page_handler() -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")],
+        Html(frontend::LOGIN_HTML),
+    )
 }
 
 async fn gateway_app_handler(
@@ -82,7 +85,7 @@ async fn gateway_app_handler(
         .iter()
         .map(|market| MarketInfo {
             name: market.name.clone(),
-            url: adapt_market_url_for_client(&market.url, &headers),
+            url: adapt_market_url_for_client(&market.url, &market.name, &headers),
         })
         .collect();
 
@@ -100,7 +103,11 @@ async fn gateway_app_handler(
         .replace("{{CURRENT_MARKET_NAME}}", current_market_name)
         .replace("{{MARKETS_JSON}}", &markets_json);
 
-    Html(html).into_response()
+    (
+        [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")],
+        Html(html),
+    )
+        .into_response()
 }
 
 async fn gateway_markets_handler(State(state): State<LoginGatewayState>) -> Json<Vec<MarketInfo>> {
@@ -208,7 +215,7 @@ async fn gateway_login_handler(
                 .unwrap_or(false);
 
             user_is_admin = user_is_admin || is_admin;
-            let market_url = adapt_market_url_for_client(&market.url, &headers);
+            let market_url = adapt_market_url_for_client(&market.url, &market.name, &headers);
 
             successful_markets.push(MarketCredentials {
                 name: market.name.clone(),
@@ -265,39 +272,62 @@ async fn gateway_login_handler(
 }
 
 /// Adapt market URL for client based on request headers.
-/// 
-/// If the request came through a public domain, use public URLs.
-/// Otherwise, use internal URLs.
-fn adapt_market_url_for_client(internal_url: &str, headers: &HeaderMap) -> String {
-    // Parse internal URL to extract port
+///
+/// When served over HTTPS, returns a path-prefixed URL (e.g.
+/// `https://host/nasdaq`) so the browser can reach the WebSocket via the
+/// already-TLS-terminated standard port rather than a bare high port that
+/// has no TLS listener.  A reverse-proxy (nginx, caddy, etc.) must route
+/// `/nasdaq/ws` → market-nasdaq:9870/ws and `/nyse/ws` → market-nyse:9885/ws.
+///
+/// When served over plain HTTP (local dev), the original port-based URL is
+/// preserved so that no reverse-proxy is needed.
+fn adapt_market_url_for_client(internal_url: &str, market_name: &str, headers: &HeaderMap) -> String {
+    let req_host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+
+    let host_only = req_host.split(':').next().unwrap_or(req_host);
+    let host_lower = host_only.to_ascii_lowercase();
+
+    let req_scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| {
+            if host_lower == "localhost"
+                || host_lower == "127.0.0.1"
+                || host_lower == "::1"
+            {
+                "http".to_string()
+            } else {
+                // In production behind TLS terminators, some proxy chains may
+                // omit x-forwarded-proto. Prefer https for public hosts.
+                "https".to_string()
+            }
+        });
+
+    let clean_host = host_only;
+
+    if req_scheme == "https" {
+        // Path-based routing: browser connects via wss://host/nasdaq/ws
+        // which travels through the existing TLS-terminating reverse proxy.
+        let path = market_name.to_ascii_lowercase();
+        return format!("https://{}/{}", clean_host, path);
+    }
+
+    // Plain HTTP (local dev): keep the original port-based URL.
     let internal_uri = match internal_url.parse::<axum::http::Uri>() {
         Ok(uri) => uri,
-        Err(_) => {
-            return internal_url.to_string();
-        }
+        Err(_) => return internal_url.to_string(),
     };
-
-    // Get port from internal URL (e.g., 8081 from http://localhost:8081)
     let internal_port = internal_uri.port_u16().unwrap_or_else(|| {
         match internal_uri.scheme() {
             Some(scheme) if scheme.as_str() == "https" => 443,
             _ => 80,
         }
     });
-
-    // Get request headers for public host/scheme
-    let req_host = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-
-    let req_scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
-
-    // Use the same host+scheme but with the market port
-    format!("{}://{}:{}", req_scheme, req_host.split(':').next().unwrap_or(req_host), internal_port)
+    format!("http://{}:{}", clean_host, internal_port)
 }
 
 fn forwarded_header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -312,10 +342,22 @@ fn gateway_public_base_url(headers: &HeaderMap) -> String {
         .or_else(|| forwarded_header(headers, "host"))
         .unwrap_or_else(|| "127.0.0.1:9875".to_string());
 
+    let host_only = host.split(':').next().unwrap_or(host.as_str());
+    let host_lower = host_only.to_ascii_lowercase();
+
     let proto = forwarded_header(headers, "x-forwarded-proto")
         .map(|p| p.to_ascii_lowercase())
         .filter(|p| p == "http" || p == "https")
-        .unwrap_or_else(|| "http".to_string());
+        .unwrap_or_else(|| {
+            if host_lower == "localhost"
+                || host_lower == "127.0.0.1"
+                || host_lower == "::1"
+            {
+                "http".to_string()
+            } else {
+                "https".to_string()
+            }
+        });
 
     format!("{}://{}", proto, host)
 }

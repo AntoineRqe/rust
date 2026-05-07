@@ -476,7 +476,7 @@ const LOGIN_GATEWAY_URL = '{{LOGIN_GATEWAY_URL}}';
 const CURRENT_MARKET_NAME = '{{CURRENT_MARKET_NAME}}';
 const KNOWN_MARKETS = {{MARKETS_JSON}};
 const AUTH_TOKEN = sessionStorage.getItem('auth_token');
-const MARKET_TOKENS = (() => {
+const MARKET_TOKENS_RAW = (() => {
   try {
     const stored = sessionStorage.getItem('market_tokens');
     return stored ? JSON.parse(stored) : null;
@@ -484,6 +484,53 @@ const MARKET_TOKENS = (() => {
     return null;
   }
 })();
+
+function normalizeMarketTokenUrls(tokens) {
+  if (!tokens || typeof tokens !== 'object') return tokens;
+
+  const normalized = {};
+  let changed = false;
+
+  Object.keys(tokens).forEach(name => {
+    const entry = tokens[name] || {};
+    let url = String(entry.url || '').trim();
+
+    if (location.protocol === 'https:' && url) {
+      try {
+        const parsed = new URL(url, location.origin);
+        const sameHost = parsed.hostname === location.hostname;
+        const mappedPort = parsed.port === '9870' || parsed.port === '9885' || parsed.port === '19870' || parsed.port === '19885';
+        if (sameHost && mappedPort) {
+          const marketPath = encodeURIComponent(String(name || '').trim().toLowerCase());
+          if (marketPath) {
+            const rewritten = `${location.origin}/${marketPath}`;
+            if (rewritten !== url) changed = true;
+            url = rewritten;
+          }
+        }
+      } catch (_) {}
+    }
+
+    normalized[name] = {
+      ...entry,
+      url,
+    };
+  });
+
+  if (changed) {
+    try {
+      sessionStorage.setItem('market_tokens', JSON.stringify(normalized));
+      console.log('[Boot] Normalized stale market token URLs for HTTPS.');
+    } catch (_) {}
+  }
+
+  return normalized;
+}
+
+const MARKET_TOKENS = normalizeMarketTokenUrls(MARKET_TOKENS_RAW);
+
+const FRONTEND_BUILD_TAG = 'ws-fix-2026-05-08-v3';
+console.log('[Boot] frontend build:', FRONTEND_BUILD_TAG);
 
 // If we have multi-market tokens from gateway login, use those
 // Otherwise, fall back to single-market auth
@@ -675,13 +722,37 @@ function buildEndpoint(baseUrl, suffix) {
 
 function buildWsEndpoint(baseUrl) {
   const httpUrl = new URL(buildEndpoint(baseUrl, '/ws'));
-  const wsProto = (location.protocol === 'https:' || httpUrl.protocol === 'https:') ? 'wss:' : 'ws:';
+  const inputProtocol = String(httpUrl.protocol || '').toLowerCase();
+  const shouldUseSecureWs =
+    location.protocol === 'https:' ||
+    inputProtocol === 'https:' ||
+    inputProtocol === 'wss:';
+  const wsProto = shouldUseSecureWs ? 'wss:' : 'ws:';
   return `${wsProto}//${httpUrl.host}${httpUrl.pathname}`;
 }
 
 function enforceSecureWsIfNeeded(url) {
-  if (location.protocol !== 'https:') return url;
-  return String(url || '').replace(/^ws:/i, 'wss:');
+  const raw = String(url || '').trim();
+  if (!raw) return raw;
+
+  try {
+    const parsed = new URL(raw, location.origin);
+    if (location.protocol === 'https:' && parsed.protocol === 'ws:') {
+      parsed.protocol = 'wss:';
+    }
+    return parsed.toString();
+  } catch (_) {
+    if (location.protocol !== 'https:') return raw;
+    return raw.replace(/^ws:/i, 'wss:');
+  }
+}
+
+function sanitizeWebSocketUrl(url) {
+  const normalized = enforceSecureWsIfNeeded(url);
+  if (location.protocol === 'https:' && /^ws:\/\//i.test(normalized)) {
+    return normalized.replace(/^ws:/i, 'wss:');
+  }
+  return normalized;
 }
 
 function getCurrentAppBaseUrl() {
@@ -1010,8 +1081,9 @@ function connectWS() {
   const wsBase = enforceSecureWsIfNeeded(buildWsEndpoint(marketUrl));
   const market = encodeURIComponent(primaryMarketName || '');
   const username = encodeURIComponent(currentPlayer || sessionStorage.getItem('auth_username') || '');
-  console.log(`[Primary] Connecting to ${primaryMarketName} at ${wsBase}?token=${token}&market=${market}&username=${username}`);
-  ws = new WebSocket(enforceSecureWsIfNeeded(`${wsBase}?token=${token}&market=${market}&username=${username}`));
+  const wsUrl = sanitizeWebSocketUrl(`${wsBase}?token=${token}&market=${market}&username=${username}`);
+  console.log(`[Primary] Connecting to ${primaryMarketName} at ${wsUrl}`);
+  ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
     resetPrimaryReconnect();
@@ -1113,7 +1185,7 @@ async function connectMarketWS(market) {
     // Use market.url directly, not getCurrentAppBaseUrl()
     const wsBase = enforceSecureWsIfNeeded(buildWsEndpoint(market.url));
     const username = encodeURIComponent(currentPlayer || sessionStorage.getItem('auth_username') || '');
-    const wsUrl = enforceSecureWsIfNeeded(`${wsBase}?token=${token}&market=${encodeURIComponent(marketName)}&username=${username}`);
+    const wsUrl = sanitizeWebSocketUrl(`${wsBase}?token=${token}&market=${encodeURIComponent(marketName)}&username=${username}`);
     
     console.log(`[Market] Connecting to ${market.name} at ${wsUrl}`);
     
