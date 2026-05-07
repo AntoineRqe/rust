@@ -1,0 +1,26 @@
+# Build the gateway and market-runner binaries from pre-built release artifacts
+# Prerequisites: Must run build-release.sh before Docker build
+#   ./build-release.sh
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built gateway, market-runner, and market-simulator binaries to /app/bin
+COPY target/release/gateway /app/bin/gateway
+COPY target/release/market-runner /app/bin/market-runner
+COPY target/release/market-simulator /app/bin/market-simulator
+
+# Copy configuration files
+COPY crates/config /app/crates/config
+
+WORKDIR /app
+
+# Make binaries executable
+RUN chmod +x /app/bin/gateway /app/bin/market-runner /app/bin/market-simulator
+
+# Add /app/bin to PATH so binaries can be called directly
+ENV PATH="/app/bin:${PATH}"

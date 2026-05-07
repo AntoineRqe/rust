@@ -1,0 +1,62 @@
+# Git and version control
+.git/
+.gitignore
+.github/
+
+# Environment
+.env
+.env.local
+.env*.local
+
+# Build outputs - exclude everything EXCEPT release binaries
+target/debug/
+target/incremental/
+target/.rustc_info.json
+target/CACHEDIR.TAG
+target/*/deps/
+target/*/build/
+target/*/examples/
+target/*/incremental/
+target/release/deps/
+target/release/.fingerprint/
+target/release/build/
+target/release/examples/
+target/release/incremental/
+target/release/*.d
+
+# IDE and editor files
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*.swn
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project files we don't need in Docker
+*.log
+.coverage/
+node_modules/
+Cargo.lock
+LICENSE
+README.md
+
+# Documentation (keep deployment docs, exclude others)
+deployment/docker-compose.yml
+deployment/README.md
+deployment/*.md
+deployment/.git*
+DOCKER_DEPLOYMENT.md
+PER_MARKET_DEPLOYMENT.md
+papers/
+monitoring/
+benchmarks/
+benches/

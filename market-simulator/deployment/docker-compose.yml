@@ -1,0 +1,121 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: market-simulator-db
+    environment:
+      POSTGRES_DB: market_simulator
+      POSTGRES_USER: market_user
+      POSTGRES_PASSWORD: market_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U market_user -d market_simulator"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - market-network
+
+  # Player Service (gRPC)
+  players-service:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.players
+    container_name: market-simulator-players
+    environment:
+      DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
+      PLAYER_SERVICE_PORT: 50053
+      RUST_LOG: info
+    ports:
+      - "50053:50053"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - market-network
+    restart: unless-stopped
+
+  # Gateway Service (Login page)
+  gateway:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.gateway
+    container_name: market-simulator-gateway
+    environment:
+      DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
+      RUST_LOG: info
+      PLAYER_SERVICE_ADDR: http://players-service:50053
+    ports:
+      - "9860:9860"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      players-service:
+        condition: service_started
+    networks:
+      - market-network
+    restart: unless-stopped
+    command: ["gateway", "--config", "crates/config/docker.json"]
+
+  # NASDAQ Market Service
+  market-nasdaq:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.gateway
+    container_name: market-simulator-nasdaq
+    environment:
+      DATABASE_URL_NASDAQ: postgresql://market_user:market_password@postgres:5432/market_simulator
+      DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
+      RUST_LOG: info
+      PLAYER_SERVICE_ADDR: http://players-service:50053
+    ports:
+      - "9870:9870" # Web UI
+      - "9871:9871" # TCP FIX
+      - "50051:50051" # gRPC order book
+      - "9891:9891" # Market data proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      players-service:
+        condition: service_started
+    networks:
+      - market-network
+    restart: unless-stopped
+    command: ["market-runner", "--config", "crates/config/markets/nasdaq.json"]
+
+  # NYSE Market Service
+  market-nyse:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.gateway
+    container_name: market-simulator-nyse
+    environment:
+      DATABASE_URL_NYSE: postgresql://market_user:market_password@postgres:5432/market_simulator
+      DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
+      RUST_LOG: info
+      PLAYER_SERVICE_ADDR: http://players-service:50053
+    ports:
+      - "9885:9885" # Web UI
+      - "9884:9884" # TCP FIX
+      - "50052:50052" # gRPC order book
+      - "9892:9892" # Market data proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      players-service:
+        condition: service_started
+    networks:
+      - market-network
+    restart: unless-stopped
+    command: ["market-runner", "--config", "crates/config/markets/nyse.json"]
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  market-network:
+    driver: bridge

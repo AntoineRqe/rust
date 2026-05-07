@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "50052".to_string())
         .parse::<u16>()?;
 
-    let addr = format!("[::1]:{}", port).parse()?;
+    let addr = format!("0.0.0.0:{}", port).parse()?;
 
     info!("Starting Player Server on {}", addr);
 

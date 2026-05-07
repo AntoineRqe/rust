@@ -1,0 +1,20 @@
+# Runtime stage only - uses pre-built binary
+FROM ubuntu:24.04
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the pre-compiled binary from local build
+COPY target/release/players-server /app/players-server
+
+# Expose gRPC port
+EXPOSE 50053
+
+ENV RUST_LOG=info
+
+ENTRYPOINT ["/app/players-server"]
