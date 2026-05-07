@@ -326,38 +326,24 @@ impl PlayerStore {
                 inner.pool.clone()
             };
             if let Some(pool) = pool {
-                if lot_side == "1" {
-                    // Buy: insert a new lot.
-                    if let Err(e) = block_on_storage(insert_portfolio_lot(
-                        &pool,
-                        &uname,
-                        &lot_symbol,
-                        lot_qty,
-                        lot_px,
-                    )) {
-                        tracing::error!(
-                            "[{}] Failed to insert portfolio lot for {uname}: {e}",
-                            market_name()
-                        );
-                    } else {
-                        self.invalidate_holdings_cache(&uname);
+                let store_inner = std::sync::Arc::clone(&self.inner);
+                tokio::spawn(async move {
+                    if lot_side == "1" {
+                        // Buy: insert a new lot.
+                        if let Err(e) = insert_portfolio_lot(&pool, &uname, &lot_symbol, lot_qty, lot_px).await {
+                            tracing::error!("[{}] Failed to insert portfolio lot for {uname}: {e}", market_name());
+                        } else {
+                            store_inner.lock().unwrap().holdings_cache.remove(&uname);
+                        }
+                    } else if lot_side == "2" {
+                        // Sell: FIFO consume from existing lots.
+                        if let Err(e) = consume_portfolio_lots_fifo(&pool, &uname, &lot_symbol, lot_qty).await {
+                            tracing::error!("[{}] Failed to consume portfolio lots for {uname}: {e}", market_name());
+                        } else {
+                            store_inner.lock().unwrap().holdings_cache.remove(&uname);
+                        }
                     }
-                } else if lot_side == "2" {
-                    // Sell: FIFO consume from existing lots.
-                    if let Err(e) = block_on_storage(consume_portfolio_lots_fifo(
-                        &pool,
-                        &uname,
-                        &lot_symbol,
-                        lot_qty,
-                    )) {
-                        tracing::error!(
-                            "[{}] Failed to consume portfolio lots for {uname}: {e}",
-                            market_name()
-                        );
-                    } else {
-                        self.invalidate_holdings_cache(&uname);
-                    }
-                }
+                });
             }
         }
 
@@ -443,16 +429,14 @@ impl PlayerStore {
                 inner.pool.clone()
             };
             if let Some(pool) = pool {
-                if let Err(e) = block_on_storage(consume_portfolio_lots_fifo(
-                    &pool,
-                    &owner_username,
-                    &lot_symbol,
-                    lot_qty,
-                )) {
-                    tracing::error!("[{}] Failed to consume passive-side portfolio lots for {owner_username}: {e}", market_name());
-                } else {
-                    self.invalidate_holdings_cache(&owner_username);
-                }
+                let store_inner = std::sync::Arc::clone(&self.inner);
+                tokio::spawn(async move {
+                    if let Err(e) = consume_portfolio_lots_fifo(&pool, &owner_username, &lot_symbol, lot_qty).await {
+                        tracing::error!("[{}] Failed to consume passive-side portfolio lots for {owner_username}: {e}", market_name());
+                    } else {
+                        store_inner.lock().unwrap().holdings_cache.remove(&owner_username);
+                    }
+                });
             }
         }
 
