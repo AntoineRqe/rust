@@ -208,7 +208,12 @@ async fn send_player_state(
     username: &str,
     is_admin: bool,
 ) {
-    match state.player_client.lock().await.get_player_state(username).await {
+    // Acquire and release the lock before the match to avoid deadlock:
+    // holding the guard across the match scrutinee would prevent the None arm
+    // from re-acquiring the lock for get_order_owners().
+    let player_state_opt = state.player_client.lock().await.get_player_state(username).await;
+
+    match player_state_opt {
         Some(player_state) => {
             let event = WsEvent::PlayerState {
                 username: player_state.username,
@@ -226,12 +231,13 @@ async fn send_player_state(
         }
         None => {
             // Player not found, send empty state
+            let order_owners = state.player_client.lock().await.get_order_owners().await;
             let event = WsEvent::PlayerState {
                 username: username.to_string(),
                 tokens: 0.0,
                 pending_orders: Vec::new(),
                 holdings: std::collections::HashMap::new(),
-                order_owners: state.player_client.lock().await.get_order_owners().await,
+                order_owners,
                 is_admin,
                 visitor_count: state.active_visitors.load(std::sync::atomic::Ordering::Relaxed),
                 total_visitor_count: state.total_visitors.load(std::sync::atomic::Ordering::Relaxed),

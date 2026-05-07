@@ -12,7 +12,7 @@
     "name": "NYSE",
     "database_url_env": "DATABASE_URL_NYSE",
     "web": {
-      "ip": "127.0.0.1",
+      "ip": "0.0.0.0",
       "port": 9885
     },
     "tcp": {

@@ -55,6 +55,10 @@ services:
         condition: service_healthy
       players-service:
         condition: service_started
+      market-nasdaq:
+        condition: service_healthy
+      market-nyse:
+        condition: service_healthy
     networks:
       - market-network
     restart: unless-stopped
@@ -81,6 +85,12 @@ services:
         condition: service_healthy
       players-service:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/9870' 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     networks:
       - market-network
     restart: unless-stopped
@@ -107,6 +117,12 @@ services:
         condition: service_healthy
       players-service:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/9885' 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     networks:
       - market-network
     restart: unless-stopped
