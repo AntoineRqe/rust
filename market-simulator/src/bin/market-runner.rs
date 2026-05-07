@@ -60,6 +60,10 @@ fn main() {
     
     // Execute market-simulator with the constructed full config
     // and --market-index 0 since we only have one market in the array
+    // Set MARKET_NAME in the current process environment so it is inherited by exec.
+    // Safety: single-threaded at this point, no other threads reading env vars
+    unsafe { std::env::set_var("MARKET_NAME", market_name) };
+
     unsafe {
         let _ = std::process::Command::new("market-simulator")
             .arg("--config")
