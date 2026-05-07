@@ -196,9 +196,11 @@ impl FIXSessionManager {
                                     debouncer.mark_dirty(&exec_data.symbol);
                                     debouncer.increment_order_count();
 
-                                    // Publish if debounce conditions met (50ms elapsed OR 5 orders)
+                                    // Publish terminal status updates immediately so UI removes orders without debounce delay.
                                     let now = Instant::now();
-                                    if debouncer.should_publish(&exec_data.symbol, now) {
+                                    if is_terminal_order_status(exec_data.ord_status)
+                                        || debouncer.should_publish(&exec_data.symbol, now)
+                                    {
                                         let book = order_book.lock().unwrap();
                                         if let Some(symbol_book) = book.get(&exec_data.symbol) {
                                             bus.publish(WsEvent::OrderBook {
@@ -425,6 +427,10 @@ struct ExecReportData {
     leaves_qty: f64,     // FIX field 151
 }
 
+fn is_terminal_order_status(ord_status: u8) -> bool {
+    matches!(ord_status, 2 | 3 | 4 | 8)
+}
+
 /// Extract a single FIX field value from pretty_fix format.
 /// Example: "35=8 | 11=ORDER123" -> extract_field("11") -> Some("ORDER123")
 fn extract_field(body: &str, field_num: &str) -> Option<String> {
@@ -448,11 +454,20 @@ fn parse_execution_report(body: &str) -> Option<ExecReportData> {
     let cl_ord_id_raw = extract_field(body, "11")?; // ClOrdId of the request
     let orig_cl_ord_id = extract_field(body, "41"); // OrigClOrdId (present in cancel acks)
     let symbol = extract_field(body, "55")?;
-    let side = extract_field(body, "54")?.parse::<u8>().ok()?;
     let ord_status = extract_field(body, "39")?.parse::<u8>().ok()?;
-    let price = extract_field(body, "44")?.parse::<f64>().ok()?;
-    let qty = extract_field(body, "38")?.parse::<f64>().ok()?;
-    let leaves_qty = extract_field(body, "151")?.parse::<f64>().ok()?;
+    let side = extract_field(body, "54")
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0);
+    let (price, qty, leaves_qty) = match ord_status {
+        // New/partial reports need full pricing fields for add/modify behavior.
+        0 | 1 => (
+            extract_field(body, "44")?.parse::<f64>().ok()?,
+            extract_field(body, "38")?.parse::<f64>().ok()?,
+            extract_field(body, "151")?.parse::<f64>().ok()?,
+        ),
+        // Terminal statuses only need identity fields to remove from the book.
+        _ => (0.0, 0.0, 0.0),
+    };
 
     // For cancel acks (status=4), the target order's ClOrdId is in field 41 (OrigClOrdId).
     // For new/fill reports, it's in field 11 (ClOrdId).
@@ -511,7 +526,7 @@ fn update_backend_order_book_from_exec_report(
                     .unwrap_or(0),
             );
         }
-        2 | 3 | 4 => {
+        2 | 3 | 4 | 8 => {
             // Filled (2), DoneForDay (3), Canceled (4): remove from order book
             symbol_book.delete_order(
                 exec.order_id,
@@ -583,8 +598,9 @@ mod tests {
 
     #[test]
     fn test_parse_execution_report_canceled() {
-        // Cancel ack: field 11 = cancel req id, field 41 = original order's ClOrdId
-        let body = "35=8 │ 11=ORD-WEB-8 │ 41=ARETEST988945002 │ 39=4 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
+        // Cancel ack: field 11 = cancel req id, field 41 = original order's ClOrdId.
+        // Price/qty/leaves may be absent in delete/cancel payloads.
+        let body = "35=8 │ 11=ORD-WEB-8 │ 41=ARETEST988945002 │ 39=4 │ 55=AAPL";
         
         let data = parse_execution_report(body).unwrap();
         assert_eq!(data.ord_status, 4);  // Canceled

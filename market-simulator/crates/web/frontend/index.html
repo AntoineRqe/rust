@@ -2530,102 +2530,11 @@ function cleanupOrderStateForMarket(market, clordId) {
 
 
 function updateBookFromFix(body, tag, marketName) {
-  // ARCHITECTURE: Order book is now driven exclusively by OrderBook WebSocket (ExecutionReport-based).
-  // FIX market data is only used for:
-  // 1. Logging and debugging information
-  // 2. Real-time price/trade tracking (for display, not order book state)
-  // 3. Terminal status tracking (to prevent re-adding cancelled orders)
+  // Frontend source of truth is backend OrderBook snapshots.
+  // FIX execution reports / market-data messages are log-only.
   if (tag !== 'md') return;
-
-  // Use primary market if not specified
   const mn = normalizeMarketName(marketName || getPrimaryMarketName());
-  const market = markets[mn];
-  if (!market) return;
-  
-  const b = market.book;
-  const f = parseFix(body);
-
-  // ── Log every MD packet for debugging ──────────────────────────────────
-  console.log(`[MD @ ${mn}]`, body, f);
-  appendLog({
-    ts: now(),
-    label: 'MD',
-    body: `39=${f['39']||'?'} 11=${f['11']||'?'} 55=${f['55']||'?'} 44=${f['44']||'?'} 38=${f['38']||'?'} 151=${f['151']||'?'} 9001=${f['9001']||'?'}`,
-    tag: 'md',
-  });
-  // ─────────────────────────────────────────────────────────────────────────
-
-  if (f['35'] !== '8') return;   // only ExecutionReport-like payloads
-
-  const status    = f['39'] || '';
-  const side      = f['54'] || '';
-  // Use OrigClOrdID (41) if available (for cancel reports), else ClOrdID (11)
-  const clordId   = f['41'] || f['11'] || '';
-  const lastPx    = sf(f['31']);
-  const lastQty   = sf(f['32']);
-  const qty       = sf(f['38']);
-  const leavesQty = sf(f['151']);
-  const sym       = f['55'];
-
-  // Clear pending order timeout on any status update
-  if (clordId && mn === getPrimaryMarketName()) {
-    clearPendingTimeout(clordId);
-  }
-
-  if (sym) b.symbol = sym;
-
-  // Track terminal status to prevent re-adding cancelled orders (OrderBook snapshot filter)
-  if (status === '2') {
-    // Filled
-    orderTerminalStatus[clordId] = status;
-    console.log(`[STATUS 2] FILLED: ${clordId}`, { status, orderTerminalStatus: Object.keys(orderTerminalStatus) });
-    
-    // Add trade to display
-    const fillPx  = lastPx > 0 ? lastPx : sf(f['44'] || f['6']);
-    const fillQty = lastQty > 0 ? lastQty : qty;
-    if (fillPx > 0 && fillQty > 0) {
-      b.last = fillPx;
-      const ownerMeta = ownerMetaFromClOrdId(clordId);
-      b.trades.unshift([fillPx, fillQty, side === '1' ? 'B' : 'S',
-                           new Date().toTimeString().slice(0,8), ownerMeta.owner, ownerMeta.resolved]);
-      b.trades = b.trades.slice(0, 20);
-    }
-
-  } else if (status === '1') {
-    // Partial fill - update price/trade display only
-    if (lastPx > 0 && lastQty > 0) {
-      b.last = lastPx;
-      const ownerMeta = ownerMetaFromClOrdId(clordId);
-      b.trades.unshift([lastPx, lastQty, side === '1' ? 'B' : 'S',
-                           new Date().toTimeString().slice(0,8), ownerMeta.owner, ownerMeta.resolved]);
-      b.trades = b.trades.slice(0, 20);
-    }
-
-  } else if (status === '3' || status === '4' || status === 'C' || status === '8') {
-    // Cancelled/Expired/Rejected - mark as terminal to prevent re-add by OrderBook snapshot
-    orderTerminalStatus[clordId] = status;
-    console.log(`[STATUS ${status}] TERMINAL SET: ${clordId}`, { allTermStatuses: Object.keys(orderTerminalStatus) });
-    console.log(`[STATUS ${status}] After cleanup`, { 
-      allTermStatuses: Object.keys(orderTerminalStatus),
-      openOrdersAfter: Object.keys(openOrders)
-    });
-    
-    // Double-check that terminal status is still set
-    setTimeout(() => {
-      console.log(`[STATUS ${status}] CHECK (after 0ms)`, { 
-        allTermStatuses: Object.keys(orderTerminalStatus),
-        value: orderTerminalStatus[clordId]
-      });
-    }, 0);
-    
-    renderOrders(mn);
-  }
-
-  // Note: Do NOT call renderBook() here. Order book state is exclusively driven by
-  // OrderBook WebSocket snapshots (from ExecutionReports). FIX messages only contribute
-  // price/trade display updates, which are automatically rendered by the snapshot handler.
-  // Calling renderBook() here could cause races where FIX updates temporarily appear
-  // before being overwritten by a subsequent OrderBook snapshot.
+  console.log(`[MD @ ${mn}]`, body, parseFix(body));
 }
 
 // ── render order book ─────────────────────────────────────────────────────────
