@@ -1496,12 +1496,14 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
     const order = openOrders[clOrdId];
     if (!order) return;
     if (normalizeMarketName(order.market) !== mn) return;
-    if (order.source !== 'book') return;
-    if (presentOwnedIds.has(clOrdId)) return;
-
-    console.log(`[MERGE BOOK] Removing ${clOrdId} from openOrders (no longer in book)`);
-    delete openOrders[clOrdId];
-    delete openOrderFirstSeen[clOrdId];
+    
+    // Remove any order not in the latest snapshot
+    // (Source of truth: if it's not in the backend book, it's gone)
+    if (!presentOwnedIds.has(clOrdId)) {
+      console.log(`[MERGE BOOK] Removing ${clOrdId} from openOrders (not in snapshot)`);
+      delete openOrders[clOrdId];
+      delete openOrderFirstSeen[clOrdId];
+    }
   });
 
   console.log(`[MERGE BOOK] Complete - openOrders now has ${Object.keys(openOrders).length} orders`);
@@ -1630,12 +1632,17 @@ function handlePlayerState(msg) {
       return;
     }
     clearPendingTimeout(o.cl_ord_id);
+    
+    // Preserve the market from the existing order if present
+    const existingOrder = openOrders[o.cl_ord_id];
+    const market = (existingOrder && normalizeMarketName(existingOrder.market)) || primaryMarketName;
+    
     nextOpenOrders[o.cl_ord_id] = {
       symbol: o.symbol || '',
       qty: Number(o.qty || 0),
       price: Number(o.price || 0),
       side: String(o.side || '1'),
-      market: primaryMarketName,
+      market: market,
       source: 'player_state',
     };
 
@@ -1685,7 +1692,17 @@ function handlePlayerState(msg) {
     }
   });
 
-  mergeClientOpenOrdersFromBook(mn, (market && market.book.symbol) || 'AAPL');
+  const primaryMarket = markets[normalizeMarketName(primaryMarketName)];
+  mergeClientOpenOrdersFromBook(primaryMarketName, (primaryMarket && primaryMarket.book.symbol) || 'AAPL');
+  
+  // Also sync secondary markets with the updated openOrders
+  Object.keys(markets).forEach(marketName => {
+    if (normalizeMarketName(marketName) !== normalizeMarketName(primaryMarketName)) {
+      const market = markets[marketName];
+      mergeClientOpenOrdersFromBook(marketName, (market && market.book.symbol) || 'AAPL');
+    }
+  });
+  
   renderOrders(null, true);
 }
 
