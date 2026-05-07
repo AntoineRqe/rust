@@ -1685,7 +1685,7 @@ function handlePlayerState(msg) {
     }
   });
 
-  mergeClientOpenOrdersFromBook(primaryMarketName, (markets[primaryMarketName] && markets[primaryMarketName].book.symbol) || 'AAPL');
+  mergeClientOpenOrdersFromBook(mn, (market && market.book.symbol) || 'AAPL');
   renderOrders(null, true);
 }
 

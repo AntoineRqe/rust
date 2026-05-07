@@ -196,11 +196,13 @@ impl FIXSessionManager {
                                     debouncer.mark_dirty(&exec_data.symbol);
                                     debouncer.increment_order_count();
 
-                                    // Publish terminal status updates immediately so UI removes orders without debounce delay.
+                                    // Publish new/partial (status 0/1) and terminal updates immediately without debounce delay.
+                                    // This ensures the UI sees orders as soon as they're added, and removals when they're canceled/filled.
                                     let now = Instant::now();
-                                    if is_terminal_order_status(exec_data.ord_status)
-                                        || debouncer.should_publish(&exec_data.symbol, now)
-                                    {
+                                    let should_publish_immediately = is_terminal_order_status(exec_data.ord_status)
+                                        || matches!(exec_data.ord_status, 0 | 1); // New or Partially Filled
+                                    
+                                    if should_publish_immediately || debouncer.should_publish(&exec_data.symbol, now) {
                                         let book = order_book.lock().unwrap();
                                         if let Some(symbol_book) = book.get(&exec_data.symbol) {
                                             bus.publish(WsEvent::OrderBook {
