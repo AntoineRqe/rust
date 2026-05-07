@@ -1249,9 +1249,22 @@ function handleServerEvent(msg, marketName) {
 }
 
 function requestPlayerState() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ action: 'get_player_state' }));
+  // Request from all connected markets (player_state is global, but we want the response ASAP)
+  const primaryMarketName = getPrimaryMarketName();
+  const primaryMarket = markets[primaryMarketName];
+  if (primaryMarket && primaryMarket.ws && primaryMarket.ws.readyState === WebSocket.OPEN) {
+    primaryMarket.ws.send(JSON.stringify({ action: 'get_player_state' }));
   }
+  
+  // Also request from any secondary markets if connected
+  Object.keys(markets).forEach(marketName => {
+    if (normalizeMarketName(marketName) !== normalizeMarketName(primaryMarketName)) {
+      const market = markets[marketName];
+      if (market && market.ws && market.ws.readyState === WebSocket.OPEN) {
+        market.ws.send(JSON.stringify({ action: 'get_player_state' }));
+      }
+    }
+  });
 }
 
 function applyOrderBookSnapshot(msg, marketName) {
@@ -1567,12 +1580,29 @@ function schedulePlayerState(msg) {
     }
   }
   lastTokenBalance = tokens;
-  ge('token-balance').textContent = `TOKENS: ${tokens.toFixed(2)}`;
+  refreshTokenBalanceDisplay();
   renderBuyCapacityHint();
 
   // Defer the orders-panel repaint so overlapping pushes coalesce.
   clearTimeout(playerStateTimer);
   playerStateTimer = setTimeout(() => handlePlayerState(msg), 200);
+}
+
+function refreshTokenBalanceDisplay() {
+  const tokenEl = ge('token-balance');
+  if (!tokenEl) return;
+
+  if (lastTokenBalance === null || !Number.isFinite(lastTokenBalance)) {
+    tokenEl.textContent = 'TOKENS: —';
+    return;
+  }
+
+  const primaryMarketName = getPrimaryMarketName();
+  const displayBalance = Math.max(
+    0,
+    Number(lastTokenBalance) - localPendingBuyNotionalForMarket(primaryMarketName)
+  );
+  tokenEl.textContent = `TOKENS: ${displayBalance.toFixed(2)}`;
 }
 
 function handlePlayerState(msg) {
@@ -1821,19 +1851,25 @@ function computeBuyCapacityForMarket(marketName) {
     return null;
   }
 
-  const reserved = Object.keys(openOrders).reduce((sum, id) => {
-    const order = openOrders[id];
-    if (!order) return sum;
-    if (normalizeMarketName(order.market) !== normalized) return sum;
-    if (String(order.side) !== '1') return sum;
-    const notional = Number(order.qty || 0) * Number(order.price || 0);
-    if (!Number.isFinite(notional) || notional <= 0) return sum;
-    return sum + notional;
-  }, 0);
+  const reserved = localPendingBuyNotionalForMarket(normalized);
 
   return {
     available: Math.max(0, Number(lastTokenBalance) - reserved),
   };
+}
+
+function localPendingBuyNotionalForMarket(marketName) {
+  const normalized = normalizeMarketName(marketName);
+  return Object.keys(openOrders).reduce((sum, id) => {
+    const order = openOrders[id];
+    if (!order) return sum;
+    if (normalizeMarketName(order.market) !== normalized) return sum;
+    if (String(order.side) !== '1') return sum;
+    if (String(order.source || '') !== 'local') return sum;
+    const notional = Number(order.qty || 0) * Number(order.price || 0);
+    if (!Number.isFinite(notional) || notional <= 0) return sum;
+    return sum + notional;
+  }, 0);
 }
 
 function computeSellCapacity(symbol) {
@@ -2112,9 +2148,13 @@ function sendOrder() {
   openOrders[clordId] = { symbol, qty, price, side: s, market: targetMarketName, source: 'local' };
   openOrderFirstSeen[clordId] = Date.now();
   schedulePendingTimeout(clordId, targetMarketName);
+  refreshTokenBalanceDisplay();
   renderOrders(null, true);
 
   send({ action: 'order', clord_id: clordId, symbol, qty, price, side: s }, targetMarketName);
+  
+  // Request updated player state to refresh token balance
+  requestPlayerState();
 }
 
 function clearPendingTimeout(clordId) {
@@ -2259,7 +2299,11 @@ function cancelOrder(clordId, symbol, qty, marketName) {
   console.log(`[CANCEL ORDER] Deleting ${clordId} from openOrders (before send)`);
   delete openOrders[clordId];
   delete openOrderFirstSeen[clordId];
+  refreshTokenBalanceDisplay();
   renderOrders(null, true);
+  
+  // Request updated player state to refresh token balance
+  requestPlayerState();
 }
 
 // ── MD dialogs ────────────────────────────────────────────────────────────────
