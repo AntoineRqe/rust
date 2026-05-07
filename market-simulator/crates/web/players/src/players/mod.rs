@@ -121,27 +121,16 @@ impl PlayerStore {
     }
 
     fn load_postgres_with_persistence(database_url: &str, should_persist: bool) -> Self {
-        let pool = if should_persist {
-            Some(Arc::new(
-                block_on_storage(db::connect(database_url))
-                    .unwrap_or_else(|e| panic!("failed to connect player store to postgres: {e}")),
-            ))
-        } else {
-            // Read-only instances don't need a pool for persistence
-            None
-        };
-
-        // Still need to load initial data
-        let initial_pool = Arc::new(
+        let load_pool = Arc::new(
             block_on_storage(db::connect(database_url))
                 .unwrap_or_else(|e| panic!("failed to connect player store to postgres: {e}")),
         );
 
-        block_on_storage(create_player_tables(&initial_pool))
+        block_on_storage(create_player_tables(&load_pool))
             .unwrap_or_else(|e| panic!("failed to create player store tables: {e}"));
 
         let (players, order_owners, total_visitor_count) =
-            block_on_storage(load_storage_from_db(&initial_pool))
+            block_on_storage(load_storage_from_db(&load_pool))
                 .unwrap_or_else(|e| panic!("failed to load player store from postgres: {e}"));
 
         tracing::info!(
@@ -149,6 +138,13 @@ impl PlayerStore {
             market_name(),
             players.len(),
         );
+
+        let pool = if should_persist {
+            Some(load_pool)
+        } else {
+            // Read-only instances don't need to keep the pool
+            None
+        };
 
         PlayerStore {
             inner: Arc::new(Mutex::new(StoreInner {
