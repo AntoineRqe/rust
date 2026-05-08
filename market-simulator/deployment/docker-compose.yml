@@ -100,7 +100,7 @@ services:
     networks:
       - market-network
     restart: unless-stopped
-    command: ["market-runner", "--config", "crates/config/markets/nasdaq.json"]
+    command: ["market-simulator", "--config", "crates/config/markets/nasdaq.json"]
     cpuset: "2,3,4" # for docker-compose v2 syntax
 
   # NYSE Market Service
@@ -134,7 +134,7 @@ services:
     networks:
       - market-network
     restart: unless-stopped
-    command: ["market-runner", "--config", "crates/config/markets/nyse.json"]
+    command: ["market-simulator", "--config", "crates/config/markets/nyse.json"]
     cpuset: "5,6,7"
 volumes:
   postgres_data:

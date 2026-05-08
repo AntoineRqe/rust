@@ -427,7 +427,6 @@ pub fn start_web_server(
         let web_port = web_addr.port;
         let web_market_database_url = market_database_url.clone();
         let web_shutdown = Arc::clone(&global_shutdown);
-        let known_markets = market_simulator.known_markets.clone();
         let order_book = Arc::clone(&order_book);
         let err_tx = Arc::clone(&market_simulator.err_tx);
 
@@ -440,7 +439,6 @@ pub fn start_web_server(
                 &web_ip,
                 web_port,
                 web_market_database_url,
-                known_markets,
                 web_shutdown,
                 order_book,
                 player_service_addr,

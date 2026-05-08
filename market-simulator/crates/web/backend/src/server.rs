@@ -1,7 +1,6 @@
-use crate::auth::MarketInfo;
 use crate::fix_session::FIXSessionManager;
 use crate::login::{
-    api_login_handler, api_markets_handler, app_handler, login_page_handler, root_handler,
+    api_login_handler,
 };
 use crate::metrics::{create_metrics_registry, metrics_handler};
 use crate::order_book::{OrderBookState, stable_order_id_from_cl_ord_id};
@@ -87,8 +86,6 @@ pub struct AppState {
     pub grpc_addr: String,
     /// gRPC client for the player service (running on separate port, e.g. 50052).
     pub player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
-    /// All configured markets (name + web URL), sent to the login page.
-    pub known_markets: Vec<MarketInfo>,
     /// Current order book state for all symbols (updated with market feed data).
     pub order_book: Arc<Mutex<OrderBookState>>,
     /// Number of currently connected browser websocket sessions.
@@ -111,7 +108,6 @@ pub struct AppState {
 /// - `ip`: The IP address to advertise in the login page URL
 /// - `port`: The port to listen on
 /// - `database_url`: Postgres connection URL for player state persistence
-/// - `known_markets`: List of all configured markets (name + web URL), sent to the login page
 /// - `shutdown`: An atomic flag that can be set to request server shutdown from another thread
 /// - `order_book`: Shared order book state to be populated at startup and kept in sync with market feed updates, so the terminal can display up-to-date pending orders and tokens.
 pub fn run_web_server(
@@ -121,7 +117,6 @@ pub fn run_web_server(
     ip: &str,
     port: u16,
     market_database_url: String,
-    known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
     player_service_addr: String,
@@ -142,7 +137,6 @@ pub fn run_web_server(
             ip,
             port,
             market_database_url,
-            known_markets,
             shutdown,
             order_book,
             player_service_addr,
@@ -164,7 +158,6 @@ async fn serve(
     ip: &str,
     port: u16,
     market_database_url: String,
-    known_markets: Vec<MarketInfo>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
     player_service_addr: String,
@@ -189,22 +182,6 @@ async fn serve(
         market_name(),
         player_service_addr
     );
-
-    let advertised = crate::auth::advertised_markets(&known_markets);
-    if !known_markets.is_empty() {
-        if advertised.is_empty() {
-            tracing::warn!(
-                "[{}] MARKET_SIM_PUBLIC_MARKETS_ONLY=1 filtered out all configured markets; /api/markets will be empty",
-                market_name()
-            );
-        } else if advertised.len() != known_markets.len() {
-            tracing::info!(
-                "[{}] MARKET_SIM_PUBLIC_MARKETS_ONLY=1 filtered {} non-public market URL(s)",
-                market_name(),
-                known_markets.len().saturating_sub(advertised.len())
-            );
-        }
-    }
 
     // Load trades for price chart initialization
     let trades_queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -248,7 +225,6 @@ async fn serve(
         fix_tcp_addr,
         grpc_addr,
         player_client: player_client,
-        known_markets,
         order_book,
         active_visitors: Arc::new(AtomicUsize::new(0)),
         total_visitors: Arc::new(AtomicUsize::new(0)),
@@ -290,11 +266,7 @@ async fn serve(
     }
 
     let app = Router::new()
-        .route("/", get(root_handler))
-        .route("/login", get(login_page_handler))
-        .route("/app", get(app_handler))
         .route("/api/login", post(api_login_handler))
-        .route("/api/markets", get(api_markets_handler))
         .route("/api/trades", get(crate::login::api_trades_handler))
         .route("/ws", get(ws_handler))
         .route("/metrics", get(metrics_handler))
