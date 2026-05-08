@@ -259,6 +259,7 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = SingleMarketConfig::parse_from_file(&cli.config_file);
+    utils::set_market_name(&config.market.name);
 
     tracing_subscriber::fmt()
         .with_env_filter("debug,sqlx=warn,h2=warn,tokio_util=warn")

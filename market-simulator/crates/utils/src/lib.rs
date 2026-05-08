@@ -6,10 +6,18 @@ pub use timestamp::UtcTimestamp;
 pub use functions::*;
 pub use traits::*;
 
+static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 // Utility functions and traits shared across multiple crates.
-// Return the market name from the environment variable `MARKET_NAME`, or "unknown" if not set. The result is cached in a `OnceLock` for efficient repeated access.
+// Initialize the market name from runtime configuration.
+pub fn set_market_name(name: &str) {
+    if MARKET_NAME.get().is_none() {
+        let _ = MARKET_NAME.set(name.to_string());
+    }
+}
+
+// Return the configured market name. Falls back to `MARKET_NAME` env var or "unknown".
 pub fn market_name() -> &'static str {
-    static MARKET_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MARKET_NAME
         .get_or_init(|| std::env::var("MARKET_NAME").unwrap_or_else(|_| "unknown".to_string()))
         .as_str()
