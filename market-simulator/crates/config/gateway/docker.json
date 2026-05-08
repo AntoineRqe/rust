@@ -1,0 +1,16 @@
+{
+  "entry_point": {
+    "ip": "0.0.0.0",
+    "port": 9860
+  },
+  "markets": [
+    {
+      "name": "NASDAQ",
+      "url": "http://market-nasdaq:9870"
+    },
+    {
+      "name": "NYSE",
+      "url": "http://market-nyse:9885"
+    }
+  ]
+}

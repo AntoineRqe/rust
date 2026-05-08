@@ -38,17 +38,17 @@ The Market Simulator now supports a distributed, per-market container architectu
 - **Port**: 9860
 - **Role**: Single entry point for all markets
 - **Function**: Login proxy that routes to individual markets
-- **Config**: `crates/config/docker.json`
+- **Config**: `crates/config/gateway/docker.json`
 
 ### 2. NASDAQ Market (`market-runner --config nasdaq.json`)
-- **Web UI**: Port 9870
+- **Backend HTTP/WS**: Port 9870 (internal, accessed via gateway/nginx)
 - **FIX Server**: Port 9871
 - **gRPC Control**: Port 50051
 - **Market Proxy**: Port 9891
 - **Config**: `crates/config/markets/nasdaq.json`
 
 ### 3. NYSE Market (`market-runner --config nyse.json`)
-- **Web UI**: Port 9885
+- **Backend HTTP/WS**: Port 9885 (internal, accessed via gateway/nginx)
 - **FIX Server**: Port 9884
 - **gRPC Control**: Port 50052
 - **Market Proxy**: Port 9892
@@ -57,7 +57,7 @@ The Market Simulator now supports a distributed, per-market container architectu
 ### 4. Players Service (shared)
 - **Port**: 50053 (internal)
 - **Role**: Centralized player/token management
-- **Config**: `crates/config/docker.json`
+- **Config**: `crates/config/docker.json` (runtime/services)
 
 ### 5. PostgreSQL (shared)
 - **Port**: 5433
@@ -96,11 +96,9 @@ docker-compose ps
 # Check login page
 curl http://localhost:9860
 
-# Check NASDAQ is running
-curl http://localhost:9870
-
-# Check NYSE is running
-curl http://localhost:9885
+# Check market backends are running (internal ports may be loopback-only in compose)
+curl http://127.0.0.1:19870
+curl http://127.0.0.1:19885
 
 # View logs
 docker-compose logs gateway
@@ -239,7 +237,7 @@ Create `crates/config/markets/new-market.json`:
 ```
 
 ### 3. Update Gateway Config (docker.json)
-Add entry to `markets` array in `crates/config/docker.json`:
+Add entry to `markets` array in `crates/config/gateway/docker.json`:
 ```json
 {
   "name": "NEW_MARKET",

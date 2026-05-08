@@ -66,7 +66,7 @@ services:
     networks:
       - market-network
     restart: unless-stopped
-    command: ["gateway", "--config", "crates/config/docker.json"]
+    command: ["gateway", "--config", "crates/config/gateway/docker.json"]
     cpuset: "1"
 
   # NASDAQ Market Service

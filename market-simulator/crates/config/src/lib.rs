@@ -62,6 +62,18 @@ pub struct MarketsConfig {
 }
 
 #[derive(Clone, Deserialize)]
+pub struct GatewayMarketConfig {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct GatewayConfig {
+    pub entry_point: Connection,
+    pub markets: Vec<GatewayMarketConfig>,
+}
+
+#[derive(Clone, Deserialize)]
 pub struct EngineCoreMapping {
     pub fix_inbound_core: usize,
     pub fix_outbound_core: usize,
@@ -112,6 +124,16 @@ impl MarketsConfig {
             .unwrap_or_else(|err| panic!("failed to read config file '{}': {err}", file_path));
 
         serde_json::from_str::<MarketsConfig>(&file_content)
+            .unwrap_or_else(|err| panic!("failed to parse config file '{}': {err}", file_path))
+    }
+}
+
+impl GatewayConfig {
+    pub fn parse_from_file(file_path: &str) -> Self {
+        let file_content = fs::read_to_string(file_path)
+            .unwrap_or_else(|err| panic!("failed to read config file '{}': {err}", file_path));
+
+        serde_json::from_str::<GatewayConfig>(&file_content)
             .unwrap_or_else(|err| panic!("failed to parse config file '{}': {err}", file_path))
     }
 }

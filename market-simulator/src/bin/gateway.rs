@@ -1,16 +1,20 @@
 use clap::Parser;
-use config::MarketsConfig;
+use config::GatewayConfig;
 
 #[derive(Parser, Debug)]
 #[command(name = "gateway")]
 struct Cli {
-    #[arg(short = 'c', long = "config", default_value = "crates/config/default.json")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value = "crates/config/gateway/default.json"
+    )]
     config_file: String,
 }
 
 fn main() {
     let cli = Cli::parse();
-    let config = MarketsConfig::parse_from_file(&cli.config_file);
+    let config = GatewayConfig::parse_from_file(&cli.config_file);
 
     tracing_subscriber::fmt()
         .with_env_filter("info,sqlx=warn,h2=warn,tokio_util=warn")
@@ -29,7 +33,7 @@ fn main() {
         .iter()
         .map(|m| backend::MarketInfo {
             name: m.name.clone(),
-            url: format!("http://{}:{}", m.web.ip, m.web.port),
+            url: m.url.clone(),
         })
         .collect();
 
