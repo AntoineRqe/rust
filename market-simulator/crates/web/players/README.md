@@ -191,6 +191,7 @@ pub fn get_portfolio(&self, username: &str) -> Vec<PortfolioLot>;
 pub fn get_holdings_summary(&self, username: &str) -> HashMap<String, HoldingSummary>;
 
 pub fn apply_fix_execution_report(&self, fix_body: &str) -> bool;
+pub fn apply_fix_execution_report(&self, fix_body: &str) -> Result<(), String>;
 
 pub fn apply_trade_from_feed(
     &self,

@@ -258,15 +258,14 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         request: Request<ApplyFixExecutionReportRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
         let req = request.into_inner();
-        let success = self.store.apply_fix_execution_report(&req.fix_body);
+        let (success, error_message) = match self.store.apply_fix_execution_report(&req.fix_body) {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e),
+        };
         
         Ok(Response::new(UpdateResult {
             success,
-            error_message: if success {
-                String::new()
-            } else {
-                "Failed to apply FIX execution report".to_string()
-            },
+            error_message,
         }))
     }
 

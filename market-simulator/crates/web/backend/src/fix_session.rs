@@ -156,8 +156,17 @@ impl FIXSessionManager {
                             let mut client = player_client.lock().await;
                             if let Err(e) = client.apply_fix_execution_report(&username, &body).await {
                                 tracing::error!(
-                                    "[{}] Failed to apply execution report for '{username}': {e}",
+                                    "[{}] FIX execution report failed for username='{username}' | error='{e}' | full_fix_msg='{body}'",
                                     market_name()
+                                );
+                                // Also log at debug level with structured format for easier parsing
+                                tracing::debug!(
+                                    "[{}] execution_report_error: username='{}', error='{}', msg_len={}, first_100_chars='{}'",
+                                    market_name(),
+                                    username,
+                                    e,
+                                    body.len(),
+                                    body.chars().take(100).collect::<String>()
                                 );
                             }
                             drop(client); // Release lock before publishing

@@ -106,14 +106,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String, _to
         bus: state.bus.clone(),
     };
 
-    // Browser connected — tell it the FIX engine is ready
-    // Backend injects FIX directly into the in-process FIX engine queue.
-    state.bus.publish(WsEvent::Status { connected: true });
+    // Browser connected — tell this user that the FIX engine is ready.
+    state.bus.publish(WsEvent::Status {
+        connected: true,
+        recipient: Some(username.clone()),
+    });
 
     // Also send it directly to this socket immediately
     // (the broadcast above goes to all OTHER subscribers,
     //  but this socket just subscribed so it missed it)
-    let status = serde_json::to_string(&WsEvent::Status { connected: true }).unwrap();
+    let status = serde_json::to_string(&WsEvent::Status {
+        connected: true,
+        recipient: None,
+    }).unwrap();
     let _ = sender.send(Message::Text(status.into())).await;
 
     // Send the player's current state (tokens + pending orders) on every new connection.
@@ -135,6 +140,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String, _to
                     Ok(event) => {
                         let allow_event = match &event {
                             WsEvent::FixMessage { recipient: Some(recipient), .. } => recipient == &username,
+                            WsEvent::Status { recipient: Some(recipient), .. } => recipient == &username,
                             _ => true,
                         };
 
@@ -192,7 +198,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String, _to
     }
 
     // WebSocket disconnected — FIX session stays alive for offline portfolio updates.
-    state.bus.publish(WsEvent::Status { connected: false });
+    state.bus.publish(WsEvent::Status {
+        connected: false,
+        recipient: Some(username),
+    });
 }
 
 /// Send player to the browser so it can display the current token balance, pending orders, and holdings.
@@ -637,7 +646,10 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
         }
 
         BrowserCommand::Disconnect => {
-            state.bus.publish(WsEvent::Status { connected: false });
+            state.bus.publish(WsEvent::Status {
+                connected: false,
+                recipient: Some(username.to_string()),
+            });
         }
 
         BrowserCommand::MdRequest { symbol, depth } => {

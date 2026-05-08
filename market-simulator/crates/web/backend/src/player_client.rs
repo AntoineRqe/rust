@@ -368,13 +368,27 @@ impl PlayerClient {
                         tracing::info!("[{}] FIX execution report applied for '{}'", utils::market_name(), username);
                         return Ok(());
                     } else {
-                        let msg = format!("FIX execution report failed: {}", result.error_message);
-                        tracing::error!("[{}] {}", utils::market_name(), msg);
-                        return Err(msg);
+                        let msg = format!(
+                            "gRPC success=false | username='{}' | error_msg='{}' | fix_body_len={} | fix_body_preview='{}'",
+                            username,
+                            result.error_message,
+                            fix_body.len(),
+                            fix_body.chars().take(150).collect::<String>()
+                        );
+                        tracing::error!("[{}] apply_fix_execution_report failed: {}", utils::market_name(), msg);
+                        return Err(format!("FIX execution report failed: {}", result.error_message));
                     }
                 }
                 Err(e) => {
-                    let msg = format!("gRPC call failed: {}", e);
+                    let msg = format!(
+                        "gRPC call error | username='{}' | error='{}' | error_type='{:?}' | fix_body_len={} | attempt={}/{}",
+                        username,
+                        e,
+                        e.code(),
+                        fix_body.len(),
+                        attempt,
+                        MAX_RETRIES
+                    );
                     
                     // Retry on timeout/cancelled errors
                     if attempt < MAX_RETRIES && (e.to_string().contains("Timeout") || e.to_string().contains("Cancelled")) {
@@ -391,7 +405,7 @@ impl PlayerClient {
                     }
                     
                     tracing::error!("[{}] apply_fix_execution_report error: {}", utils::market_name(), msg);
-                    return Err(msg);
+                    return Err(format!("gRPC call failed: {}", e));
                 }
             }
         }

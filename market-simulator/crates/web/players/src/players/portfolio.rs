@@ -94,7 +94,7 @@ impl PlayerStore {
 
     /// Apply a FIX execution report to player state (tokens, pending orders).
     /// Also performs portfolio lot inserts (buy) or FIFO consumes (sell).
-    pub fn apply_fix_execution_report(&self, fix_body: &str) -> bool {
+    pub fn apply_fix_execution_report(&self, fix_body: &str) -> Result<(), String> {
         let fields = parse_fix_fields(fix_body);
 
         let msg_type = fields.get("35").map(String::as_str).unwrap_or("");
@@ -105,7 +105,9 @@ impl PlayerStore {
         
         // Only accept Execution Reports (type 8) and Cancel Rejects (type 9)
         if msg_type != "8" && msg_type != "9" {
-            return false;
+            let err = format!("Invalid message type: expected 8 or 9, got '{}'", msg_type);
+            tracing::warn!("apply_fix_execution_report validation failed: {}", err);
+            return Err(err);
         }
 
         let ord_status = fields.get("39").map(String::as_str).unwrap_or("");
@@ -115,9 +117,14 @@ impl PlayerStore {
             .cloned()
             .unwrap_or_default();
 
-        if cl_ord_id.is_empty() {
-            return false;
-        }
+            if cl_ord_id.is_empty() {
+                let err = format!(
+                    "Missing ClOrdID: field 41 and field 11 both empty. Available fields: {}",
+                    fields.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+                );
+                tracing::warn!("apply_fix_execution_report validation failed: {}", err);
+                return Err(err);
+            }
 
         let mut inner = self.inner.lock().unwrap();
 
@@ -130,22 +137,37 @@ impl PlayerStore {
             .map(|s| s.trim().to_uppercase())
             .unwrap_or_default();
 
-        let exec_id = fields.get("17").cloned().unwrap_or_else(|| {
-            format!(
-                "{}:{}:{}:{}:{}",
-                cl_ord_id,
-                ord_status,
-                fields.get("32").map(String::as_str).unwrap_or("0"),
-                fields.get("31").map(String::as_str).unwrap_or("0"),
-                fields.get("151").map(String::as_str).unwrap_or("0")
-            )
-        });
+        let exec_id = fields
+            .get("17")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    cl_ord_id,
+                    ord_status,
+                    fields.get("32").map(String::as_str).unwrap_or("0"),
+                    fields.get("31").map(String::as_str).unwrap_or("0"),
+                    fields.get("151").map(String::as_str).unwrap_or("0")
+                )
+            });
 
         let mut changed = false;
 
-        if !inner.processed_exec_ids.insert(exec_id) {
+        if !inner.processed_exec_ids.insert(exec_id.clone()) {
             drop(inner);
-            return false;
+            let msg = format!(
+                "Duplicate execution report: exec_id='{}' already processed (cl_ord_id='{}', ord_status='{}', last_qty={}, last_px={})",
+                exec_id,
+                cl_ord_id,
+                ord_status,
+                fields.get("32").map(String::as_str).unwrap_or("0"),
+                fields.get("31").map(String::as_str).unwrap_or("0")
+            );
+            tracing::debug!("apply_fix_execution_report: {}", msg);
+            // Duplicates are expected on reconnect/replay paths; keep idempotent behavior.
+            return Ok(());
         }
 
         // Capture owner now — before it may be removed from order_owners below.
@@ -177,7 +199,7 @@ impl PlayerStore {
                 }
                 drop(inner);
                 self.flush();
-                return true;
+                return Ok(());
             }
         }
 
@@ -185,7 +207,7 @@ impl PlayerStore {
         // This can happen with pre-existing orders or orders from other systems
         if !found_order {
             drop(inner);
-            return true;
+            return Ok(());
         }
 
         // Portfolio lot operation to perform after releasing the lock.
@@ -347,9 +369,8 @@ impl PlayerStore {
             }
         }
 
-        // Return true if we found and processed the order (even if no state changed).
-        // Return false only if the order owner wasn't found.
-        changed || found_order
+    // Return Ok if we found and processed the order (even if no state changed).
+    Ok(())
     }
 
     /// Apply the passive side of a trade reconstructed from the multicast

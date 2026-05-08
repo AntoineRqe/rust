@@ -29,7 +29,11 @@ pub enum WsEvent {
     },
 
     /// Connection status changed
-    Status { connected: bool },
+    Status {
+        connected: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipient: Option<String>,
+    },
 
     /// Sent to the browser immediately after a WebSocket connection is
     /// established, and after every order / cancel to keep the UI in sync.

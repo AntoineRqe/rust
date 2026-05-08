@@ -701,17 +701,17 @@ mod tests {
 
         // Status 0 (New): Deduct tokens for BUY order
         let buyer_new = "35=8 │ 39=0 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 44=100 │ 38=5 │ 151=5 │ 17=E-BUY-0";
-        assert!(store.apply_fix_execution_report(buyer_new));
+        assert!(store.apply_fix_execution_report(buyer_new).is_ok());
 
         // Status 2 (Filled): Execute the fill (tokens already deducted)
         let buyer_fill =
             "35=8 │ 39=2 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-BUY-1";
-        assert!(store.apply_fix_execution_report(buyer_fill));
+        assert!(store.apply_fix_execution_report(buyer_fill).is_ok());
 
         // Status 2 (Filled): SELL order execution (credit tokens)
         let seller_fill =
             "35=8 │ 39=2 │ 11=ALICESELL1 │ 54=2 │ 55=AAPL │ 31=100 │ 32=5 │ 151=0 │ 17=E-SELL-1";
-        assert!(store.apply_fix_execution_report(seller_fill));
+        assert!(store.apply_fix_execution_report(seller_fill).is_ok());
 
         let alice = store.get_player("alice").expect("alice exists");
         let bob = store.get_player("bob").expect("bob exists");
