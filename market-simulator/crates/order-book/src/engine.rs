@@ -311,7 +311,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 }
             }
 
-            if let Some(event) = self.fifo_in.pop_timeout(Duration::from_millis(50)) {
+            if let Some(event) = self.fifo_in.pop() {
                 // Process incoming order events from the input queue
                 let (event, result) = self.order_book.process_order(event);
                 // For now, I send a copy of the order event and result to each subscriber, but ideally I would like to avoid copying the order event and result in the hot path of processing orders.

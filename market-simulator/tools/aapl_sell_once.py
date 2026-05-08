@@ -213,8 +213,8 @@ def main() -> None:
                         help="WebSocket URL for the NASDAQ market")
     parser.add_argument("--nyse-ws-url", default="wss://www.marketsim.site/nyse/ws",
                         help="WebSocket URL for the NYSE market")
-    parser.add_argument("--username", default="autosell", help="Login username")
-    parser.add_argument("--password", default="autosell", help="Login password")
+    parser.add_argument("--username", default="admin", help="Login username")
+    parser.add_argument("--password", required=True , help="Login password")
     parser.add_argument("--delta-percent", type=float, default=0.1,
                         help="Percent delta applied to NYSE price vs NASDAQ (default: 0.1)")
     parser.add_argument("--qty", type=int, default=10, help="Sell quantity (default: 10)")
