@@ -1,33 +1,35 @@
-use snapshot::types::Snapshot;
-use types::{OrderEvent, OrderResult};
-use types::macros::{EntityId};
-use clap::Parser;
-use order_book::OrderBookControl;
-use types::multicast::MulticastSource;
-use utils::market_name;
-use std::sync::{Arc, Mutex};
-use crossbeam::{channel};
-use fix::engine::{FixRawMsg};
-use memory;
-use backend::state::EventBus;
 use backend::order_book::OrderBookState;
+use backend::state::EventBus;
+use clap::Parser;
 use config::{MarketConfig, MarketsConfig};
-use std::sync::atomic::{AtomicBool};
+use crossbeam::channel;
+use fix::engine::FixRawMsg;
+use memory;
+use order_book::OrderBookControl;
+use snapshot::types::Snapshot;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use types::consts::RB_SIZE;
-
+use types::macros::EntityId;
+use types::multicast::MulticastSource;
+use types::{OrderEvent, OrderResult};
+use utils::market_name;
 
 pub mod startup;
 
 #[derive(Parser, Debug)]
 #[command(name = "market-simulator")]
 struct Cli {
-    #[arg(short = 'c', long = "config", default_value = "crates/config/default.json")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value = "crates/config/default.json"
+    )]
     config_file: String,
     /// Internal: index of the market to run (used by child processes).
     #[arg(long = "market-index")]
     market_index: Option<usize>,
 }
-
 
 struct ThreadHandles {
     handles: Vec<std::thread::JoinHandle<()>>,
@@ -48,7 +50,9 @@ impl ThreadHandles {
         for handle in self.handles.drain(..) {
             let name = handle.thread().name().unwrap_or("unknown").to_string();
             handle.thread().unpark(); // Unpark the thread in case it's parked, so it can check the shutdown flag and exit.
-            handle.join().expect(&format!("Failed to join thread {}", name));
+            handle
+                .join()
+                .expect(&format!("Failed to join thread {}", name));
         }
     }
 }
@@ -89,12 +93,30 @@ struct QueueHandle {
 impl QueueHandle {
     fn new(market_name: &str) -> Self {
         let (net_to_fix_tx, net_to_fix_rx) = channel::bounded::<FixRawMsg<RB_SIZE>>(RB_SIZE);
-        let fix_to_ob    = memory::open_shared_queue::<RB_SIZE, OrderEvent>(&format!("{market_name}_fix_to_order_book"), true);
-        let ob_to_er     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_execution_report"), true);
-        let ob_to_db     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_db"), true);
-        let ob_to_md     = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(&format!("{market_name}_order_book_to_market_feed"), true);
-        let er_to_fix     = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(&format!("{market_name}_execution_report_to_fix"), true);
-        let ob_to_ss     = memory::open_shared_queue::<RB_SIZE, Arc<Snapshot>>(&format!("{market_name}_order_book_to_snapshot"), true);
+        let fix_to_ob = memory::open_shared_queue::<RB_SIZE, OrderEvent>(
+            &format!("{market_name}_fix_to_order_book"),
+            true,
+        );
+        let ob_to_er = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(
+            &format!("{market_name}_order_book_to_execution_report"),
+            true,
+        );
+        let ob_to_db = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(
+            &format!("{market_name}_order_book_to_db"),
+            true,
+        );
+        let ob_to_md = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(
+            &format!("{market_name}_order_book_to_market_feed"),
+            true,
+        );
+        let er_to_fix = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(
+            &format!("{market_name}_execution_report_to_fix"),
+            true,
+        );
+        let ob_to_ss = memory::open_shared_queue::<RB_SIZE, Arc<Snapshot>>(
+            &format!("{market_name}_order_book_to_snapshot"),
+            true,
+        );
 
         Self {
             net_to_fix_tx: Some(Arc::new(net_to_fix_tx)),
@@ -106,11 +128,12 @@ impl QueueHandle {
             er_to_fix: Some(er_to_fix),
             ob_to_ss: Some(ob_to_ss),
         }
-    } 
+    }
 }
 
-fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box<dyn std::error::Error>> {
-
+fn start_market(
+    market_simulator: Arc<Mutex<MarketSimulator>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut market_simulator = market_simulator.lock().unwrap();
 
     let config = market_simulator.config.clone();
@@ -121,9 +144,9 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     let bus = EventBus::new();
     let global_shutdown = Arc::new(AtomicBool::new(false));
     let order_book = Arc::new(std::sync::Mutex::new(OrderBookState::new()));
-    let database_url = config.resolve_database_url().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
-    })?;
+    let database_url = config
+        .resolve_database_url()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let player_store = players::PlayerStore::load_postgres(&player_database_url);
 
     // Initialization of shared queues for inter-thread communication
@@ -155,7 +178,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         player_store.clone(),
         config.core_mapping.market_feed_multicast_core,
     )?;
-    
+
     // execution report engine thread
     startup::start_execution_report_engine(
         &mut market_simulator,
@@ -168,9 +191,10 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     // DB engine thread
     let db_data = startup::start_db_engine(
         &mut market_simulator,
-        ob_db_rx, database_url.clone(),
+        ob_db_rx,
+        database_url.clone(),
         Arc::clone(&global_shutdown),
-        config.core_mapping.db_core
+        config.core_mapping.db_core,
     )?;
 
     // Order book engine thread (must be started after the DB engine since it needs to import the initial order book state from the database before starting to process new orders/events).
@@ -196,8 +220,8 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         snapshot_feed_sources[0].clone(),
         Arc::clone(&global_shutdown),
         config.core_mapping.market_data_proxy_core,
-            config.proxy.ip.clone(),
-            config.proxy.port,
+        config.proxy.ip.clone(),
+        config.proxy.port,
     )?;
 
     // Snapshot multicast engine thread
@@ -235,7 +259,7 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
     startup::start_web_server(
         &mut market_simulator,
         Arc::clone(&order_book),
-        database_url.clone(),    
+        database_url.clone(),
         bus.clone(),
         Arc::clone(&global_shutdown),
         config.web.clone(),
@@ -243,7 +267,6 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         config.grpc.clone(),
         player_service_addr,
         config.core_mapping.web_core,
-
     )?;
 
     // TCP server thread (FIX protocol)
@@ -263,22 +286,52 @@ fn start_market(market_simulator: Arc<Mutex<MarketSimulator>>) -> Result<(), Box
         ob_control_tx,
         Arc::clone(&db_data.pool),
         Arc::clone(&global_shutdown),
-            config.core_mapping.global_core,
+        config.core_mapping.global_core,
     )?;
 
     // Give the thread a moment to fail fast on init errors
     match err_rx.recv_timeout(std::time::Duration::from_millis(500)) {
-        Ok(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))),          // failed during startup
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}  // still running, good
+        Ok(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))), // failed during startup
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {} // still running, good
         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {} // thread exited cleanly (unlikely here)
     }
 
-    tracing::info!("[{}] FIX server    -> {}:{}", utils::market_name(), config.tcp.ip, config.tcp.port);
-    tracing::info!("[{}] Web terminal  -> http://{}:{}", utils::market_name(), config.web.ip, config.web.port);
-    tracing::info!("[{}] gRPC control  -> {}:{}", utils::market_name(), config.grpc.ip, config.grpc.port);
-    tracing::info!("[{}] Market feed   -> {}:{}", utils::market_name(), config.market_feed_multicast.ip, config.market_feed_multicast.port);
-    tracing::info!("[{}] Snapshot feed -> {}:{}", utils::market_name(), config.snapshot_multicast.ip, config.snapshot_multicast.port);
-    tracing::info!("[{}] Market proxy  -> {}:{}", utils::market_name(), config.proxy.ip, config.proxy.port);
+    tracing::info!(
+        "[{}] FIX server    -> {}:{}",
+        utils::market_name(),
+        config.tcp.ip,
+        config.tcp.port
+    );
+    tracing::info!(
+        "[{}] Web terminal  -> http://{}:{}",
+        utils::market_name(),
+        config.web.ip,
+        config.web.port
+    );
+    tracing::info!(
+        "[{}] gRPC control  -> {}:{}",
+        utils::market_name(),
+        config.grpc.ip,
+        config.grpc.port
+    );
+    tracing::info!(
+        "[{}] Market feed   -> {}:{}",
+        utils::market_name(),
+        config.market_feed_multicast.ip,
+        config.market_feed_multicast.port
+    );
+    tracing::info!(
+        "[{}] Snapshot feed -> {}:{}",
+        utils::market_name(),
+        config.snapshot_multicast.ip,
+        config.snapshot_multicast.port
+    );
+    tracing::info!(
+        "[{}] Market proxy  -> {}:{}",
+        utils::market_name(),
+        config.proxy.ip,
+        config.proxy.port
+    );
 
     Ok(())
 }
@@ -297,12 +350,14 @@ fn stop_market(market_simulator: Arc<Mutex<MarketSimulator>>) {
 
     let thread_handles = &mut thread_handles.lock().unwrap();
     thread_handles.stop_all();
-    
 
-     tracing::info!("[{}] All threads stopped, market simulator exiting", market_name());
+    tracing::info!(
+        "[{}] All threads stopped, market simulator exiting",
+        market_name()
+    );
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let config = MarketsConfig::parse_from_file(&cli.config_file);
 
@@ -312,32 +367,45 @@ fn main() {
 
     if config.markets.is_empty() {
         tracing::error!("No markets defined in config file '{}'", cli.config_file);
-        std::process::exit(1);
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "No markets defined",
+        )));
     }
 
     // ── Single-market mode (child process) ──────────────────────────────────
     if let Some(index) = cli.market_index {
         // Build the list of all markets for the login page.
-        let known_markets: Vec<backend::MarketInfo> = config.markets.iter().map(|m| backend::MarketInfo {
-            name: m.name.clone(),
-            url: format!("http://{}:{}", m.web.ip, m.web.port),
-        }).collect();
-
-        let market_config = config
+        let known_markets: Vec<backend::MarketInfo> = config
             .markets
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| {
-                tracing::error!("Market index {index} out of range");
-                std::process::exit(1);
-            });
+            .iter()
+            .map(|m| backend::MarketInfo {
+                name: m.name.clone(),
+                url: format!("http://{}:{}", m.web.ip, m.web.port),
+            })
+            .collect();
 
-        let player_database_url = config
-            .resolve_player_database_url()
-            .unwrap_or_else(|e| {
+        let market_config = match config.markets.get(index).cloned() {
+            Some(market) => market,
+            None => {
+                tracing::error!("Market index {index} out of range");
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Market index {index} out of range"),
+                )));
+            }
+        };
+
+        let player_database_url = match config.resolve_player_database_url() {
+            Ok(url) => url,
+            Err(e) => {
                 tracing::error!("{e}");
-                std::process::exit(1);
-            });
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    e,
+                )));
+            }
+        };
 
         // In single-market mode, subscribe ONLY to this market's multicast sources.
         let market_feed_sources = vec![MulticastSource::new(
@@ -354,13 +422,12 @@ fn main() {
 
         let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
         let err_tx = Arc::new(err_tx);
-        
+
         let player_service_addr = format!(
             "http://{}:{}",
-            config.players_service.grpc.ip,
-            config.players_service.grpc.port
+            config.players_service.grpc.ip, config.players_service.grpc.port
         );
-    
+
         let simulator = Arc::new(Mutex::new(MarketSimulator {
             config: market_config,
             player_database_url,
@@ -374,10 +441,13 @@ fn main() {
             err_rx,
         }));
 
-        if let Err(e) = start_market(Arc::clone(&simulator)) {
-            tracing::error!("Market failed to start: {e}");
-            stop_market(Arc::clone(&simulator));
-            std::process::exit(1);
+        match start_market(Arc::clone(&simulator)) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Market failed to start: {e}");
+                stop_market(Arc::clone(&simulator));
+                return Err(e);
+            }
         }
 
         ctrlc::set_handler(move || {
@@ -409,22 +479,6 @@ fn main() {
         gateway_port
     );
 
-    // Start the player service once in parent process
-    let player_database_url = config
-        .resolve_player_database_url()
-        .unwrap_or_else(|e| {
-            tracing::error!("[gateway] Could not resolve player database URL: {e}");
-            std::process::exit(1);
-        });
-    
-    let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
-    
-    let player_service_addr = format!(
-        "http://{}:{}",
-        config.players_service.grpc.ip,
-        config.players_service.grpc.port
-    );
-    
     // Player service is now run as a separate binary (players-server)
     // Backend will connect to it at the configured address above
 
@@ -447,11 +501,21 @@ fn main() {
         .map(|(index, market)| {
             tracing::info!("[{}] Spawning process (index {index})", market.name);
             std::process::Command::new(&exe)
-                .args(["--config", &cli.config_file, "--market-index", &index.to_string()])
+                .args([
+                    "--config",
+                    &cli.config_file,
+                    "--market-index",
+                    &index.to_string(),
+                ])
                 .env("MARKET_NAME", &market.name)
-                .env("LOGIN_GATEWAY_URL", format!("http://{}:{}", gateway_ip, gateway_port))
+                .env(
+                    "LOGIN_GATEWAY_URL",
+                    format!("http://{}:{}", gateway_ip, gateway_port),
+                )
                 .spawn()
-                .unwrap_or_else(|e| panic!("Failed to spawn process for market '{}': {e}", market.name))
+                .unwrap_or_else(|e| {
+                    panic!("Failed to spawn process for market '{}': {e}", market.name)
+                })
         })
         .collect();
 
@@ -459,13 +523,13 @@ fn main() {
     // child's own ctrlc handler will fire.  Just wait for them here.
     let children_to_wait = Arc::new(Mutex::new(children));
     let children_clone = Arc::clone(&children_to_wait);
-    
+
     ctrlc::set_handler(move || {
         // Kill the player service (cargo run process)
         let _ = std::process::Command::new("pkill")
             .args(&["-f", "cargo.*run.*-p.*players"])
             .output();
-        
+
         // Terminate market processes
         if let Ok(mut children) = children_clone.lock() {
             for child in children.iter_mut() {
@@ -475,9 +539,11 @@ fn main() {
         std::process::exit(0);
     })
     .expect("Error setting Ctrl-C handler");
-    
+
     let mut children_guard = children_to_wait.lock().unwrap();
     for child in children_guard.iter_mut() {
         let _ = child.wait();
     }
+
+    Ok(())
 }

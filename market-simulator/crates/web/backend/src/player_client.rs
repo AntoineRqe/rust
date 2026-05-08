@@ -21,7 +21,7 @@
 //!
 //! ## Timeout Strategy
 //! - Connection timeout: 5 seconds (fail fast if server is unreachable)
-//! - Per-request timeout: 30 seconds (sufficient for most operations)
+//! - Per-request timeout: 30 seconds (sufrficient for most operations)
 //!
 //! # Usage
 //!

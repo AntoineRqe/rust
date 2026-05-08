@@ -17,25 +17,29 @@ fn main() {
         .init();
 
     // Read the market-specific config
-    let config_content = fs::read_to_string(&cli.config_file)
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to read config file '{}': {e}", cli.config_file);
-            std::process::exit(1);
-        });
+    let config_content = fs::read_to_string(&cli.config_file).unwrap_or_else(|e| {
+        tracing::error!("Failed to read config file '{}': {e}", cli.config_file);
+        std::process::exit(1);
+    });
 
-    let market_config: serde_json::Value = serde_json::from_str(&config_content)
-        .unwrap_or_else(|e| {
+    let market_config: serde_json::Value =
+        serde_json::from_str(&config_content).unwrap_or_else(|e| {
             tracing::error!("Failed to parse config file '{}': {e}", cli.config_file);
             std::process::exit(1);
         });
 
-    let market_name = market_config.get("market")
+    let market_name = market_config
+        .get("market")
         .and_then(|m| m.get("name"))
         .and_then(|v| v.as_str())
         .unwrap_or("UNKNOWN");
 
-    tracing::info!("[{}] Starting market from config: {}", market_name, cli.config_file);
-    
+    tracing::info!(
+        "[{}] Starting market from config: {}",
+        market_name,
+        cli.config_file
+    );
+
     // Build a full MarketsConfig from the per-market config
     // This allows market-simulator to parse it normally
     let full_config = serde_json::json!({
@@ -50,26 +54,26 @@ fn main() {
 
     // Write the constructed config to a temp file for market-simulator
     let temp_config = format!("/tmp/market-runner-{}.json", std::process::id());
-    fs::write(&temp_config, full_config.to_string())
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to write temp config: {e}");
-            std::process::exit(1);
-        });
+    fs::write(&temp_config, full_config.to_string()).unwrap_or_else(|e| {
+        tracing::error!("Failed to write temp config: {e}");
+        std::process::exit(1);
+    });
 
     tracing::info!("[{}] Executing market-simulator for market", market_name);
-    
+
     // Execute market-simulator with the constructed full config
     // and --market-index 0 since we only have one market in the array
     // Set MARKET_NAME in the current process environment so it is inherited by exec.
     // Safety: single-threaded at this point, no other threads reading env vars
     unsafe { std::env::set_var("MARKET_NAME", market_name) };
 
-    unsafe {
-        let _ = std::process::Command::new("market-simulator")
-            .arg("--config")
-            .arg(&temp_config)
-            .arg("--market-index")
-            .arg("0")
-            .exec();
-    }
+    let output = std::process::Command::new("market-simulator")
+        .arg("--config")
+        .arg(&temp_config)
+        .arg("--market-index")
+        .arg("0")
+        .exec();
+
+    // If exec returns, it means it failed to start the process
+    tracing::error!("Failed to execute market-simulator: {output:?}");
 }

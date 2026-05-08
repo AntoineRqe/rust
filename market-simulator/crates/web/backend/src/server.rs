@@ -16,6 +16,7 @@ use axum::{
 };
 use db;
 use std::collections::VecDeque;
+use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,16 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use utils::market_name;
+
+fn format_error_chain(err: &(dyn Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(next) = source {
+        parts.push(next.to_string());
+        source = next.source();
+    }
+    parts.join(" | caused by: ")
+}
 
 /// All application metrics for monitoring and observability
 #[derive(Clone)]
@@ -165,7 +176,13 @@ async fn serve(
     // - Reuses connections across all requests
     // - Handles reconnection on failure
     let player_client = Arc::new(tokio::sync::Mutex::new(
-        PlayerClient::connect(&player_service_addr).await?,
+        PlayerClient::connect(&player_service_addr).await.map_err(|err| {
+            let detail = format_error_chain(err.as_ref());
+            Box::new(std::io::Error::other(format!(
+                "failed to connect to player service at '{}': {}",
+                player_service_addr, detail
+            ))) as Box<dyn std::error::Error>
+        })?,
     ));
     tracing::info!(
         "[{}] Connected to player service at {}",
