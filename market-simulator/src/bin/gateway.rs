@@ -34,6 +34,7 @@ fn main() {
         .map(|m| backend::MarketInfo {
             name: m.name.clone(),
             url: m.url.clone(),
+            public_url: m.public_url.clone(),
         })
         .collect();
 

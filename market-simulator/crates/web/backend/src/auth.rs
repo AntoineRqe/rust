@@ -96,6 +96,8 @@ fn is_public_market_url(raw_url: &str) -> bool {
 pub struct MarketInfo {
     pub name: String,
     pub url: String,
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 /// Filter markets to only include publicly accessible URLs if public markets only mode is enabled.

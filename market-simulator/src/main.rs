@@ -382,6 +382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|m| backend::MarketInfo {
                 name: m.name.clone(),
                 url: format!("http://{}:{}", m.web.ip, m.web.port),
+                public_url: None,
             })
             .collect();
 
@@ -470,6 +471,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|m| backend::MarketInfo {
             name: m.name.clone(),
             url: format!("http://{}:{}", m.web.ip, m.web.port),
+            public_url: None,
         })
         .collect();
 

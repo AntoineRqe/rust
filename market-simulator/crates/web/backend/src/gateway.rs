@@ -17,6 +17,18 @@ struct LoginGatewayState {
     markets: Vec<MarketInfo>,
 }
 
+fn client_market_url(market: &MarketInfo, headers: &HeaderMap) -> String {
+    let configured = market
+        .public_url
+        .as_ref()
+        .map(|s| s.trim())
+        .unwrap_or("");
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    adapt_market_url_for_client(&market.url, &market.name, headers)
+}
+
 /// Run the login gateway server on the specified IP and port.
 /// The gateway serves the login page and proxies login requests to configured markets.
 /// Browsers connect directly to market servers (no WebSocket proxy).
@@ -85,7 +97,8 @@ async fn gateway_app_handler(
         .iter()
         .map(|market| MarketInfo {
             name: market.name.clone(),
-            url: adapt_market_url_for_client(&market.url, &market.name, &headers),
+            url: client_market_url(market, &headers),
+            public_url: None,
         })
         .collect();
 
@@ -215,7 +228,7 @@ async fn gateway_login_handler(
                 .unwrap_or(false);
 
             user_is_admin = user_is_admin || is_admin;
-            let market_url = adapt_market_url_for_client(&market.url, &market.name, &headers);
+            let market_url = client_market_url(&market, &headers);
 
             successful_markets.push(MarketCredentials {
                 name: market.name.clone(),
@@ -288,6 +301,7 @@ fn adapt_market_url_for_client(internal_url: &str, market_name: &str, headers: &
         .unwrap_or("localhost");
 
     let host_only = req_host.split(':').next().unwrap_or(req_host);
+    let host_only = normalize_public_host(host_only);
     let host_lower = host_only.to_ascii_lowercase();
 
     let req_scheme = headers
@@ -337,13 +351,33 @@ fn forwarded_header(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn normalize_public_host(host: &str) -> String {
+    let trimmed = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    if trimmed == "0.0.0.0" || trimmed == "::" {
+        "localhost".to_string()
+    } else {
+        host.trim().to_string()
+    }
+}
+
 fn gateway_public_base_url(headers: &HeaderMap) -> String {
     let host = forwarded_header(headers, "x-forwarded-host")
         .or_else(|| forwarded_header(headers, "host"))
         .unwrap_or_else(|| "127.0.0.1:9875".to_string());
 
     let host_only = host.split(':').next().unwrap_or(host.as_str());
+    let host_only = normalize_public_host(host_only);
     let host_lower = host_only.to_ascii_lowercase();
+    let host_for_url = if host.contains(':') {
+        let port = host.split(':').nth(1).unwrap_or_default();
+        if port.is_empty() {
+            host_only.clone()
+        } else {
+            format!("{}:{}", host_only, port)
+        }
+    } else {
+        host_only.clone()
+    };
 
     let proto = forwarded_header(headers, "x-forwarded-proto")
         .map(|p| p.to_ascii_lowercase())
@@ -359,5 +393,5 @@ fn gateway_public_base_url(headers: &HeaderMap) -> String {
             }
         });
 
-    format!("{}://{}", proto, host)
+    format!("{}://{}", proto, host_for_url)
 }
