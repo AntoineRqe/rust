@@ -1,10 +1,8 @@
 use config::Connection;
 use execution_report::{ExecutionReportEngine};
-use server::multicast::{spawn_market_feed_receiver};
 use backend::state::EventBus;
 use backend::order_book::OrderBookState;
 
-use types::multicast::MulticastSource;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool}};
 use types::{OrderEvent, OrderResult};
 use types::consts::RB_SIZE;
@@ -13,37 +11,6 @@ use fix::engine::FixRawMsg;
 
 use utils::market_name;
 use order_book::OrderBookControl;
-use market_feed::engine::MarketDataFeedEngine;
-
-
-
-// ---------------- Multicast Receiver ----------------
-pub fn start_multicast_receiver(
-    simulator: &mut crate::MarketSimulator,
-    bus: EventBus,
-    sources: Vec<MulticastSource>,
-    shutdown: Arc<AtomicBool>,
-    player_store: players::PlayerStore,
-    core_id: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    
-    let err_tx = Arc::clone(&simulator.err_tx);
-
-    let _receiver_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        for source in sources {
-            let err_tx = Arc::clone(&err_tx);
-            if let Err(e) = spawn_market_feed_receiver(bus.clone(), vec![source], Arc::clone(&shutdown), player_store.clone()) {
-                tracing::error!("[{}] Market feed receiver error: {e:#}", utils::market_name());
-                let _ = err_tx.send(format!("Market feed receiver error: {e:#}"));
-            }
-        }
-    });
-
-    simulator.add_thread_handle(_receiver_thread);
-
-    Ok(())
-}
 
 // ---------------- Execution Report Engine ----------------
 pub fn start_execution_report_engine(
@@ -194,76 +161,6 @@ pub fn start_grpc_server(
     Ok(())
 }
 
-// ---------------- Market Data Feed Engine ----------------
-pub fn start_market_feed_engine(
-    market_simulator: &mut crate::MarketSimulator,
-    ob_md_rx: spsc::Consumer<'static, (OrderEvent, OrderResult), RB_SIZE>,
-    global_shutdown: Arc<AtomicBool>,
-    ip: String,
-    port: u16,
-    core_id: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Market feed engine thread
-    let mut market_feed_engine = MarketDataFeedEngine::new(
-        ob_md_rx,
-        Arc::clone(&global_shutdown),
-        ip,
-        port,
-    ).expect("Failed to create MarketDataFeedEngine");
-
-    let err_tx = Arc::clone(&market_simulator.err_tx);
-
-    let _market_feed_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        match market_feed_engine.run() {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("[{}] Market data feed engine error: {e:#}", utils::market_name());
-                let _ = err_tx.send(format!("Market data feed engine error: {e:#}"));
-            }
-        }
-    });
-
-    market_simulator.add_thread_handle(_market_feed_thread);
-    
-    Ok(())
-}
-
-// ---------------- Snapshot MultiCast Engine ----------------
-pub fn start_snapshot_multicast_engine(
-    market_simulator: &mut crate::MarketSimulator,
-    snapshot_rx: spsc::Consumer<'static, Arc<snapshot::types::Snapshot>, RB_SIZE>,
-    global_shutdown: Arc<AtomicBool>,
-    ip: String,
-    port: u16,
-    core_id: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Snapshot multicast engine thread
-        let mut snapshot_engine = snapshot::engine::SnapshotMultiCastEngine::new(
-        snapshot_rx,
-        Arc::clone(&global_shutdown),
-        ip,
-        port,
-    );
-
-    let err_tx = Arc::clone(&market_simulator.err_tx);
-
-    let _snapshot_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        match snapshot_engine.run() {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("[{}] Snapshot multicast engine error: {e:#}", utils::market_name());
-                let _ = err_tx.send(format!("Snapshot multicast engine error: {e:#}"));
-            }
-        }
-    });
-
-    {
-        market_simulator.add_thread_handle(_snapshot_thread);
-    }
-    Ok(())
-}
 
 // Inbound + Outbound FIX engine
 pub fn start_fix_engine(
@@ -316,14 +213,10 @@ pub fn start_order_book_engine(
     ob_rx: spsc::Consumer<'static, OrderEvent, RB_SIZE>,
     ob_er_tx: spsc::Producer<'static, (OrderEvent, OrderResult), RB_SIZE>,
     ob_db_tx: spsc::Producer<'static, (OrderEvent, OrderResult), RB_SIZE>,
-    ob_md_tx: spsc::Producer<'static, (OrderEvent, OrderResult), RB_SIZE>,
     ob_control_rx: crossbeam::channel::Receiver<OrderBookControl>,
-    ob_ss_tx: spsc::Producer<'static, Arc<snapshot::types::Snapshot>, RB_SIZE>,
     global_shutdown: Arc<AtomicBool>,
     pending_orders: Vec<OrderEvent>,
-    snapshot_interval_ms: u64,
     order_book_core_id: usize,
-    snapshot_generation_core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // TODO: Handle multiple symbols per market
@@ -332,23 +225,19 @@ pub fn start_order_book_engine(
     for symbol in symbols {
         tracing::info!("[{}] Initializing market for symbol '{}'", market_name(), symbol);
 
-        // Create shared order book instance and pass it to the order book engine and snapshot generation engine so they can read/write it without going through the queues.
+        // Create shared order book instance.
         let order_book = order_book::book::OrderBook::new(&symbol);
-        let snapshot_ptr = Arc::new(arc_swap::ArcSwap::from_pointee(snapshot::types::Snapshot {
-            symbol: symbol.to_string(),
-            ..Default::default()
-        }));
 
         // Book engine thread
         let mut order_book_engine = order_book::engine::OrderBookEngine::new(
             ob_rx,
             
             Some(ob_er_tx),
+            None,
             Some(ob_db_tx),
-            Some(ob_md_tx),
             ob_control_rx,
             order_book,
-            Some(Arc::clone(&snapshot_ptr)),
+            None,
             Arc::clone(&global_shutdown)
         );
 
@@ -371,31 +260,6 @@ pub fn start_order_book_engine(
 
         {
             market_simulator.add_thread_handle(_ob_thread);
-        }
-
-        // Snapshot generation thread (reads from order book and pushes to multicast engine)
-        let snapshot_generation_engine = order_book::snapshot::SnapshotGenerationEngine::new(
-            ob_ss_tx, 
-            Arc::clone(&global_shutdown),
-            Arc::clone(&snapshot_ptr),
-            snapshot_interval_ms,
-        );
-
-        let err_tx = Arc::clone(&market_simulator.err_tx);
-
-        let _snapshot_generation_thread = std::thread::spawn(move || {
-            core_affinity::set_for_current(core_affinity::CoreId { id: snapshot_generation_core_id });
-            match snapshot_generation_engine.run() {
-                Ok(_) => (),
-                Err(e) => {
-                    tracing::error!("[{}] Snapshot generation engine error: {e:#}", utils::market_name());
-                    let _ = err_tx.send(format!("Snapshot generation engine error: {e:#}"));
-                }
-            }
-        });
-
-        {
-            market_simulator.add_thread_handle(_snapshot_generation_thread);
         }
 
         // TODO : Handle multiple symbols per market (currently we just hardcode one symbol and ignore the symbol field in the orders/events, but in a real implementation we'd want to support multiple symbols per market and route orders/events to the correct order book based on the symbol).
@@ -493,46 +357,6 @@ pub fn start_tcp_server(
     });
 
     market_simulator.add_thread_handle(_tcp_thread);
-
-    Ok(())
-}
-
-// ---------------- Market Data Proxy ----------------
-pub fn start_market_data_proxy(
-    market_simulator: &mut crate::MarketSimulator,
-    market_feed_source: types::multicast::MulticastSource,
-    snapshot_feed_source: types::multicast::MulticastSource,
-    shutdown: Arc<AtomicBool>,
-    core_id: usize,
-    ws_ip: String,
-    ws_port: u16,
-
-) -> Result<(), Box<dyn std::error::Error>> {
-
-    let mut proxy = proxy::MarketDataProxy::new(
-        market_feed_source,
-        snapshot_feed_source,
-        Arc::clone(&shutdown),
-        core_id,
-        ws_ip,
-        ws_port,
-    );
-
-    let err_tx = Arc::clone(&market_simulator.err_tx);
-
-    let proxy_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        // TODO : Handle errors from the proxy and propagate them back to the main thread so we can log them and shut down gracefully if the proxy fails (currently if the market data proxy encounters an error, it will just panic and crash the thread, which is not ideal).
-        match proxy.run() {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("[{}] Market data proxy error: {e:#}", utils::market_name());
-                let _ = err_tx.send(format!("Market data proxy error: {e:#}"));
-            }
-        }
-    });
-
-    market_simulator.add_thread_handle(proxy_thread);
 
     Ok(())
 }

@@ -50,7 +50,7 @@ pub enum WsEvent {
     /// Active number of websocket visitors currently connected.
     VisitorCount { count: usize, total_count: usize },
 
-    /// Order book snapshot for a symbol (updated with market feed data).
+    /// Full order book state for a symbol.
     OrderBook {
         symbol: String,
         bids: Vec<L3OrderView>,

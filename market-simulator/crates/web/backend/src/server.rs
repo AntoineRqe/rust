@@ -86,7 +86,7 @@ pub struct AppState {
     pub grpc_addr: String,
     /// gRPC client for the player service (running on separate port, e.g. 50052).
     pub player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
-    /// Current order book state for all symbols (updated with market feed data).
+    /// Current order book state for all symbols.
     pub order_book: Arc<Mutex<OrderBookState>>,
     /// Number of currently connected browser websocket sessions.
     pub active_visitors: Arc<AtomicUsize>,
@@ -109,7 +109,7 @@ pub struct AppState {
 /// - `port`: The port to listen on
 /// - `database_url`: Postgres connection URL for player state persistence
 /// - `shutdown`: An atomic flag that can be set to request server shutdown from another thread
-/// - `order_book`: Shared order book state to be populated at startup and kept in sync with market feed updates, so the terminal can display up-to-date pending orders and tokens.
+/// - `order_book`: Shared order book state populated at startup and updated by execution/report processing.
 pub fn run_web_server(
     bus: EventBus,
     fix_tcp_addr: String,
@@ -327,8 +327,7 @@ async fn shutdown_signal(shutdown: Arc<AtomicBool>) {
 }
 
 /// Load initial pending orders from gRPC DumpOrderBook RPC at startup.
-/// Populates the order book state with all pending orders, which will then be
-/// kept in sync by market feed updates.
+/// Populates the order book state with all pending orders.
 async fn load_initial_order_book(
     grpc_addr: &str,
     order_book: Arc<Mutex<OrderBookState>>,

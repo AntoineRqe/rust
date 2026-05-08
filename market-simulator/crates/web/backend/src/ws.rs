@@ -249,7 +249,7 @@ async fn send_player_state(
     }
 }
 
-/// Send the full order book snapshots to the browser client. This is called on every new connection and after every relevant event (like order updates or executions) to keep the browser in sync with the latest state.
+/// Send full order book state to the browser client.
 async fn send_order_book_snapshots(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     state: &AppState,
@@ -286,8 +286,7 @@ async fn send_order_book_snapshots(
             timestamp_ms: book.last_update_ms,
         };
 
-        // Send the full order book snapshot for this symbol to the client.
-        // The client will use this to populate the initial state of the order book display, and then rely on incremental updates from the FIX engine to keep it up-to-date.
+        // Send the full order book state for this symbol.
         let json = serde_json::to_string(&event).unwrap();
         let _ = sender.send(Message::Text(json.into())).await;
     }

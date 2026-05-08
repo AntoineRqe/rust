@@ -6,12 +6,10 @@ use crossbeam::channel;
 use fix::engine::FixRawMsg;
 use memory;
 use order_book::OrderBookControl;
-use snapshot::types::Snapshot;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use types::consts::RB_SIZE;
 use types::macros::EntityId;
-use types::multicast::MulticastSource;
 use types::{OrderEvent, OrderResult};
 use utils::market_name;
 
@@ -56,13 +54,9 @@ impl ThreadHandles {
 
 pub struct MarketSimulator {
     config: MarketConfig,
-    player_database_url: String,
     player_service_addr: String,
     thread_handles: Arc<Mutex<ThreadHandles>>,
     shutdown: Option<Arc<AtomicBool>>,
-    /// Multicast endpoints for order book snapshots to forward to GUI websockets.
-    market_feed_sources: Vec<MulticastSource>,
-    snapshot_feed_sources: Vec<MulticastSource>,
     // Error channel for threads to report startup errors back to main thread for logging.
     err_rx: crossbeam::channel::Receiver<String>,
     err_tx: Arc<crossbeam::channel::Sender<String>>,
@@ -80,9 +74,7 @@ struct QueueHandle {
     fix_to_ob: Option<memory::SharedQueue<RB_SIZE, OrderEvent>>,
     ob_to_er: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     ob_to_db: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
-    ob_to_md: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>>,
-    ob_to_ss: Option<memory::SharedQueue<RB_SIZE, Arc<Snapshot>>>,
 }
 
 impl QueueHandle {
@@ -100,16 +92,8 @@ impl QueueHandle {
             &format!("{market_name}_order_book_to_db"),
             true,
         );
-        let ob_to_md = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(
-            &format!("{market_name}_order_book_to_market_feed"),
-            true,
-        );
         let er_to_fix = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(
             &format!("{market_name}_execution_report_to_fix"),
-            true,
-        );
-        let ob_to_ss = memory::open_shared_queue::<RB_SIZE, Arc<Snapshot>>(
-            &format!("{market_name}_order_book_to_snapshot"),
             true,
         );
 
@@ -119,9 +103,7 @@ impl QueueHandle {
             fix_to_ob: Some(fix_to_ob),
             ob_to_er: Some(ob_to_er),
             ob_to_db: Some(ob_to_db),
-            ob_to_md: Some(ob_to_md),
             er_to_fix: Some(er_to_fix),
-            ob_to_ss: Some(ob_to_ss),
         }
     }
 }
@@ -132,17 +114,13 @@ fn start_market(
     let mut market_simulator = market_simulator.lock().unwrap();
 
     let config = market_simulator.config.clone();
-    let player_database_url = market_simulator.player_database_url.clone();
     let player_service_addr = market_simulator.player_service_addr.clone();
-    let market_feed_sources = market_simulator.market_feed_sources.clone();
-    let snapshot_feed_sources = market_simulator.snapshot_feed_sources.clone();
     let bus = EventBus::new();
     let global_shutdown = Arc::new(AtomicBool::new(false));
     let order_book = Arc::new(std::sync::Mutex::new(OrderBookState::new()));
     let database_url = config
         .resolve_database_url()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let player_store = players::PlayerStore::load_postgres(&player_database_url);
 
     // Initialization of shared queues for inter-thread communication
     let mut queues = QueueHandle::new(&config.name);
@@ -152,8 +130,6 @@ fn start_market(
     let (ob_er_tx, er_rx) = queues.ob_to_er.take().unwrap().queue.split();
     let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
     let (ob_db_tx, ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
-    let (ob_md_tx, ob_md_rx) = queues.ob_to_md.take().unwrap().queue.split();
-    let (ob_ss_tx, ob_ss_rx) = queues.ob_to_ss.take().unwrap().queue.split();
 
     // Order-book control channel (used by the gRPC reset service).
     let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
@@ -163,16 +139,6 @@ fn start_market(
 
     // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
     market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
-
-    // Start the multicast receiver thread(s) for this market.  This thread will subscribe to the configured multicast sources for this market and push incoming market feed messages into the event bus, which other threads can subscribe to.
-    startup::start_multicast_receiver(
-        &mut market_simulator,
-        bus.clone(),
-        market_feed_sources.clone(),
-        Arc::clone(&global_shutdown),
-        player_store.clone(),
-        config.core_mapping.market_feed_multicast_core,
-    )?;
 
     // execution report engine thread
     startup::start_execution_report_engine(
@@ -198,45 +164,10 @@ fn start_market(
         ob_rx,
         ob_er_tx,
         ob_db_tx,
-        ob_md_tx,
         ob_control_rx,
-        ob_ss_tx,
         Arc::clone(&global_shutdown),
         db_data.pending_orders.clone(),
-        config.snapshot.update_interval_ms,
         config.core_mapping.order_book_core,
-        config.core_mapping.snapshot_core,
-    )?;
-
-    // Start Market proxy thread
-    startup::start_market_data_proxy(
-        &mut market_simulator,
-        market_feed_sources[0].clone(),
-        snapshot_feed_sources[0].clone(),
-        Arc::clone(&global_shutdown),
-        config.core_mapping.market_data_proxy_core,
-        config.proxy.ip.clone(),
-        config.proxy.port,
-    )?;
-
-    // Snapshot multicast engine thread
-    startup::start_snapshot_multicast_engine(
-        &mut market_simulator,
-        ob_ss_rx,
-        Arc::clone(&global_shutdown),
-        config.snapshot_multicast.ip.clone(),
-        config.snapshot_multicast.port,
-        config.core_mapping.snapshot_multicast_core,
-    )?;
-
-    // Market data feed engine thread
-    startup::start_market_feed_engine(
-        &mut market_simulator,
-        ob_md_rx,
-        Arc::clone(&global_shutdown),
-        config.market_feed_multicast.ip.clone(),
-        config.market_feed_multicast.port,
-        config.core_mapping.market_feed_core,
     )?;
 
     // FIX engine thread
@@ -310,18 +241,6 @@ fn start_market(
         config.grpc.port
     );
     tracing::info!(
-        "[{}] Market feed   -> {}:{}",
-        utils::market_name(),
-        config.market_feed_multicast.ip,
-        config.market_feed_multicast.port
-    );
-    tracing::info!(
-        "[{}] Snapshot feed -> {}:{}",
-        utils::market_name(),
-        config.snapshot_multicast.ip,
-        config.snapshot_multicast.port
-    );
-    tracing::info!(
         "[{}] Market proxy  -> {}:{}",
         utils::market_name(),
         config.proxy.ip,
@@ -361,28 +280,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let market_config = config.market.clone();
-    let player_database_url = match config.resolve_player_database_url() {
-        Ok(url) => url,
-        Err(e) => {
-            tracing::error!("{e}");
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                e,
-            )));
-        }
-    };
-
-    let market_feed_sources = vec![MulticastSource::new(
-        market_config.market_feed_multicast.ip.clone(),
-        market_config.market_feed_multicast.port,
-        market_name(),
-    )];
-    let snapshot_feed_sources = vec![MulticastSource::new(
-        market_config.snapshot_multicast.ip.clone(),
-        market_config.snapshot_multicast.port,
-        market_name(),
-    )];
-
     let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
     let err_tx = Arc::new(err_tx);
 
@@ -393,12 +290,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let simulator = Arc::new(Mutex::new(MarketSimulator {
         config: market_config,
-        player_database_url,
         player_service_addr,
         thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
         shutdown: None,
-        market_feed_sources,
-        snapshot_feed_sources,
         err_tx,
         err_rx,
     }));
