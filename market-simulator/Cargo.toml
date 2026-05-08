@@ -7,7 +7,6 @@ members = [
     "crates/logging",
     "crates/memory",
     "crates/utils",
-    "crates/server",
     "crates/execution-report",
     "crates/types",
     "crates/web/backend",
@@ -53,7 +52,6 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-server = { path = "crates/server" }
 fix = { path = "crates/protocol/FIX" }
 order-book = { path = "crates/order-book" }
 memory = { path = "crates/memory" }
