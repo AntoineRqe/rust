@@ -7,7 +7,6 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
 use crate::server::AppState;
 use crate::auth::require_admin;
 use crate::state::{WsEvent, BrowserCommand};
@@ -107,12 +106,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String, _to
         bus: state.bus.clone(),
     };
 
-    // NOTE: FIX session handling is being refactored to use gRPC player client
-    // For now, FIX message sending is disabled
-    // TODO: Implement FIX session with gRPC player client integration
-
     // Browser connected — tell it the FIX engine is ready
-    // The web server IS the FIX gateway now, no separate TCP client needed
+    // Backend injects FIX directly into the in-process FIX engine queue.
     state.bus.publish(WsEvent::Status { connected: true });
 
     // Also send it directly to this socket immediately
@@ -451,37 +446,22 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 recipient: Some(username.to_string()),
             });
 
-            // Send FIX order through TCP to the FIX engine
-            match state.fix_session_manager.get_or_create_session(
+            match state.fix_session_manager.send_fix(
                 &username,
-                &state.fix_tcp_addr,
+                &fix_bytes,
                 state.player_client.clone(),
                 &state.bus,
                 state.metrics.clone(),
                 state.order_book.clone(),
-            ) {
-                Ok(writer) => {
-                    let mut writer_guard = writer.lock().await;
-                    match writer_guard.write_all(&fix_bytes).await {
-                        Ok(_) => {
-                            tracing::info!("[{}] FIX order sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));
-                        }
-                        Err(e) => {
-                            tracing::error!("[{}] Failed to send FIX order for '{}': {}", market_name(), username, e);
-                            state.bus.publish(WsEvent::FixMessage {
-                                label: "ERROR".into(),
-                                body: format!("Failed to send FIX order: {}", e),
-                                tag: "error".into(),
-                                recipient: Some(username.to_string()),
-                            });
-                        }
-                    }
+            ).await {
+                Ok(_) => {
+                    tracing::info!("[{}] FIX order sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));
                 }
                 Err(e) => {
-                    tracing::error!("[{}] Failed to get FIX session for '{}': {}", market_name(), username, e);
+                    tracing::error!("[{}] Failed to send FIX order for '{}': {}", market_name(), username, e);
                     state.bus.publish(WsEvent::FixMessage {
                         label: "ERROR".into(),
-                        body: format!("Failed to connect to FIX engine: {}", e),
+                        body: format!("Failed to send FIX order: {}", e),
                         tag: "error".into(),
                         recipient: Some(username.to_string()),
                     });
@@ -515,37 +495,22 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 recipient: Some(username.to_string()),
             });
 
-            // Send FIX cancel through TCP to the FIX engine
-            match state.fix_session_manager.get_or_create_session(
+            match state.fix_session_manager.send_fix(
                 &username,
-                &state.fix_tcp_addr,
+                &fix_bytes,
                 state.player_client.clone(),
                 &state.bus,
                 state.metrics.clone(),
                 state.order_book.clone(),
-            ) {
-                Ok(writer) => {
-                    let mut writer_guard = writer.lock().await;
-                    match writer_guard.write_all(&fix_bytes).await {
-                        Ok(_) => {
-                            tracing::info!("[{}] FIX cancel sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));
-                        }
-                        Err(e) => {
-                            tracing::error!("[{}] Failed to send FIX cancel for '{}': {}", market_name(), username, e);
-                            state.bus.publish(WsEvent::FixMessage {
-                                label: "ERROR".into(),
-                                body: format!("Failed to send FIX cancel: {}", e),
-                                tag: "error".into(),
-                                recipient: Some(username.to_string()),
-                            });
-                        }
-                    }
+            ).await {
+                Ok(_) => {
+                    tracing::info!("[{}] FIX cancel sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));
                 }
                 Err(e) => {
-                    tracing::error!("[{}] Failed to get FIX session for '{}': {}", market_name(), username, e);
+                    tracing::error!("[{}] Failed to send FIX cancel for '{}': {}", market_name(), username, e);
                     state.bus.publish(WsEvent::FixMessage {
                         label: "ERROR".into(),
-                        body: format!("Failed to connect to FIX engine: {}", e),
+                        body: format!("Failed to send FIX cancel: {}", e),
                         tag: "error".into(),
                         recipient: Some(username.to_string()),
                     });

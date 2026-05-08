@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::net::tcp::OwnedWriteHalf;
-use tokio::sync::Mutex as AsyncMutex;
+use crossbeam_channel::TrySendError;
+use fix::engine::FixRawMsg;
+use tokio::sync::mpsc;
+use types::consts::RB_SIZE;
 
 use crate::player_client::PlayerClient;
 use crate::state::{EventBus, WsEvent};
@@ -67,8 +67,8 @@ impl OrderBookDebouncer {
 // ── Session ───────────────────────────────────────────────────────────────────
 
 pub struct FIXSession {
-    /// Write-side of the TCP connection (used for sending FIX orders).
-    pub writer: Arc<AsyncMutex<OwnedWriteHalf>>,
+    /// Per-player response channel used by FIX outbound engine routing.
+    pub response_tx: mpsc::Sender<FixRawMsg<RB_SIZE>>,
     /// Set to `true` to tear down the session (e.g. on server shutdown).
     pub stop: Arc<AtomicBool>,
 }
@@ -78,18 +78,19 @@ pub struct FIXSession {
 /// Thread-safe registry of live FIX sessions, keyed by username.
 #[derive(Clone)]
 pub struct FIXSessionManager {
+    fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
     inner: Arc<Mutex<HashMap<String, FIXSession>>>,
 }
 
 impl FIXSessionManager {
-    pub fn new() -> Self {
+    pub fn new(fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>) -> Self {
         FIXSessionManager {
+            fix_tx,
             inner: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Return the write-half of the existing FIX session for `username`, or
-    /// create a new one by connecting to `fix_tcp_addr`.
+    /// Return (or create) the per-player FIX response channel.
     ///
     /// The background reader task is spawned automatically and handles:
     ///
@@ -99,16 +100,15 @@ impl FIXSessionManager {
     ///   browser clients can display it.
     /// - Updating the backend order book from ExecutionReport fields.
     ///
-    /// Returns `Err` if a new TCP connection could not be established.
+    /// This no longer creates a TCP socket; backend injects FIX directly via channel.
     pub fn get_or_create_session(
         &self,
         username: &str,
-        fix_tcp_addr: &str,
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         bus: &EventBus,
         metrics: Metrics,
         order_book: Arc<Mutex<OrderBookState>>,
-    ) -> Result<Arc<AsyncMutex<OwnedWriteHalf>>, std::io::Error> {
+    ) -> mpsc::Sender<FixRawMsg<RB_SIZE>> {
         let mut sessions = self.inner.lock().unwrap();
         // Cache sessions by both username and market to prevent cross-market session reuse
         let session_key = format!("{}:{}", username, market_name());
@@ -118,19 +118,10 @@ impl FIXSessionManager {
                 "[{}] Reusing existing FIX session for '{username}'",
                 market_name()
             );
-            return Ok(Arc::clone(&session.writer));
+            return session.response_tx.clone();
         }
 
-        // This is a blocking call, so we use block_in_place to avoid blocking the tokio runtime
-        let stream = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                TcpStream::connect(fix_tcp_addr).await
-            })
-        })?;
-
-        // Split into read and write halves
-        let (reader, writer_half) = stream.into_split();
-        let writer = Arc::new(AsyncMutex::new(writer_half));
+        let (response_tx, mut response_rx) = mpsc::channel::<FixRawMsg<RB_SIZE>>(1024);
         let stop = Arc::new(AtomicBool::new(false));
         // Session cache key includes market to avoid cross-market session reuse
         let session_key = format!("{}:{}", username, market_name());
@@ -147,9 +138,6 @@ impl FIXSessionManager {
 
             // Spawn the background reader task for this session.
             tokio::spawn(async move {
-                let mut reader = reader;
-                let mut buf = [0u8; 4096];
-                let mut stream_buf: Vec<u8> = Vec::with_capacity(8192);
                 let mut debouncer = OrderBookDebouncer::default();
 
                 tracing::info!(
@@ -158,98 +146,80 @@ impl FIXSessionManager {
                 );
 
                 while !stop_flag.load(Ordering::Relaxed) {
-                    match tokio::time::timeout(
-                        Duration::from_millis(100),
-                        reader.read(&mut buf)
-                    ).await {
-                        Ok(Ok(0)) => {
-                            tracing::info!(
-                                "[{}] FIX session closed by engine for '{username}'",
-                                market_name()
-                            );
-                            break;
-                        }
-                        Ok(Ok(n)) => {
-                            stream_buf.extend_from_slice(&buf[..n]);
-                            for raw_msg in extract_fix_messages(&mut stream_buf) {
-                                let body = pretty_fix(&raw_msg);
-                                let exec_start_time = std::time::Instant::now();
+                    match tokio::time::timeout(Duration::from_millis(100), response_rx.recv()).await {
+                        Ok(Some(msg)) => {
+                            let raw_msg = msg.data[..msg.len as usize].to_vec();
+                            let body = pretty_fix(&raw_msg);
+                            let exec_start_time = std::time::Instant::now();
 
-                                // Apply execution report via gRPC to player service
-                                let mut client = player_client.lock().await;
-                                if let Err(e) = client.apply_fix_execution_report(&username, &body).await {
-                                    tracing::error!(
-                                        "[{}] Failed to apply execution report for '{username}': {e}",
-                                        market_name()
-                                    );
-                                }
-                                drop(client); // Release lock before publishing
-
-                                // Update backend order book from ExecutionReport
-                                if let Some(exec_data) = parse_execution_report(&body) {
-                                    update_backend_order_book_from_exec_report(
-                                        &exec_data,
-                                        &order_book,
-                                    );
-
-                                    // Mark symbol as dirty (debounced publish)
-                                    debouncer.mark_dirty(&exec_data.symbol);
-                                    debouncer.increment_order_count();
-
-                                    // Publish new/partial (status 0/1) and terminal updates immediately without debounce delay.
-                                    // This ensures the UI sees orders as soon as they're added, and removals when they're canceled/filled.
-                                    let now = Instant::now();
-                                    let should_publish_immediately = is_terminal_order_status(exec_data.ord_status)
-                                        || matches!(exec_data.ord_status, 0 | 1); // New or Partially Filled
-                                    
-                                    if should_publish_immediately || debouncer.should_publish(&exec_data.symbol, now) {
-                                        let book = order_book.lock().unwrap();
-                                        if let Some(symbol_book) = book.get(&exec_data.symbol) {
-                                            bus.publish(WsEvent::OrderBook {
-                                                symbol: exec_data.symbol.clone(),
-                                                bids: symbol_book.l3_bids_sorted(),
-                                                asks: symbol_book.l3_asks_sorted(),
-                                                timestamp_ms: std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .map(|d| d.as_millis() as u64)
-                                                    .unwrap_or(0),
-                                            });
-                                        }
-                                        debouncer.publish(&exec_data.symbol, now);
-                                    }
-                                }
-
-                                // Track execution latency
-                                let exec_elapsed_ms = exec_start_time.elapsed().as_millis() as u64;
-                                if let Ok(mut samples) = metrics.execution_latency_ms.lock() {
-                                    samples.push(exec_elapsed_ms);
-                                }
-
-                                // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
-                                if is_trade_execution(&body) {
-                                    metrics.trades.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
-
-                                // Broadcast so connected browser clients can display it.
-                                bus.publish(WsEvent::FixMessage {
-                                    label: classify_fix_msg(&raw_msg),
-                                    body,
-                                    tag: "feed".into(),
-                                    recipient: Some(username.clone()),
-                                });
+                            // Apply execution report via gRPC to player service
+                            let mut client = player_client.lock().await;
+                            if let Err(e) = client.apply_fix_execution_report(&username, &body).await {
+                                tracing::error!(
+                                    "[{}] Failed to apply execution report for '{username}': {e}",
+                                    market_name()
+                                );
                             }
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!(
-                                "[{}] FIX TCP read error for '{username}': {e}",
-                                market_name()
-                            );
+                            drop(client); // Release lock before publishing
+
+                            // Update backend order book from ExecutionReport
+                            if let Some(exec_data) = parse_execution_report(&body) {
+                                update_backend_order_book_from_exec_report(
+                                    &exec_data,
+                                    &order_book,
+                                );
+
+                                // Mark symbol as dirty (debounced publish)
+                                debouncer.mark_dirty(&exec_data.symbol);
+                                debouncer.increment_order_count();
+
+                                // Publish new/partial (status 0/1) and terminal updates immediately without debounce delay.
+                                // This ensures the UI sees orders as soon as they're added, and removals when they're canceled/filled.
+                                let now = Instant::now();
+                                let should_publish_immediately = is_terminal_order_status(exec_data.ord_status)
+                                    || matches!(exec_data.ord_status, 0 | 1); // New or Partially Filled
+                                
+                                if should_publish_immediately || debouncer.should_publish(&exec_data.symbol, now) {
+                                    let book = order_book.lock().unwrap();
+                                    if let Some(symbol_book) = book.get(&exec_data.symbol) {
+                                        bus.publish(WsEvent::OrderBook {
+                                            symbol: exec_data.symbol.clone(),
+                                            bids: symbol_book.l3_bids_sorted(),
+                                            asks: symbol_book.l3_asks_sorted(),
+                                            timestamp_ms: std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_millis() as u64)
+                                                .unwrap_or(0),
+                                        });
+                                    }
+                                    debouncer.publish(&exec_data.symbol, now);
+                                }
+                            }
+
+                            // Track execution latency
+                            let exec_elapsed_ms = exec_start_time.elapsed().as_millis() as u64;
+                            if let Ok(mut samples) = metrics.execution_latency_ms.lock() {
+                                samples.push(exec_elapsed_ms);
+                            }
+
+                            // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
+                            if is_trade_execution(&body) {
+                                metrics.trades.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+
+                            // Broadcast so connected browser clients can display it.
                             bus.publish(WsEvent::FixMessage {
-                                label: "ERROR".into(),
-                                body: format!("FIX TCP connection lost: {e}"),
-                                tag: "err".into(),
+                                label: classify_fix_msg(&raw_msg),
+                                body,
+                                tag: "feed".into(),
                                 recipient: Some(username.clone()),
                             });
+                        }
+                        Ok(None) => {
+                            tracing::info!(
+                                "[{}] FIX session channel closed for '{username}'",
+                                market_name()
+                            );
                             break;
                         }
                         Err(_) => {
@@ -289,9 +259,52 @@ impl FIXSessionManager {
         );
         sessions.insert(
             session_key,
-            FIXSession { writer: Arc::clone(&writer), stop },
+            FIXSession {
+                response_tx: response_tx.clone(),
+                stop,
+            },
         );
-        Ok(writer)
+        response_tx
+    }
+
+    pub async fn send_fix(
+        &self,
+        username: &str,
+        bytes: &[u8],
+        player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
+        bus: &EventBus,
+        metrics: Metrics,
+        order_book: Arc<Mutex<OrderBookState>>,
+    ) -> Result<(), String> {
+        if bytes.len() > RB_SIZE {
+            return Err(format!(
+                "FIX message too large: {} bytes (max {})",
+                bytes.len(),
+                RB_SIZE
+            ));
+        }
+
+        let response_tx = self.get_or_create_session(
+            username,
+            player_client,
+            bus,
+            metrics,
+            order_book,
+        );
+
+        let mut pending = FixRawMsg::<RB_SIZE>::new(bytes, Some(response_tx));
+        loop {
+            match self.fix_tx.try_send(pending) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err("FIX engine queue disconnected".to_string());
+                }
+                Err(TrySendError::Full(returned)) => {
+                    pending = returned;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        }
     }
 
     /// Gracefully tear down all active sessions (called on server shutdown).
@@ -310,67 +323,6 @@ impl FIXSessionManager {
 }
 
 // ── FIX helpers ───────────────────────────────────────────────────────────────
-
-/// Extract complete `8=FIX...` messages from a stream buffer, consuming them
-/// in place.
-pub fn extract_fix_messages(stream_buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-
-    loop {
-        let Some(start) = find_subslice(stream_buf, b"8=FIX.") else {
-            if stream_buf.len() > 6 {
-                let keep_from = stream_buf.len() - 6;
-                stream_buf.drain(..keep_from);
-            }
-            break;
-        };
-
-        if start > 0 {
-            stream_buf.drain(..start);
-        }
-
-        let Some(checksum_start) = find_checksum_field(stream_buf) else {
-            break;
-        };
-
-        let frame_end = checksum_start + 7; // "10=" + 3 digits + SOH
-        if stream_buf.len() < frame_end {
-            break;
-        }
-
-        out.push(stream_buf[..frame_end].to_vec());
-        stream_buf.drain(..frame_end);
-    }
-
-    out
-}
-
-pub fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-pub fn find_checksum_field(data: &[u8]) -> Option<usize> {
-    if data.len() < 7 {
-        return None;
-    }
-    for i in 0..=data.len() - 7 {
-        if (i == 0 || data[i - 1] == b'\x01')
-            && data[i] == b'1'
-            && data[i + 1] == b'0'
-            && data[i + 2] == b'='
-            && data[i + 3].is_ascii_digit()
-            && data[i + 4].is_ascii_digit()
-            && data[i + 5].is_ascii_digit()
-            && data[i + 6] == b'\x01'
-        {
-            return Some(i);
-        }
-    }
-    None
-}
 
 /// Pipe-delimited human-readable FIX string.
 pub fn pretty_fix(raw: &[u8]) -> String {
@@ -397,15 +349,6 @@ pub fn classify_fix_msg(raw: &[u8]) -> String {
         "5" => "◀ LOGOUT (5)".into(),
         t   => format!("◀ MSG ({t})"),
     }
-}
-
-/// Send raw bytes over the TCP writer (must be called from async context).
-pub async fn send_fix_over_tcp(
-    tcp_writer: &Arc<AsyncMutex<OwnedWriteHalf>>,
-    bytes: &[u8],
-) -> std::io::Result<()> {
-    let mut stream = tcp_writer.lock().await;
-    stream.write_all(bytes).await
 }
 
 /// Detect if an execution report indicates a trade execution.

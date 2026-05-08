@@ -189,19 +189,10 @@ fn start_market(
         bus.clone(),
         Arc::clone(&global_shutdown),
         config.web.clone(),
-        config.tcp.clone(),
+        net_to_fix_tx.clone(),
         config.grpc.clone(),
         player_service_addr,
         config.core_mapping.web_core,
-    )?;
-
-    // TCP server thread (FIX protocol)
-    startup::start_tcp_server(
-        &mut market_simulator,
-        net_to_fix_tx.clone(),
-        Arc::clone(&global_shutdown),
-        config.tcp.clone(),
-        config.core_mapping.tcp_core,
     )?;
 
     // Start the gRPC server in a separate thread, passing it the order book control channel and database pool.
@@ -222,12 +213,6 @@ fn start_market(
         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {} // thread exited cleanly (unlikely here)
     }
 
-    tracing::info!(
-        "[{}] FIX server    -> {}:{}",
-        utils::market_name(),
-        config.tcp.ip,
-        config.tcp.port
-    );
     tracing::info!(
         "[{}] Web terminal  -> http://{}:{}",
         utils::market_name(),

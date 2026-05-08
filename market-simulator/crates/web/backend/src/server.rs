@@ -14,6 +14,7 @@ use axum::{
     Extension,
 };
 use db;
+use fix::engine::FixRawMsg;
 use std::collections::VecDeque;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -23,6 +24,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
+use types::consts::RB_SIZE;
 use utils::market_name;
 
 fn format_error_chain(err: &(dyn Error + 'static)) -> String {
@@ -80,8 +82,6 @@ impl Metrics {
 pub struct AppState {
     /// Event bus for publishing FIX messages and other server-side events to browsers.
     pub bus: EventBus,
-    /// Address of the FIX TCP gateway for this market instance.
-    pub fix_tcp_addr: String,
     /// gRPC address of the MarketControl service (e.g. "http://[::1]:50051").
     pub grpc_addr: String,
     /// gRPC client for the player service (running on separate port, e.g. 50052).
@@ -103,7 +103,7 @@ pub struct AppState {
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
 /// Arguments:
 /// - `bus`: Event bus for publishing server-side events to browsers.
-/// - `fix_tcp_addr`: Address of the FIX TCP gateway for this market instance
+/// - `fix_tx`: In-process ingress queue for FIX engine.
 /// - `grpc_addr`: gRPC address of the MarketControl service (e.g. "http://[::1]:50051") for loading initial pending orders at startup.
 /// - `ip`: The IP address to advertise in the login page URL
 /// - `port`: The port to listen on
@@ -112,7 +112,7 @@ pub struct AppState {
 /// - `order_book`: Shared order book state populated at startup and updated by execution/report processing.
 pub fn run_web_server(
     bus: EventBus,
-    fix_tcp_addr: String,
+    fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
     grpc_addr: String,
     ip: &str,
     port: u16,
@@ -132,7 +132,7 @@ pub fn run_web_server(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
         .block_on(serve(
             bus,
-            fix_tcp_addr,
+            fix_tx,
             grpc_addr,
             ip,
             port,
@@ -153,7 +153,7 @@ pub fn run_web_server(
 /// Main async function to set up and run the web server. Separated from `run_web_server` to allow using async/await syntax.
 async fn serve(
     bus: EventBus,
-    fix_tcp_addr: String,
+    fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
     grpc_addr: String,
     ip: &str,
     port: u16,
@@ -222,13 +222,12 @@ async fn serve(
 
     let state = AppState {
         bus,
-        fix_tcp_addr,
         grpc_addr,
         player_client: player_client,
         order_book,
         active_visitors: Arc::new(AtomicUsize::new(0)),
         total_visitors: Arc::new(AtomicUsize::new(0)),
-        fix_session_manager: FIXSessionManager::new(),
+        fix_session_manager: FIXSessionManager::new(fix_tx),
         trades_queue,
         metrics: Metrics::new(),
     };

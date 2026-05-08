@@ -277,7 +277,7 @@ pub fn start_web_server(
     bus: EventBus,
     global_shutdown: Arc<AtomicBool>,
     web_addr: Connection,
-    tcp_addr: Connection,
+    fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
     grpc_addr: Connection,
     player_service_addr: String,
     core_id: usize,
@@ -285,7 +285,7 @@ pub fn start_web_server(
 
     let _web_thread = std::thread::spawn({
         let bus = bus.clone();
-        let fix_tcp_addr = format!("{}:{}", tcp_addr.ip, tcp_addr.port);
+        let fix_tx = fix_tx.clone();
         let grpc_addr    = format!("http://127.0.0.1:{}", grpc_addr.port);
         let web_ip = web_addr.ip.clone();
         let web_port = web_addr.port;
@@ -298,7 +298,7 @@ pub fn start_web_server(
             core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
             match backend::run_web_server(
                 bus,
-                fix_tcp_addr,
+                fix_tx,
                 grpc_addr,
                 &web_ip,
                 web_port,
@@ -318,45 +318,6 @@ pub fn start_web_server(
     });
 
     market_simulator.add_thread_handle(_web_thread);
-
-    Ok(())
-}
-
-// ---------------- TCP server ----------------
-pub fn start_tcp_server(
-    market_simulator: &mut crate::MarketSimulator,
-    fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
-    global_shutdown: Arc<AtomicBool>,
-    tcp_addr: Connection,
-    core_id: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-
-    let server: server::tcp::FixServer<RB_SIZE> = server::tcp::FixServer::new(fix_tx, Arc::clone(&global_shutdown));
-    let listener = match std::net::TcpListener::bind(format!("{}:{}", tcp_addr.ip, tcp_addr.port)) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("[{}] Failed to bind TCP server to {}:{} - {e:#}", utils::market_name(), tcp_addr.ip, tcp_addr.port);
-            return Err(Box::new(e));
-        }
-    };
-
-    // Grab the shutdown flag before releasing the lock so the Ctrl-C handler
-    // can signal the accept loop without holding any other lock.
-
-    let err_tx = Arc::clone(&market_simulator.err_tx);
-
-    let _tcp_thread = std::thread::spawn(move || {
-        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-        match server.accept_loop(listener, vec![core_id]) {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("[{}] TCP server error: {e:#}", utils::market_name());
-                let _ = err_tx.send(format!("TCP server error: {e:#}"));
-            }
-        }
-    });
-
-    market_simulator.add_thread_handle(_tcp_thread);
 
     Ok(())
 }

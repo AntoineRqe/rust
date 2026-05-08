@@ -20,10 +20,6 @@
         "ip": "127.0.0.1",
         "port": 9870
       },
-      "tcp": {
-        "ip": "127.0.0.1",
-        "port": 9871
-      },
       "grpc": {
         "ip": "0.0.0.0",
         "port": 50051
@@ -52,7 +48,6 @@
         "market_feed_core": 4,
         "db_core": 5,
         "web_core": 6,
-        "tcp_core": 7,
         "global_core": 8,
         "snapshot_core": 9,
         "market_feed_multicast_core": 10,
@@ -66,10 +61,6 @@
       "web": {
         "ip": "127.0.0.1",
         "port": 9885
-      },
-      "tcp": {
-        "ip": "127.0.0.1",
-        "port": 9884
       },
       "grpc": {
         "ip": "0.0.0.0",
@@ -99,7 +90,6 @@
         "market_feed_core": 4,
         "db_core": 5,
         "web_core": 6,
-        "tcp_core": 7,
         "global_core": 8,
         "snapshot_core": 9,
         "market_feed_multicast_core": 10,

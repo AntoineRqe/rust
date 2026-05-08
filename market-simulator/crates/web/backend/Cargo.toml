@@ -34,3 +34,4 @@ tonic           = "0.13"
 db              = { path = "../../db" }
 types           = { path = "../../types" }
 sqlx            = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "chrono"] }
+crossbeam-channel.workspace = true
