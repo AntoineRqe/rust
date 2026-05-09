@@ -6,6 +6,7 @@
 /// even when the browser is offline, and publishes them to the event bus for
 /// display when the browser reconnects.
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use tokio::sync::mpsc;
 use types::consts::RB_SIZE;
 
 use crate::player_client::PlayerClient;
-use crate::state::{EventBus, WsEvent};
+use crate::state::{EventBus, TradeView, WsEvent};
 use crate::server::Metrics;
 use crate::order_book::{OrderBookState, stable_order_id_from_cl_ord_id};
 use utils::market_name;
@@ -108,6 +109,7 @@ impl FIXSessionManager {
         bus: &EventBus,
         metrics: Metrics,
         order_book: Arc<Mutex<OrderBookState>>,
+        trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
     ) -> mpsc::Sender<FixRawMsg<RB_SIZE>> {
         let mut sessions = self.inner.lock().unwrap();
         // Cache sessions by both username and market to prevent cross-market session reuse
@@ -134,6 +136,7 @@ impl FIXSessionManager {
             let sessions_ref = Arc::clone(&self.inner);
             let metrics = metrics.clone();
             let order_book = order_book.clone();
+            let trades_queue = trades_queue.clone();
             let session_key = session_key.clone();
 
             // Spawn the background reader task for this session.
@@ -214,6 +217,19 @@ impl FIXSessionManager {
                             // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
                             if is_trade_execution(&body) {
                                 metrics.trades.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                if let Some(trade_view) = extract_trade_view(&body) {
+                                    {
+                                        let mut queue = trades_queue.lock().unwrap();
+                                        queue.push_back(trade_view.clone());
+                                        while queue.len() > 200 {
+                                            queue.pop_front();
+                                        }
+                                    }
+                                    bus.publish(WsEvent::Trades {
+                                        trades: vec![trade_view],
+                                    });
+                                }
                             }
 
                             // Broadcast so connected browser clients can display it.
@@ -284,6 +300,7 @@ impl FIXSessionManager {
         bus: &EventBus,
         metrics: Metrics,
         order_book: Arc<Mutex<OrderBookState>>,
+        trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
     ) -> Result<(), String> {
         if bytes.len() > RB_SIZE {
             return Err(format!(
@@ -299,6 +316,7 @@ impl FIXSessionManager {
             bus,
             metrics,
             order_book,
+            trades_queue,
         );
 
         let mut pending = FixRawMsg::<RB_SIZE>::new(bytes, Some(response_tx));
@@ -366,6 +384,62 @@ fn is_trade_execution(body: &str) -> bool {
     // ExecType=F means a trade was executed
     // The pretty_fix format contains fields like "150=F" for ExecType
     body.contains("150=F") || body.contains("ExecType=F")
+}
+
+fn extract_trade_view(body: &str) -> Option<TradeView> {
+    if !is_trade_execution(body) {
+        return None;
+    }
+
+    // Venue payloads are not always uniform: some reports include LastPx/LastQty (31/32),
+    // others only include order-level fields (44/38/151).
+    let price = extract_field(body, "31")
+        .or_else(|| extract_field(body, "44"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)?;
+
+    let quantity = extract_field(body, "32")
+        .or_else(|| {
+            let total_qty = extract_field(body, "38")?.parse::<f64>().ok()?;
+            let leaves_qty = extract_field(body, "151")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let exec_qty = total_qty - leaves_qty;
+            if exec_qty.is_finite() && exec_qty > 0.0 {
+                Some(exec_qty.to_string())
+            } else if total_qty.is_finite() && total_qty > 0.0 {
+                Some(total_qty.to_string())
+            } else {
+                None
+            }
+        })
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)?;
+
+    let id = extract_field(body, "17")
+        .or_else(|| extract_field(body, "37"))
+        .or_else(|| extract_field(body, "11"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            extract_field(body, "17")
+                .or_else(|| extract_field(body, "37"))
+                .or_else(|| extract_field(body, "11"))
+                .map(|value| stable_order_id_from_cl_ord_id(&value))
+        })
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_micros() as u64)
+                .unwrap_or(0)
+        });
+    let cl_ord_id = extract_field(body, "11").unwrap_or_default();
+
+    Some(TradeView {
+        id,
+        price,
+        quantity,
+        cl_ord_id,
+    })
 }
 
 /// ExecutionReport data extracted from FIX message

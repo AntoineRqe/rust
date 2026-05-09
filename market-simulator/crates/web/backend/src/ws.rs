@@ -462,6 +462,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 &state.bus,
                 state.metrics.clone(),
                 state.order_book.clone(),
+                state.trades_queue.clone(),
             ).await {
                 Ok(_) => {
                     tracing::info!("[{}] FIX order sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));
@@ -511,6 +512,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 &state.bus,
                 state.metrics.clone(),
                 state.order_book.clone(),
+                state.trades_queue.clone(),
             ).await {
                 Ok(_) => {
                     tracing::info!("[{}] FIX cancel sent for '{}': {}", market_name(), username, pretty_fix(&fix_bytes));

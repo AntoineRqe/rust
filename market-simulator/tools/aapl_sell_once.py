@@ -14,6 +14,7 @@ import json
 import re
 import ssl
 import asyncio
+import time
 from urllib import request as urllib_request
 
 try:
@@ -81,6 +82,7 @@ def gateway_login(gateway_url: str, username: str, password: str) -> str:
 
 
 async def send_sell_order(
+    market_name: str,
     ws_url: str,
     token: str,
     username: str,
@@ -95,13 +97,15 @@ async def send_sell_order(
     
     async with websockets.connect(full_url, ssl=ssl_ctx) as ws:
         # Send the SELL order
-        cl_ord_id = "SELL-ONCE"
+        ts_ms = int(time.time() * 1000)
+        market_tag = "".join(ch for ch in market_name.upper() if ch.isalnum())[:2] or "MK"
+        cl_ord_id = f"S{market_tag}{ts_ms}"
         order_cmd = json.dumps({
             "action": "order",
             "clord_id": cl_ord_id,
             "symbol": symbol,
             "qty": float(qty),
-            "price": round(price, 4),
+            "price": round(price, 1),
             "side": "2",  # SELL
         })
         await ws.send(order_cmd)
@@ -143,6 +147,7 @@ async def main_async(args: argparse.Namespace) -> None:
     print(f"\nSending SELL orders...")
     await asyncio.gather(
         send_sell_order(
+            market_name="NASDAQ",
             ws_url=args.nasdaq_ws_url,
             token=token,
             username=args.username,
@@ -151,6 +156,7 @@ async def main_async(args: argparse.Namespace) -> None:
             price=nasdaq_price,
         ),
         send_sell_order(
+            market_name="NYSE",
             ws_url=args.nyse_ws_url,
             token=token,
             username=args.username,

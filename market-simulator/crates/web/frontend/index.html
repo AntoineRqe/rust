@@ -1407,6 +1407,19 @@ function applyOrderBookSnapshot(msg, marketName) {
   
   market.book.bids = filterTerminal(msg.bids, '1');
   market.book.asks = filterTerminal(msg.asks, '2');
+
+  const referencePrice = referencePriceFromBook(market.book);
+  if (Number.isFinite(referencePrice) && referencePrice > 0) {
+    const ts = new Date().toTimeString().slice(0, 8);
+    const lastPoint = market.chartPts[market.chartPts.length - 1];
+    if (!lastPoint || Number(lastPoint.price) !== Number(referencePrice)) {
+      market.chartPts.push({ price: Number(referencePrice), ts });
+      if (market.chartPts.length > 200) {
+        market.chartPts = market.chartPts.slice(-200);
+      }
+    }
+    market.book.last = Number(referencePrice);
+  }
   
   console.log(`[BOOK SNAPSHOT] After filtering: bids=${market.book.bids.length}, asks=${market.book.asks.length}`);
 
@@ -1414,6 +1427,8 @@ function applyOrderBookSnapshot(msg, marketName) {
 
   if (mn === getPrimaryMarketName()) {
     Object.assign(book, market.book);
+    chartPts = [...market.chartPts];
+    lastTradeCount = book.trades.length;
     renderBook(true);
   }
 
@@ -1443,22 +1458,65 @@ function applyTradesSnapshot(msg, marketName) {
   }
   
   if (msg.trades.length > 0) {
-    // Convert API trades to book trade format [price, qty, side, ts]
-    // The API returns {id, price, quantity, cl_ord_id}
-    market.book.trades = msg.trades.map(t => [
-      Number(t.price) || 0,
-      Number(t.quantity) || 0,
-      'B',  // Default to buy side (we don't have the actual side in the snapshot)
-      new Date().toTimeString().slice(0, 8),  // Timestamp
-      '—',  // Owner (unknown from snapshot)
-      false  // resolved flag
-    ]);
+    // Convert API trades to chart rows [price, qty, side, ts, owner, resolved, id]
+    const converted = msg.trades
+      .map(t => {
+        const price = Number(t.price) || 0;
+        const quantity = Number(t.quantity) || 0;
+        const id = Number(t.id) || 0;
+        if (!(price > 0) || !(quantity > 0)) return null;
+        return [
+          price,
+          quantity,
+          'B',  // Side is not provided in TradeView
+          new Date().toTimeString().slice(0, 8),
+          '—',
+          false,
+          id,
+        ];
+      })
+      .filter(Boolean);
+
+    converted
+      .slice()
+      .reverse()
+      .forEach(([price,,, ts]) => {
+        market.chartPts.push({ price: Number(price), ts });
+      });
+    if (market.chartPts.length > 200) {
+      market.chartPts = market.chartPts.slice(-200);
+    }
+
+    // Initial snapshot usually has multiple rows: replace full list.
+    if (converted.length > 1) {
+      market.book.trades = converted;
+    } else {
+      // Live updates usually arrive as single trade rows: append + dedupe.
+      const existing = Array.isArray(market.book.trades) ? market.book.trades : [];
+      const seenIds = new Set(existing.map(row => Number(row[6]) || 0).filter(id => id > 0));
+
+      converted.forEach(row => {
+        const id = Number(row[6]) || 0;
+        if (id > 0 && seenIds.has(id)) return;
+        existing.unshift(row);
+        if (id > 0) seenIds.add(id);
+      });
+
+      market.book.trades = existing.slice(0, 100);
+    }
+
     console.log('[applyTradesSnapshot] Updated market ' + mn + ' book.trades with ' + market.book.trades.length + ' trades');
   } else {
     console.log('[applyTradesSnapshot] Empty trades snapshot, skipping');
   }
   
   // Re-render the market book with the new trades
+  if (mn === getPrimaryMarketName()) {
+    Object.assign(book, market.book);
+    chartPts = [...market.chartPts];
+    lastTradeCount = book.trades.length;
+    renderBook(true);
+  }
   renderMarketBook(mn);
 }
 
@@ -2807,20 +2865,10 @@ function renderBook(immediate = false) {
     }
   }
 
-  // update price chart
   if (book.trades.length !== lastTradeCount) {
-    const newCount = book.trades.length - lastTradeCount;
-    if (lastTradeCount > 0 && newCount > 0) {
-      book.trades.slice(0, newCount).reverse()
-        .forEach(([px,,,ts]) => chartPts.push({ price: +px, ts }));
-    } else if (lastTradeCount === 0) {
-      [...book.trades].reverse()
-        .forEach(([px,,,ts]) => chartPts.push({ price: +px, ts }));
-    }
     lastTradeCount = book.trades.length;
-    if (chartPts.length > 200) chartPts = chartPts.slice(-200);
-    drawChart();
   }
+  drawChart();
 }
 
 function renderLevels(id, levels, cls, maxQ) {
@@ -2842,6 +2890,8 @@ function renderLevels(id, levels, cls, maxQ) {
 function renderMarketBook(marketName) {
   const market = markets[marketName];
   if (!market) return;
+
+  market.book.chartPts = Array.isArray(market.chartPts) ? market.chartPts : [];
   
   const container = ge(`market-${esc(marketName)}`);
   if (!container) return;
@@ -2941,8 +2991,13 @@ function referencePriceFromBook(bookState) {
 }
 
 function renderMarketMiniChartSvg(bookState) {
+  const explicitChartPts = (bookState && Array.isArray(bookState.chartPts))
+    ? bookState.chartPts.map(p => Number(p && p.price)).filter(v => Number.isFinite(v))
+    : [];
   const trades = (bookState && Array.isArray(bookState.trades)) ? bookState.trades : [];
-  let points = [...trades].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
+  let points = explicitChartPts.length > 0
+    ? explicitChartPts
+    : [...trades].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
 
   if (points.length < 2) {
     const refPrice = referencePriceFromBook(bookState);
