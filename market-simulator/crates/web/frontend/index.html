@@ -563,6 +563,7 @@ const orderOwners = {}; // cl_ord_id -> username
 const orderOwnersByOrderId = {}; // order_id(string) -> username
 const orderIdToBookLocation = {}; // order_id(string) -> { market, price, side }
 let playerStateTimer = null;    // debounce handle for handlePlayerState
+let forceImmediatePlayerStateRender = false;
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
 const recentLogTimestamps = Object.create(null); // fingerprint -> last timestamp (ms)
@@ -1041,7 +1042,10 @@ setAdminControlsEnabled(currentIsAdmin);
 resolveSplitMarketConfigs().forEach(market => addMarket(normalizeMarketName(market.name)));
 populateOrderMarketOptions();
 if (ge('o-market')) {
-  ge('o-market').addEventListener('change', updateTargetMarketControls);
+  ge('o-market').addEventListener('change', () => {
+    updateTargetMarketControls();
+    adaptLimitPriceFromBook();
+  });
 }
 ['o-sym', 'o-qty', 'o-price'].forEach(id => {
   const input = ge(id);
@@ -1315,9 +1319,12 @@ function handleServerEvent(msg, marketName) {
       if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
         resetClientMarketView(marketName);
       }
-      // Request player state after a trade/execution report for immediate UI update
-      if (msg.body && /\b(TRADE|EXECUTION REPORT|FILLED|PARTIALLY FILLED)\b/i.test(msg.body)) {
-        requestPlayerState();
+      // Force immediate player-state refresh on execution/cancel reports.
+      // This keeps holdings, tokens and open orders in sync without debounce lag.
+      const isExecutionReport = !!(msg.body && /(?:^|\s)35=8(?:\s|$)/.test(msg.body));
+      const isCancelReject = !!(msg.body && /(?:^|\s)35=9(?:\s|$)/.test(msg.body));
+      if (msg.tag === 'feed' && (isExecutionReport || isCancelReject)) {
+        requestPlayerState(true);
       }
       break;
     default:
@@ -1325,7 +1332,11 @@ function handleServerEvent(msg, marketName) {
   }
 }
 
-function requestPlayerState() {
+function requestPlayerState(forceImmediate = false) {
+  if (forceImmediate) {
+    forceImmediatePlayerStateRender = true;
+  }
+
   // Request from all connected markets (player_state is global, but we want the response ASAP)
   const primaryMarketName = getPrimaryMarketName();
   const primaryMarket = markets[primaryMarketName];
@@ -1404,6 +1415,10 @@ function applyOrderBookSnapshot(msg, marketName) {
   if (mn === getPrimaryMarketName()) {
     Object.assign(book, market.book);
     renderBook(true);
+  }
+
+  if (mn === getSelectedOrderMarketName()) {
+    adaptLimitPriceFromBook();
   }
 
   renderMarketBook(mn);
@@ -1660,6 +1675,16 @@ function schedulePlayerState(msg) {
   refreshTokenBalanceDisplay();
   renderBuyCapacityHint();
 
+  // Defer non-critical player-state paints so overlapping pushes coalesce.
+  // For trade/fill paths, bypass debounce to update holdings immediately.
+  if (forceImmediatePlayerStateRender) {
+    forceImmediatePlayerStateRender = false;
+    clearTimeout(playerStateTimer);
+    playerStateTimer = null;
+    handlePlayerState(msg);
+    return;
+  }
+
   // Defer the orders-panel repaint so overlapping pushes coalesce.
   clearTimeout(playerStateTimer);
   playerStateTimer = setTimeout(() => handlePlayerState(msg), 200);
@@ -1827,6 +1852,61 @@ function setSide(s) {
     ge('btn-send').textContent   = '▶  SELL ORDER';
     ge('btn-send').className     = 'btn btn-send sell';
   }
+  adaptLimitPriceFromBook();
+  renderOrderCostPreview();
+}
+
+function extractRowPrice(row) {
+  if (!row || typeof row !== 'object') return null;
+  const value = Number(row.price);
+  return Number.isFinite(value) ? value : null;
+}
+
+function bestBidAskForMarket(marketName) {
+  const market = markets[normalizeMarketName(marketName)];
+  if (!market || !market.book) return { bestBid: null, bestAsk: null };
+
+  const bids = Array.isArray(market.book.bids) ? market.book.bids : [];
+  const asks = Array.isArray(market.book.asks) ? market.book.asks : [];
+
+  let bestBid = null;
+  bids.forEach(row => {
+    const price = extractRowPrice(row);
+    if (!Number.isFinite(price)) return;
+    if (bestBid === null || price > bestBid) bestBid = price;
+  });
+
+  let bestAsk = null;
+  asks.forEach(row => {
+    const price = extractRowPrice(row);
+    if (!Number.isFinite(price)) return;
+    if (bestAsk === null || price < bestAsk) bestAsk = price;
+  });
+
+  return { bestBid, bestAsk };
+}
+
+function adaptLimitPriceFromBook() {
+  const input = ge('o-price');
+  if (!input) return;
+
+  const { bestBid, bestAsk } = bestBidAskForMarket(getSelectedOrderMarketName());
+  let nextPrice = null;
+
+  if (side === 'BUY') {
+    // BUY: lowest ask.
+    if (Number.isFinite(bestAsk)) nextPrice = bestAsk;
+  } else {
+    // SELL: highest bid if present, else lowest ask.
+    if (Number.isFinite(bestBid)) nextPrice = bestBid;
+    else if (Number.isFinite(bestAsk)) nextPrice = bestAsk;
+  }
+
+  if (!Number.isFinite(nextPrice)) return;
+
+  const rounded = Math.max(0, Math.round(nextPrice * 10) / 10);
+  input.value = rounded.toFixed(1);
+  syncOrderSliderFromInput('o-price');
   renderOrderCostPreview();
 }
 
@@ -2231,7 +2311,7 @@ function sendOrder() {
   send({ action: 'order', clord_id: clordId, symbol, qty, price, side: s }, targetMarketName);
   
   // Request updated player state to refresh token balance
-  requestPlayerState();
+  requestPlayerState(true);
 }
 
 function clearPendingTimeout(clordId) {
@@ -2380,7 +2460,7 @@ function cancelOrder(clordId, symbol, qty, marketName) {
   renderOrders(null, true);
   
   // Request updated player state to refresh token balance
-  requestPlayerState();
+  requestPlayerState(true);
 }
 
 // ── MD dialogs ────────────────────────────────────────────────────────────────

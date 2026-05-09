@@ -89,6 +89,7 @@ pub enum BrowserCommand {
         symbol: String,
         depth: Option<u32>,
     },
+    GetPlayerState,
     ResetTokens,
     ResetSeq,
     ClearBook,

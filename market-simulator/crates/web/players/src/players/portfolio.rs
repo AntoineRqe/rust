@@ -237,10 +237,12 @@ impl PlayerStore {
             if let Some(player) = inner.players.get_mut(&owner_username) {
                 // Token management: deduct on new BUY (status=0), refund on cancel (status=4), 
                 // credit on SELL execution (status=1,2). Never deduct on fill—already deducted at status=0.
+                // Admin user has unlimited tokens (no deduction/refund).
+                let is_admin = owner_username == "admin";
                 match ord_status {
                     "0" => {
                         // Status 0 (New): Deduct tokens for BUY orders to reserve them
-                        if side == "1" {
+                        if side == "1" && !is_admin {
                             let qty = parse_f64(fields.get("38").map(String::as_str));
                             let price = parse_f64(fields.get("44").map(String::as_str).or_else(|| fields.get("6").map(String::as_str)));
                             if qty > 0.0 && price > 0.0 {
@@ -259,22 +261,24 @@ impl PlayerStore {
                     }
                     "4" => {
                         // Status 4 (Cancelled): Refund reserved tokens if this was a BUY order
-                        if let Some(pos) = player
-                            .pending_orders
-                            .iter()
-                            .position(|o| o.cl_ord_id == cl_ord_id)
-                        {
-                            let pending_order = &player.pending_orders[pos];
-                            if pending_order.side == "1" {
-                                let notional = pending_order.qty * pending_order.price;
-                                player.tokens += notional;
-                                changed = true;
-                                tracing::debug!(
-                                    "[Players] Refunded {:.2} tokens for cancelled BUY order {}, new balance: {:.2}",
-                                    notional,
-                                    cl_ord_id,
-                                    player.tokens
-                                );
+                        if !is_admin {
+                            if let Some(pos) = player
+                                .pending_orders
+                                .iter()
+                                .position(|o| o.cl_ord_id == cl_ord_id)
+                            {
+                                let pending_order = &player.pending_orders[pos];
+                                if pending_order.side == "1" {
+                                    let notional = pending_order.qty * pending_order.price;
+                                    player.tokens += notional;
+                                    changed = true;
+                                    tracing::debug!(
+                                        "[Players] Refunded {:.2} tokens for cancelled BUY order {}, new balance: {:.2}",
+                                        notional,
+                                        cl_ord_id,
+                                        player.tokens
+                                    );
+                                }
                             }
                         }
                     }

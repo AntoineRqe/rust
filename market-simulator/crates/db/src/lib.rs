@@ -744,12 +744,60 @@ pub async fn persist_order_update(
             .execute(&mut *tx)
             .await?;
         }
+
+        // Keep maker-side pending orders aligned with matching outcomes.
+        // Trade legs carry maker ClOrdID and its leaves quantity after each fill.
+        sync_maker_pending_orders_from_trades(&mut tx, order_event, order_result).await?;
     }
 
     // Finally, I update the pending orders table based on the order event and result. This table is mutable and represents the current state of pending orders in the market.
     sync_pending_orders(&mut tx, order_event, order_result, result_type).await?;
 
     tx.commit().await?;
+    Ok(())
+}
+
+async fn sync_maker_pending_orders_from_trades(
+    tx: &mut Transaction<'_, Postgres>,
+    order_event: &OrderEvent,
+    order_result: &OrderResult,
+) -> Result<(), sqlx::Error> {
+    let taker_cl_ord_id = order_event.cl_ord_id.to_string();
+
+    for trade in order_result.trades.iter() {
+        let maker_cl_ord_id = trade.cl_ord_id.to_string();
+        if maker_cl_ord_id.is_empty() || maker_cl_ord_id == taker_cl_ord_id {
+            continue;
+        }
+
+        if trade.leaves_qty > FixedPointArithmetic::ZERO {
+            query(
+                r#"
+                UPDATE pending_orders
+                SET
+                    quantity = $1,
+                    payload = jsonb_set(
+                        COALESCE(payload, '{}'::jsonb),
+                        '{quantity}',
+                        to_jsonb($1::double precision),
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE cl_ord_id = $2
+                "#,
+            )
+            .bind(trade.leaves_qty.to_f64())
+            .bind(maker_cl_ord_id)
+            .execute(&mut **tx)
+            .await?;
+        } else {
+            query("DELETE FROM pending_orders WHERE cl_ord_id = $1")
+                .bind(maker_cl_ord_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1299,6 +1347,164 @@ mod tests {
         .await?;
 
         assert!(collect_all_pending_orders(&pool).await?.is_empty());
+
+        reset_database(&pool).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pending_orders_update_maker_leaves_on_taker_fill() -> Result<(), sqlx::Error> {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().await;
+
+        let pool = connect_from_env().await?;
+        create_tables(&pool).await?;
+        reset_database(&pool).await?;
+
+        let maker_order = OrderEvent {
+            price: FixedPointArithmetic::from_f64(10.0),
+            quantity: FixedPointArithmetic::from_f64(100.0),
+            side: Side::Sell,
+            symbol: SymbolId::from_ascii("TEST"),
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: OrderId::from_ascii("maker001"),
+            orig_cl_ord_id: None,
+            sender_id: EntityId::from_ascii("maker-a"),
+            target_id: EntityId::from_ascii("engine"),
+            ..Default::default()
+        };
+
+        persist_order_update(
+            &pool,
+            &maker_order,
+            &OrderResult {
+                internal_order_id: 401,
+                status: OrderStatus::New,
+                trades: Trades::<4>::new(),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let mut taker_trades = Trades::<4>::new();
+        taker_trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(10.0),
+                quantity: FixedPointArithmetic::from_f64(70.0),
+                id: 4001,
+                cl_ord_id: OrderId::from_ascii("maker001"),
+                order_qty: FixedPointArithmetic::from_f64(100.0),
+                leaves_qty: FixedPointArithmetic::from_f64(30.0),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let taker_order = OrderEvent {
+            price: FixedPointArithmetic::from_f64(10.0),
+            quantity: FixedPointArithmetic::from_f64(70.0),
+            side: Side::Buy,
+            symbol: SymbolId::from_ascii("TEST"),
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: OrderId::from_ascii("taker001"),
+            orig_cl_ord_id: None,
+            sender_id: EntityId::from_ascii("taker-a"),
+            target_id: EntityId::from_ascii("engine"),
+            ..Default::default()
+        };
+
+        persist_order_update(
+            &pool,
+            &taker_order,
+            &OrderResult {
+                internal_order_id: 402,
+                status: OrderStatus::Filled,
+                trades: taker_trades,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let pending = collect_all_pending_orders(&pool).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].cl_ord_id.to_string(), "maker001");
+        assert_eq!(pending[0].quantity.to_f64(), 30.0);
+
+        reset_database(&pool).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pending_orders_remove_maker_on_taker_full_deplete() -> Result<(), sqlx::Error> {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().await;
+
+        let pool = connect_from_env().await?;
+        create_tables(&pool).await?;
+        reset_database(&pool).await?;
+
+        let maker_order = OrderEvent {
+            price: FixedPointArithmetic::from_f64(11.0),
+            quantity: FixedPointArithmetic::from_f64(40.0),
+            side: Side::Sell,
+            symbol: SymbolId::from_ascii("TEST"),
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: OrderId::from_ascii("maker002"),
+            orig_cl_ord_id: None,
+            sender_id: EntityId::from_ascii("maker-b"),
+            target_id: EntityId::from_ascii("engine"),
+            ..Default::default()
+        };
+
+        persist_order_update(
+            &pool,
+            &maker_order,
+            &OrderResult {
+                internal_order_id: 501,
+                status: OrderStatus::New,
+                trades: Trades::<4>::new(),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let mut taker_trades = Trades::<4>::new();
+        taker_trades
+            .add_trade(Trade {
+                price: FixedPointArithmetic::from_f64(11.0),
+                quantity: FixedPointArithmetic::from_f64(40.0),
+                id: 5001,
+                cl_ord_id: OrderId::from_ascii("maker002"),
+                order_qty: FixedPointArithmetic::from_f64(40.0),
+                leaves_qty: FixedPointArithmetic::ZERO,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let taker_order = OrderEvent {
+            price: FixedPointArithmetic::from_f64(11.0),
+            quantity: FixedPointArithmetic::from_f64(40.0),
+            side: Side::Buy,
+            symbol: SymbolId::from_ascii("TEST"),
+            order_type: OrderType::LimitOrder,
+            cl_ord_id: OrderId::from_ascii("taker002"),
+            orig_cl_ord_id: None,
+            sender_id: EntityId::from_ascii("taker-b"),
+            target_id: EntityId::from_ascii("engine"),
+            ..Default::default()
+        };
+
+        persist_order_update(
+            &pool,
+            &taker_order,
+            &OrderResult {
+                internal_order_id: 502,
+                status: OrderStatus::Filled,
+                trades: taker_trades,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let pending = collect_all_pending_orders(&pool).await?;
+        assert!(pending.is_empty());
 
         reset_database(&pool).await?;
         Ok(())

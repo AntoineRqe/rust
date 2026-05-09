@@ -374,57 +374,43 @@ impl<T, const N: usize> RingBuffer<T, N> {
             return Some(item);
         }
 
-        // Slow path — spin with exponential backoff, then deadline-check
+        // Register consumer thread so producer can unpark us on push
+        let consumer_thread = std::thread::current();
+        self.consumer_thread.get_or_init(|| consumer_thread);
+
+        // Slow path — use park_timeout for efficient waiting instead of busy spinning
         let deadline = Instant::now() + timeout;
-        let mut head = self.head.0.load(Ordering::Acquire);
+        
+        loop {
+            let head = self.head.0.load(Ordering::Acquire);
+            let tail = self.tail.0.load(Ordering::Relaxed);
 
-        if head == tail {
-            let mut spin = 1;
-            loop {
-                for _ in 0..spin {
-                    std::hint::spin_loop();
-                }
-
-                head = self.head.0.load(Ordering::Acquire);
-
-                if head != tail {
-                    break;
-                }
-
-                if spin < SPIN_THRESHOLD {
-                    spin *= 2;
-                } else {
-                    // Spinning exhausted — switch to deadline polling
-                    loop {
-                        if Instant::now() >= deadline {
-                            return None;
-                        }
-                        std::thread::yield_now(); // yield instead of burning CPU
-                        head = self.head.0.load(Ordering::Acquire);
-                        if head != tail {
-                            break;
-                        }
-                    }
-                    break;
-                }
+            if head != tail {
+                // Data available, consume it
+                fence(Ordering::Acquire);
+                let item = unsafe {
+                    self.buffer
+                        .get()
+                        .as_mut()
+                        .unwrap()
+                        .0
+                        .get_unchecked_mut(tail)
+                        .as_ptr()
+                        .read()
+                };
+                let next_tail = (tail + 1) & (N - 1);
+                self.tail.0.store(next_tail, Ordering::Release);
+                return Some(item);
             }
-        }
 
-        // Consume the item (same as fast path)
-        fence(Ordering::Acquire);
-        let item = unsafe {
-            self.buffer
-                .get()
-                .as_mut()
-                .unwrap()
-                .0
-                .get_unchecked_mut(tail)
-                .as_ptr()
-                .read()
-        };
-        let next_tail = (tail + 1) & (N - 1);
-        self.tail.0.store(next_tail, Ordering::Release);
-        Some(item)
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+
+            let remaining = deadline - now;
+            std::thread::park_timeout(remaining);
+        }
     }
 
     pub fn pop_batch(&self, items: &mut [T]) -> usize

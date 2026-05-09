@@ -664,6 +664,11 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 recipient: Some(username.to_string()),
             });
         }
+
+        BrowserCommand::GetPlayerState => {
+            // No-op here: handle_socket sends PlayerState after each browser command.
+            tracing::debug!("[{}] Browser requested immediate player state", market_name());
+        }
     }
 }
 
