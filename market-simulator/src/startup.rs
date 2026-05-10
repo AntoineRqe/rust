@@ -17,10 +17,12 @@ pub fn start_execution_report_engine(
     simulator: &mut crate::MarketSimulator,
     er_rx: spsc::Consumer<'static, (OrderEvent, OrderResult), RB_SIZE>,
     er_tx: spsc::Producer<'static, (EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>,
+    metrics: Arc<backend::server::Metrics>,
     shutdown: Arc<AtomicBool>,
     core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+    let mut execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+    execution_report_engine.set_metrics(metrics);
 
     let err_tx = Arc::clone(&simulator.err_tx);
 
@@ -51,6 +53,7 @@ pub fn start_db_engine(
     market_simulator: &mut crate::MarketSimulator,
     ob_db_rx: spsc::Consumer<'static, (OrderEvent, OrderResult), RB_SIZE>,
     database_url: String,
+    metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
     core_id: usize,
 ) -> Result<DbData, Box<dyn std::error::Error>> {
@@ -63,6 +66,8 @@ pub fn start_db_engine(
             return Err(Box::new(e));
         }
     };
+    let mut db_engine = db_engine;
+    db_engine.set_metrics(metrics);
 
     match db_engine.init() {
         Ok(_) => (),
@@ -168,6 +173,7 @@ pub fn start_fix_engine(
     fix_rx: Arc<crossbeam_channel::Receiver<FixRawMsg<RB_SIZE>>>,
     fix_tx: spsc::Producer<'static, OrderEvent, RB_SIZE>,
     fix_resp_rx: spsc::Consumer<'static, (EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>,
+    metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
     inbound_core_id: usize,
     outbound_core_id: usize,
@@ -178,7 +184,8 @@ pub fn start_fix_engine(
         // Arc::clone(&queues.net_to_fix_rx.as_ref().unwrap()),
         fix_tx,
         fix_resp_rx,
-        Arc::clone(&global_shutdown)
+        Arc::clone(&global_shutdown),
+        metrics,
     );
 
     let (mut inbound_engine, mut outbound_engine) = fix_engine.split();

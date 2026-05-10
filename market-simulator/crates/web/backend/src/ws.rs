@@ -669,6 +669,12 @@ async fn handle_browser_message(
             });
         }
 
+        BrowserCommand::UiOrderLatency { latency_ms } => {
+            if let Ok(mut samples) = metrics.ui_order_round_trip_latency_ms.lock() {
+                samples.push(latency_ms);
+            }
+        }
+
         BrowserCommand::MdRequest { symbol, depth } => {
             let fix_bytes = build_md_request("BROWSER", "SERVER1",
                                              &symbol, depth.unwrap_or(1));

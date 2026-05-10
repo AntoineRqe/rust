@@ -91,6 +91,10 @@ pub struct StoreInner {
     pub pool: Option<Arc<PgPool>>,
     /// Cached holdings summaries per player. Invalidated on every trade.
     pub holdings_cache: HashMap<String, HashMap<String, crate::players::portfolio::HoldingSummary>>,
+    /// True while a background flush task is running.
+    pub flush_in_progress: bool,
+    /// Set when flush is requested while one is already in progress.
+    pub flush_pending: bool,
 }
 
 impl PlayerStore {
@@ -156,6 +160,8 @@ impl PlayerStore {
                 total_visitor_count,
                 pool,
                 holdings_cache: HashMap::new(),
+                flush_in_progress: false,
+                flush_pending: false,
             })),
         }
     }
@@ -170,6 +176,8 @@ impl PlayerStore {
                 total_visitor_count: storage.total_visitor_count,
                 pool: None,
                 holdings_cache: HashMap::new(),
+                flush_in_progress: false,
+                flush_pending: false,
             })),
         }
     }
@@ -373,46 +381,85 @@ impl PlayerStore {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /// Persist the current in-memory state to PostgreSQL asynchronously.
-    /// Spawns a background task and returns immediately — the caller is never blocked.
+    /// Uses single-flight semantics: at most one background flush task is active at a time.
+    /// Additional flush requests while a flush is running are coalesced into one follow-up run.
     /// Retries up to 3 times with exponential backoff on transient deadlocks.
     pub fn flush(&self) {
-        let inner = self.inner.lock().unwrap();
-        let data = StorageData {
-            players: inner.players.clone(),
-            order_owners: inner.order_owners.clone(),
-            total_visitor_count: inner.total_visitor_count,
-        };
-        let pool = inner.pool.clone();
+        let mut inner = self.inner.lock().unwrap();
+        if inner.pool.is_none() {
+            return;
+        }
+
+        if inner.flush_in_progress {
+            inner.flush_pending = true;
+            return;
+        }
+
+        inner.flush_in_progress = true;
         drop(inner);
 
-        let Some(pool) = pool else {
-            return;
-        };
-
+        let store = self.clone();
         tokio::spawn(async move {
             const MAX_RETRIES: u32 = 3;
-            for attempt in 0..MAX_RETRIES {
-                match persist_storage_to_db(&pool, &data).await {
-                    Ok(_) => return,
-                    Err(e) if e.to_string().contains("deadlock") && attempt < MAX_RETRIES - 1 => {
-                        let backoff_ms = 100 * (2_u64.pow(attempt));
-                        tracing::warn!(
-                            "[{}] Deadlock persisting player data (attempt {}), retrying in {}ms: {e}",
-                            market_name(),
-                            attempt + 1,
-                            backoff_ms
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "[{}] Failed to persist player data to PostgreSQL after {} attempts: {e}",
-                            market_name(),
-                            MAX_RETRIES
-                        );
+            loop {
+                let (pool, data) = {
+                    let inner = store.inner.lock().unwrap();
+                    let Some(pool) = inner.pool.clone() else {
+                        drop(inner);
+                        let mut inner = store.inner.lock().unwrap();
+                        inner.flush_in_progress = false;
+                        inner.flush_pending = false;
                         return;
+                    };
+                    let data = StorageData {
+                        players: inner.players.clone(),
+                        order_owners: inner.order_owners.clone(),
+                        total_visitor_count: inner.total_visitor_count,
+                    };
+                    (pool, data)
+                };
+
+                let mut persisted = false;
+                for attempt in 0..MAX_RETRIES {
+                    match persist_storage_to_db(&pool, &data).await {
+                        Ok(_) => {
+                            persisted = true;
+                            break;
+                        }
+                        Err(e) if e.to_string().contains("deadlock") && attempt < MAX_RETRIES - 1 => {
+                            let backoff_ms = 100 * (2_u64.pow(attempt));
+                            tracing::warn!(
+                                "[{}] Deadlock persisting player data (attempt {}), retrying in {}ms: {e}",
+                                market_name(),
+                                attempt + 1,
+                                backoff_ms
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "[{}] Failed to persist player data to PostgreSQL after {} attempts: {e}",
+                                market_name(),
+                                MAX_RETRIES
+                            );
+                            break;
+                        }
                     }
                 }
+
+                let mut inner = store.inner.lock().unwrap();
+                if inner.flush_pending {
+                    inner.flush_pending = false;
+                    drop(inner);
+                    continue;
+                }
+                inner.flush_in_progress = false;
+                drop(inner);
+
+                if !persisted {
+                    return;
+                }
+                return;
             }
         });
     }

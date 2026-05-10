@@ -26,6 +26,22 @@ pub struct MarketMetrics {
     pub order_book_events: Arc<AtomicUsize>,
     /// Latency from order book event dequeue to fan-out completion (milliseconds)
     pub order_book_event_to_fanout_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Total execution report events processed by the execution-report engine
+    pub execution_report_events: Arc<AtomicUsize>,
+    /// Latency from execution-report event dequeue to fan-out completion (milliseconds)
+    pub execution_report_event_to_fanout_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Total order events written to the database
+    pub order_db_writes: Arc<AtomicUsize>,
+    /// Latency from DB event dequeue to write completion (milliseconds)
+    pub order_db_write_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Total FIX requests processed
+    pub fix_requests: Arc<AtomicUsize>,
+    /// Total FIX responses delivered
+    pub fix_responses: Arc<AtomicUsize>,
+    /// Latency from FIX request receipt to response delivery (milliseconds)
+    pub fix_request_to_response_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Latency from UI click to UI receiving the first response (milliseconds)
+    pub ui_order_round_trip_latency_ms: Arc<Mutex<Vec<u64>>>,
 }
 
 impl MarketMetrics {
@@ -43,6 +59,14 @@ impl MarketMetrics {
             execution_latency_ms: Arc::new(Mutex::new(Vec::new())),
             order_book_events: Arc::new(AtomicUsize::new(0)),
             order_book_event_to_fanout_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            execution_report_events: Arc::new(AtomicUsize::new(0)),
+            execution_report_event_to_fanout_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            order_db_writes: Arc::new(AtomicUsize::new(0)),
+            order_db_write_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            fix_requests: Arc::new(AtomicUsize::new(0)),
+            fix_responses: Arc::new(AtomicUsize::new(0)),
+            fix_request_to_response_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            ui_order_round_trip_latency_ms: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

@@ -81,11 +81,13 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
         let (er_inbound_tx, er_rx) = rb_rx.split();
         let (er_tx, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
+        let metrics = Arc::new(types::MarketMetrics::new());
 
         let er_inbound_tx = Arc::new(er_inbound_tx);
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
 
-        let engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+        let mut engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+        engine.set_metrics(Arc::clone(&metrics));
 
         let handle = s.spawn(move || {
             core_affinity::set_for_current(engine_core);
@@ -208,6 +210,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let (er_inbound_tx, er_rx) = rb_rx.split();
         let (er_tx, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
+        let metrics = Arc::new(types::MarketMetrics::new());
 
         let er_inbound_tx = Arc::new(er_inbound_tx);
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
@@ -215,9 +218,9 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
         let order_book = order_book::book::OrderBook::new("TEST".into());
 
-        let mut engine = OrderBookEngine::new(
-            er_rx,
-            Some(er_tx),
+            let mut engine = OrderBookEngine::new(
+                er_rx,
+                Some(er_tx),
             None,
             None,
             control_rx.1,
@@ -475,11 +478,15 @@ fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> 
         let net_to_fix_tx = Arc::new(net_to_fix_tx);
         let net_to_fix_tx_clone = Arc::clone(&net_to_fix_tx);
 
+        let metrics = Arc::new(types::MarketMetrics::new());
+
         let engine = FixEngine::new(
             net_to_fix_rx,
             fix_inbound_tx,
             er_outbound_rx,
-            Arc::clone(&shutdown));
+            Arc::clone(&shutdown),
+            Arc::clone(&metrics),
+        );
 
         let (mut inbound_engine, _) = engine.split();
 
@@ -588,11 +595,14 @@ fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) ->
         let er_to_fix_tx = Arc::new(er_to_fix_tx);
         let er_to_fix_tx_clone = Arc::clone(&er_to_fix_tx);
 
+        let metrics = Arc::new(types::MarketMetrics::new());
+
         let engine = FixEngine::new(
             Arc::clone(&net_to_fix_rx),
             fix_to_ob_tx,
             er_to_fix_rx,
             Arc::clone(&shutdown),
+            Arc::clone(&metrics),
         );
 
         let (mut inbound_engine, mut outbound_engine) = engine.split();
@@ -724,7 +734,8 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
 
         // execution report engine thread
-        let execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+        let mut execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+        execution_report_engine.set_metrics(Arc::new(types::MarketMetrics::new()));
         let er_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 4 });
             execution_report_engine.run();

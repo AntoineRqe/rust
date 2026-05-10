@@ -94,6 +94,9 @@ pub enum BrowserCommand {
     ResetSeq,
     ClearBook,
     Disconnect,
+    UiOrderLatency {
+        latency_ms: u64,
+    },
 }
 
 // ── Event Bus ─────────────────────────────────────────────────────────

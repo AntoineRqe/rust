@@ -152,6 +152,86 @@ pub async fn metrics_handler(
     buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_bucket{{le=\"+Inf\"}} {}\n", ob_count));
     buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_sum {}\n", ob_sum));
     buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_count {}\n", ob_count));
+
+    buffer.push_str("# HELP execution_report_events_total Total execution report events processed\n");
+    buffer.push_str("# TYPE execution_report_events_total counter\n");
+    buffer.push_str(&format!("execution_report_events_total {}\n",
+        metrics.execution_report_events.load(std::sync::atomic::Ordering::Relaxed)));
+
+    buffer.push_str("# HELP execution_report_event_to_fanout_latency_ms Execution report latency from event dequeue to fan-out completion in milliseconds\n");
+    buffer.push_str("# TYPE execution_report_event_to_fanout_latency_ms histogram\n");
+
+    let er_samples = metrics.execution_report_event_to_fanout_latency_ms.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (er_buckets, er_sum, er_count) = calculate_histogram_stats(&er_samples);
+
+    for (bucket_bound, count) in er_buckets {
+        buffer.push_str(&format!("execution_report_event_to_fanout_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("execution_report_event_to_fanout_latency_ms_bucket{{le=\"+Inf\"}} {}\n", er_count));
+    buffer.push_str(&format!("execution_report_event_to_fanout_latency_ms_sum {}\n", er_sum));
+    buffer.push_str(&format!("execution_report_event_to_fanout_latency_ms_count {}\n", er_count));
+
+    buffer.push_str("# HELP order_db_writes_total Total order events written to the database\n");
+    buffer.push_str("# TYPE order_db_writes_total counter\n");
+    buffer.push_str(&format!("order_db_writes_total {}\n",
+        metrics.order_db_writes.load(std::sync::atomic::Ordering::Relaxed)));
+
+    buffer.push_str("# HELP order_db_write_latency_ms Database write latency for order events in milliseconds\n");
+    buffer.push_str("# TYPE order_db_write_latency_ms histogram\n");
+
+    let db_samples = metrics.order_db_write_latency_ms.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (db_buckets, db_sum, db_count) = calculate_histogram_stats(&db_samples);
+
+    for (bucket_bound, count) in db_buckets {
+        buffer.push_str(&format!("order_db_write_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("order_db_write_latency_ms_bucket{{le=\"+Inf\"}} {}\n", db_count));
+    buffer.push_str(&format!("order_db_write_latency_ms_sum {}\n", db_sum));
+    buffer.push_str(&format!("order_db_write_latency_ms_count {}\n", db_count));
+
+    buffer.push_str("# HELP fix_requests_total Total FIX requests processed\n");
+    buffer.push_str("# TYPE fix_requests_total counter\n");
+    buffer.push_str(&format!("fix_requests_total {}\n",
+        metrics.fix_requests.load(std::sync::atomic::Ordering::Relaxed)));
+
+    buffer.push_str("# HELP fix_responses_total Total FIX responses delivered\n");
+    buffer.push_str("# TYPE fix_responses_total counter\n");
+    buffer.push_str(&format!("fix_responses_total {}\n",
+        metrics.fix_responses.load(std::sync::atomic::Ordering::Relaxed)));
+
+    buffer.push_str("# HELP fix_request_to_response_latency_ms FIX request to response delivery latency in milliseconds\n");
+    buffer.push_str("# TYPE fix_request_to_response_latency_ms histogram\n");
+
+    let fix_samples = metrics.fix_request_to_response_latency_ms.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (fix_buckets, fix_sum, fix_count) = calculate_histogram_stats(&fix_samples);
+
+    for (bucket_bound, count) in fix_buckets {
+        buffer.push_str(&format!("fix_request_to_response_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("fix_request_to_response_latency_ms_bucket{{le=\"+Inf\"}} {}\n", fix_count));
+    buffer.push_str(&format!("fix_request_to_response_latency_ms_sum {}\n", fix_sum));
+    buffer.push_str(&format!("fix_request_to_response_latency_ms_count {}\n", fix_count));
+
+    buffer.push_str("# HELP ui_order_round_trip_latency_ms UI order round-trip latency from click to response in milliseconds\n");
+    buffer.push_str("# TYPE ui_order_round_trip_latency_ms histogram\n");
+
+    let ui_samples = metrics.ui_order_round_trip_latency_ms.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (ui_buckets, ui_sum, ui_count) = calculate_histogram_stats(&ui_samples);
+
+    for (bucket_bound, count) in ui_buckets {
+        buffer.push_str(&format!("ui_order_round_trip_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("ui_order_round_trip_latency_ms_bucket{{le=\"+Inf\"}} {}\n", ui_count));
+    buffer.push_str(&format!("ui_order_round_trip_latency_ms_sum {}\n", ui_sum));
+    buffer.push_str(&format!("ui_order_round_trip_latency_ms_count {}\n", ui_count));
     
     buffer.push_str("# HELP websocket_connections Active WebSocket connections\n");
     buffer.push_str("# TYPE websocket_connections gauge\n");

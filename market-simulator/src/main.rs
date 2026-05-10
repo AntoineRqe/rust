@@ -148,6 +148,7 @@ fn start_market(
         &mut market_simulator,
         er_rx,
         er_tx,
+        Arc::clone(&metrics),
         Arc::clone(&global_shutdown),
         config.core_mapping.execution_report_core,
     )?;
@@ -157,6 +158,7 @@ fn start_market(
         &mut market_simulator,
         ob_db_rx,
         database_url.clone(),
+        Arc::clone(&metrics),
         Arc::clone(&global_shutdown),
         config.core_mapping.db_core,
     )?;
@@ -180,6 +182,7 @@ fn start_market(
         Arc::clone(&queues.net_to_fix_rx.as_ref().unwrap()),
         fix_tx,
         fix_resp_rx,
+        Arc::clone(&metrics),
         Arc::clone(&global_shutdown),
         config.core_mapping.fix_inbound_core,
         config.core_mapping.fix_outbound_core,

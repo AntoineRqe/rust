@@ -8,15 +8,17 @@ use types::{
 
 use spsc::spsc_lock_free::{Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 use fix::{engine::FixRawMsg, tags::{exec_type_code_set, msg_types, ord_status_code_set, side_code_set, tags::{self}}};
 use utils::{field_str, number_to_bytes, market_name};
-use std::sync::Arc;
 use types::FixedPointArithmetic;
 
 pub struct ExecutionReportEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
     fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>,
     shutdown: Arc<AtomicBool>,
+    metrics: Option<Arc<types::MarketMetrics>>,
 }
 
 impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
@@ -25,13 +27,25 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>,
         shutdown: Arc<AtomicBool>
     ) -> Self {
-        Self { fifo_in, fifo_out, shutdown }
+        Self { fifo_in, fifo_out, shutdown, metrics: None }
+    }
+
+    pub fn set_metrics(&mut self, metrics: Arc<types::MarketMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
+                let received_at = Instant::now();
                 self.process_execution_report(&exec_report);
+                if let Some(metrics) = &self.metrics {
+                    metrics.execution_report_events.fetch_add(1, Ordering::Relaxed);
+                    let elapsed_ms = received_at.elapsed().as_millis() as u64;
+                    if let Ok(mut samples) = metrics.execution_report_event_to_fanout_latency_ms.lock() {
+                        samples.push(elapsed_ms);
+                    }
+                }
             }
         }
         

@@ -37,7 +37,7 @@
                  letter-spacing:.05em;padding:0 10px;text-transform:uppercase;
                  white-space:nowrap;flex-shrink:0;border-radius:4px}
   #market-switch:hover{border-color:var(--blue);color:var(--text)}
-  #market-switch:disabled{opacity:.35;cursor:not-allowed}
+  #market-switch:disabled{opacity:.35;cursor:not-allowed}known_markets
   #disconnect-btn{background:#0e1520;color:var(--red);border:1px solid var(--border);
                   min-width:110px;height:30px;display:inline-flex;align-items:center;
                   justify-content:center;font-size:10px;font-weight:bold;
@@ -563,7 +563,6 @@ const orderOwners = {}; // cl_ord_id -> username
 const orderOwnersByOrderId = {}; // order_id(string) -> username
 const orderIdToBookLocation = {}; // order_id(string) -> { market, price, side }
 let playerStateTimer = null;    // debounce handle for handlePlayerState
-let forceImmediatePlayerStateRender = false;
 let orderBookRenderTimer = null;
 let openOrdersRenderTimer = null;
 const recentLogTimestamps = Object.create(null); // fingerprint -> last timestamp (ms)
@@ -1042,10 +1041,7 @@ setAdminControlsEnabled(currentIsAdmin);
 resolveSplitMarketConfigs().forEach(market => addMarket(normalizeMarketName(market.name)));
 populateOrderMarketOptions();
 if (ge('o-market')) {
-  ge('o-market').addEventListener('change', () => {
-    updateTargetMarketControls();
-    adaptLimitPriceFromBook();
-  });
+  ge('o-market').addEventListener('change', updateTargetMarketControls);
 }
 ['o-sym', 'o-qty', 'o-price'].forEach(id => {
   const input = ge(id);
@@ -1319,12 +1315,9 @@ function handleServerEvent(msg, marketName) {
       if (msg.tag === 'info' && typeof msg.label === 'string' && msg.label.startsWith('RESET ✓')) {
         resetClientMarketView(marketName);
       }
-      // Force immediate player-state refresh on execution/cancel reports.
-      // This keeps holdings, tokens and open orders in sync without debounce lag.
-      const isExecutionReport = !!(msg.body && /(?:^|\s)35=8(?:\s|$)/.test(msg.body));
-      const isCancelReject = !!(msg.body && /(?:^|\s)35=9(?:\s|$)/.test(msg.body));
-      if (msg.tag === 'feed' && (isExecutionReport || isCancelReject)) {
-        requestPlayerState(true);
+      // Request player state after a trade/execution report for immediate UI update
+      if (msg.body && /\b(TRADE|EXECUTION REPORT|FILLED|PARTIALLY FILLED)\b/i.test(msg.body)) {
+        requestPlayerState();
       }
       break;
     default:
@@ -1332,11 +1325,7 @@ function handleServerEvent(msg, marketName) {
   }
 }
 
-function requestPlayerState(forceImmediate = false) {
-  if (forceImmediate) {
-    forceImmediatePlayerStateRender = true;
-  }
-
+function requestPlayerState() {
   // Request from all connected markets (player_state is global, but we want the response ASAP)
   const primaryMarketName = getPrimaryMarketName();
   const primaryMarket = markets[primaryMarketName];
@@ -1407,19 +1396,6 @@ function applyOrderBookSnapshot(msg, marketName) {
   
   market.book.bids = filterTerminal(msg.bids, '1');
   market.book.asks = filterTerminal(msg.asks, '2');
-
-  const referencePrice = referencePriceFromBook(market.book);
-  if (Number.isFinite(referencePrice) && referencePrice > 0) {
-    const ts = new Date().toTimeString().slice(0, 8);
-    const lastPoint = market.chartPts[market.chartPts.length - 1];
-    if (!lastPoint || Number(lastPoint.price) !== Number(referencePrice)) {
-      market.chartPts.push({ price: Number(referencePrice), ts });
-      if (market.chartPts.length > 200) {
-        market.chartPts = market.chartPts.slice(-200);
-      }
-    }
-    market.book.last = Number(referencePrice);
-  }
   
   console.log(`[BOOK SNAPSHOT] After filtering: bids=${market.book.bids.length}, asks=${market.book.asks.length}`);
 
@@ -1427,13 +1403,7 @@ function applyOrderBookSnapshot(msg, marketName) {
 
   if (mn === getPrimaryMarketName()) {
     Object.assign(book, market.book);
-    chartPts = [...market.chartPts];
-    lastTradeCount = book.trades.length;
     renderBook(true);
-  }
-
-  if (mn === getSelectedOrderMarketName()) {
-    adaptLimitPriceFromBook();
   }
 
   renderMarketBook(mn);
@@ -1458,65 +1428,22 @@ function applyTradesSnapshot(msg, marketName) {
   }
   
   if (msg.trades.length > 0) {
-    // Convert API trades to chart rows [price, qty, side, ts, owner, resolved, id]
-    const converted = msg.trades
-      .map(t => {
-        const price = Number(t.price) || 0;
-        const quantity = Number(t.quantity) || 0;
-        const id = Number(t.id) || 0;
-        if (!(price > 0) || !(quantity > 0)) return null;
-        return [
-          price,
-          quantity,
-          'B',  // Side is not provided in TradeView
-          new Date().toTimeString().slice(0, 8),
-          '—',
-          false,
-          id,
-        ];
-      })
-      .filter(Boolean);
-
-    converted
-      .slice()
-      .reverse()
-      .forEach(([price,,, ts]) => {
-        market.chartPts.push({ price: Number(price), ts });
-      });
-    if (market.chartPts.length > 200) {
-      market.chartPts = market.chartPts.slice(-200);
-    }
-
-    // Initial snapshot usually has multiple rows: replace full list.
-    if (converted.length > 1) {
-      market.book.trades = converted;
-    } else {
-      // Live updates usually arrive as single trade rows: append + dedupe.
-      const existing = Array.isArray(market.book.trades) ? market.book.trades : [];
-      const seenIds = new Set(existing.map(row => Number(row[6]) || 0).filter(id => id > 0));
-
-      converted.forEach(row => {
-        const id = Number(row[6]) || 0;
-        if (id > 0 && seenIds.has(id)) return;
-        existing.unshift(row);
-        if (id > 0) seenIds.add(id);
-      });
-
-      market.book.trades = existing.slice(0, 100);
-    }
-
+    // Convert API trades to book trade format [price, qty, side, ts]
+    // The API returns {id, price, quantity, cl_ord_id}
+    market.book.trades = msg.trades.map(t => [
+      Number(t.price) || 0,
+      Number(t.quantity) || 0,
+      'B',  // Default to buy side (we don't have the actual side in the snapshot)
+      new Date().toTimeString().slice(0, 8),  // Timestamp
+      '—',  // Owner (unknown from snapshot)
+      false  // resolved flag
+    ]);
     console.log('[applyTradesSnapshot] Updated market ' + mn + ' book.trades with ' + market.book.trades.length + ' trades');
   } else {
     console.log('[applyTradesSnapshot] Empty trades snapshot, skipping');
   }
   
   // Re-render the market book with the new trades
-  if (mn === getPrimaryMarketName()) {
-    Object.assign(book, market.book);
-    chartPts = [...market.chartPts];
-    lastTradeCount = book.trades.length;
-    renderBook(true);
-  }
   renderMarketBook(mn);
 }
 
@@ -1733,16 +1660,6 @@ function schedulePlayerState(msg) {
   refreshTokenBalanceDisplay();
   renderBuyCapacityHint();
 
-  // Defer non-critical player-state paints so overlapping pushes coalesce.
-  // For trade/fill paths, bypass debounce to update holdings immediately.
-  if (forceImmediatePlayerStateRender) {
-    forceImmediatePlayerStateRender = false;
-    clearTimeout(playerStateTimer);
-    playerStateTimer = null;
-    handlePlayerState(msg);
-    return;
-  }
-
   // Defer the orders-panel repaint so overlapping pushes coalesce.
   clearTimeout(playerStateTimer);
   playerStateTimer = setTimeout(() => handlePlayerState(msg), 200);
@@ -1910,61 +1827,6 @@ function setSide(s) {
     ge('btn-send').textContent   = '▶  SELL ORDER';
     ge('btn-send').className     = 'btn btn-send sell';
   }
-  adaptLimitPriceFromBook();
-  renderOrderCostPreview();
-}
-
-function extractRowPrice(row) {
-  if (!row || typeof row !== 'object') return null;
-  const value = Number(row.price);
-  return Number.isFinite(value) ? value : null;
-}
-
-function bestBidAskForMarket(marketName) {
-  const market = markets[normalizeMarketName(marketName)];
-  if (!market || !market.book) return { bestBid: null, bestAsk: null };
-
-  const bids = Array.isArray(market.book.bids) ? market.book.bids : [];
-  const asks = Array.isArray(market.book.asks) ? market.book.asks : [];
-
-  let bestBid = null;
-  bids.forEach(row => {
-    const price = extractRowPrice(row);
-    if (!Number.isFinite(price)) return;
-    if (bestBid === null || price > bestBid) bestBid = price;
-  });
-
-  let bestAsk = null;
-  asks.forEach(row => {
-    const price = extractRowPrice(row);
-    if (!Number.isFinite(price)) return;
-    if (bestAsk === null || price < bestAsk) bestAsk = price;
-  });
-
-  return { bestBid, bestAsk };
-}
-
-function adaptLimitPriceFromBook() {
-  const input = ge('o-price');
-  if (!input) return;
-
-  const { bestBid, bestAsk } = bestBidAskForMarket(getSelectedOrderMarketName());
-  let nextPrice = null;
-
-  if (side === 'BUY') {
-    // BUY: lowest ask.
-    if (Number.isFinite(bestAsk)) nextPrice = bestAsk;
-  } else {
-    // SELL: highest bid if present, else lowest ask.
-    if (Number.isFinite(bestBid)) nextPrice = bestBid;
-    else if (Number.isFinite(bestAsk)) nextPrice = bestAsk;
-  }
-
-  if (!Number.isFinite(nextPrice)) return;
-
-  const rounded = Math.max(0, Math.round(nextPrice * 10) / 10);
-  input.value = rounded.toFixed(1);
-  syncOrderSliderFromInput('o-price');
   renderOrderCostPreview();
 }
 
@@ -2369,7 +2231,7 @@ function sendOrder() {
   send({ action: 'order', clord_id: clordId, symbol, qty, price, side: s }, targetMarketName);
   
   // Request updated player state to refresh token balance
-  requestPlayerState(true);
+  requestPlayerState();
 }
 
 function clearPendingTimeout(clordId) {
@@ -2518,7 +2380,7 @@ function cancelOrder(clordId, symbol, qty, marketName) {
   renderOrders(null, true);
   
   // Request updated player state to refresh token balance
-  requestPlayerState(true);
+  requestPlayerState();
 }
 
 // ── MD dialogs ────────────────────────────────────────────────────────────────
@@ -2865,10 +2727,20 @@ function renderBook(immediate = false) {
     }
   }
 
+  // update price chart
   if (book.trades.length !== lastTradeCount) {
+    const newCount = book.trades.length - lastTradeCount;
+    if (lastTradeCount > 0 && newCount > 0) {
+      book.trades.slice(0, newCount).reverse()
+        .forEach(([px,,,ts]) => chartPts.push({ price: +px, ts }));
+    } else if (lastTradeCount === 0) {
+      [...book.trades].reverse()
+        .forEach(([px,,,ts]) => chartPts.push({ price: +px, ts }));
+    }
     lastTradeCount = book.trades.length;
+    if (chartPts.length > 200) chartPts = chartPts.slice(-200);
+    drawChart();
   }
-  drawChart();
 }
 
 function renderLevels(id, levels, cls, maxQ) {
@@ -2890,8 +2762,6 @@ function renderLevels(id, levels, cls, maxQ) {
 function renderMarketBook(marketName) {
   const market = markets[marketName];
   if (!market) return;
-
-  market.book.chartPts = Array.isArray(market.chartPts) ? market.chartPts : [];
   
   const container = ge(`market-${esc(marketName)}`);
   if (!container) return;
@@ -2991,13 +2861,8 @@ function referencePriceFromBook(bookState) {
 }
 
 function renderMarketMiniChartSvg(bookState) {
-  const explicitChartPts = (bookState && Array.isArray(bookState.chartPts))
-    ? bookState.chartPts.map(p => Number(p && p.price)).filter(v => Number.isFinite(v))
-    : [];
   const trades = (bookState && Array.isArray(bookState.trades)) ? bookState.trades : [];
-  let points = explicitChartPts.length > 0
-    ? explicitChartPts
-    : [...trades].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
+  let points = [...trades].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
 
   if (points.length < 2) {
     const refPrice = referencePriceFromBook(bookState);

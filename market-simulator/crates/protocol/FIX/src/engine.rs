@@ -18,6 +18,7 @@ use crossbeam::queue::{ArrayQueue};
 use std::cell::UnsafeCell;
 use serde::Serialize;
 use tokio::sync::mpsc;
+use std::time::Instant;
 use utils::market_name;
 
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
@@ -96,26 +97,34 @@ pub struct FixEngine<'a, const N: usize> {
     response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
     shutdown: Arc<AtomicBool>,
     pending: Arc<FixPendingConnection<N>>, // Shared state for pending response queues, used
+    metrics: Arc<types::MarketMetrics>,
 }
 
 /// The data struct which will be shared between the inbound and outbound engines, containing the pending response queues for each order event, and a shutdown flag to signal when the engine should stop. This allows the inbound and outbound engines to communicate with each other without needing to share the entire engine struct, which can help reduce contention and improve performance.
 struct FixShared<const N: usize> {
     shutdown: Arc<AtomicBool>,
     pending: Arc<FixPendingConnection<N>>,
+    metrics: Arc<types::MarketMetrics>,
+}
+
+#[derive(Clone)]
+struct FixPendingRoute<const N: usize> {
+    resp_queue: mpsc::Sender<FixRawMsg<N>>,
+    received_at: Instant,
 }
 
 impl <const N: usize> FixShared<N> {
 
-    fn update_pending(&self, key: EntityId, resp_queue: mpsc::Sender<FixRawMsg<N>>) {
+    fn update_pending(&self, key: EntityId, route: FixPendingRoute<N>) {
         // loop while locked is true, then set locked to true and update the pending queue, then set locked to false. This is a very basic spinlock implementation, in a real implementation you would want to use a more robust locking mechanism or a lock-free data structure to avoid contention and improve performance.
         while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
         unsafe {
-            (*self.pending.pending.get()).insert(key, resp_queue);
+            (*self.pending.pending.get()).insert(key, route);
         }
         self.pending.locked.store(false, Ordering::Release);
     }
 
-    fn get_pending(&self, key: &EntityId) -> Option<mpsc::Sender<FixRawMsg<N>>> {
+    fn get_pending(&self, key: &EntityId) -> Option<FixPendingRoute<N>> {
         while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
         let result = unsafe {
             (*self.pending.pending.get()).get(key).cloned()
@@ -137,7 +146,7 @@ impl <const N: usize> FixShared<N> {
         let removed = unsafe {
             let pending = &mut *self.pending.pending.get();
             let before = pending.len();
-            pending.retain(|_, sender| !sender.is_closed());
+            pending.retain(|_, route| !route.resp_queue.is_closed());
             before.saturating_sub(pending.len())
         };
         self.pending.locked.store(false, Ordering::Release);
@@ -167,7 +176,9 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 break;
             }
 
+            self.shared.metrics.fix_requests.fetch_add(1, Ordering::Relaxed);
             let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
+            let received_at = Instant::now();
 
             let order_event = match self.build_order(msg) {
                 Ok(event) => event,
@@ -190,7 +201,10 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
 
             // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
             if let Some(resp_queue) = resp_queue {
-                self.shared.update_pending(order_event.sender_id, resp_queue);
+                self.shared.update_pending(order_event.sender_id, FixPendingRoute {
+                    resp_queue,
+                    received_at,
+                });
             }
 
             // Push the structured order event to the order book queue.
@@ -307,9 +321,14 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                 }
 
                 if let Some(resp_queue) = self.shared.get_pending(&key) {
-                    match resp_queue.try_send(response) {
+                    match resp_queue.resp_queue.try_send(response) {
                         Ok(_) => {
                             self.counter += 1;
+                            self.shared.metrics.fix_responses.fetch_add(1, Ordering::Relaxed);
+                            let elapsed_ms = resp_queue.received_at.elapsed().as_millis() as u64;
+                            if let Ok(mut samples) = self.shared.metrics.fix_request_to_response_latency_ms.lock() {
+                                samples.push(elapsed_ms);
+                            }
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                             self.shared.remove_pending(&key);
@@ -346,7 +365,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
 
 struct FixPendingConnection<const N: usize> {
     locked: AtomicBool,
-    pending: UnsafeCell<HashMap<EntityId, mpsc::Sender<FixRawMsg<N>>>>,
+    pending: UnsafeCell<HashMap<EntityId, FixPendingRoute<N>>>,
 }
 
 unsafe impl<const N: usize> Send for FixPendingConnection<N> {}
@@ -359,6 +378,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
         request_out: Producer<'a, OrderEvent, N>,
         response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
         shutdown: Arc<AtomicBool>,
+        metrics: Arc<types::MarketMetrics>,
     ) -> Self {
         Self {
             request_in: request_in,
@@ -369,6 +389,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
                 locked: AtomicBool::new(false),
                 pending: UnsafeCell::new(HashMap::new()),
             }),
+            metrics,
         }
     }
 
@@ -377,6 +398,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
         let shared = Arc::new(FixShared {
             shutdown: Arc::clone(&self.shutdown),
             pending: Arc::clone(&self.pending),
+            metrics: Arc::clone(&self.metrics),
         });
 
 
@@ -418,6 +440,7 @@ mod tests {
         std::thread::scope(|scope| {
 
             let shutdown = Arc::new(AtomicBool::new(false));
+            let metrics = Arc::new(types::MarketMetrics::new());
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
             let (er_to_fix_tx, er_to_fix_rx) = er_to_fix.split();
 
@@ -426,6 +449,7 @@ mod tests {
                 fix_to_ob_tx,
                 er_to_fix_rx,
                 Arc::clone(&shutdown),
+                Arc::clone(&metrics),
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
@@ -487,12 +511,14 @@ mod tests {
         std::thread::scope(|scope| {
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
             let (er_to_fix_tx, er_to_fix_rx) = er_to_fix.split();
+            let metrics = Arc::new(types::MarketMetrics::new());
 
             let handle = FixEngine::new(
                 Arc::new(net_to_fix_rx),
                 fix_to_ob_tx,
                 er_to_fix_rx,
                 Arc::clone(&shutdown),
+                Arc::clone(&metrics),
             );
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();

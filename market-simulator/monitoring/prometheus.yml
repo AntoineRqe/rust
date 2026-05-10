@@ -5,10 +5,10 @@ global:
 scrape_configs:
   - job_name: "market-nyse"
     static_configs:
-      - targets: ["localhost:9885"] # Your web server address
+      - targets: ["localhost:19885"] # Your web server address
     metrics_path: "/metrics" # Endpoint to scrape
 
   - job_name: "market-nasdaq"
     static_configs:
-      - targets: ["localhost:9870"] # Your web server address
+      - targets: ["localhost:19870"] # Your web server address
     metrics_path: "/metrics" # Endpoint to scrape

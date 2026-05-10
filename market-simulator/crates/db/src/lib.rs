@@ -7,6 +7,7 @@ use std::future::Future;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Instant;
 use std::time::Duration;
 use types::macros::{EntityId, OrderId, SymbolId};
 use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trade};
@@ -21,6 +22,8 @@ pub struct DatabaseEngine<'a, const N: usize> {
     shutdown: Arc<AtomicBool>,
     /// Shared database connection pool (need to be shared with gRPC control service)
     pool: Arc<PgPool>,
+    /// Optional shared metrics sink for database write telemetry
+    metrics: Option<Arc<types::MarketMetrics>>,
 }
 
 impl<'a, const N: usize> DatabaseEngine<'a, N> {
@@ -35,7 +38,12 @@ impl<'a, const N: usize> DatabaseEngine<'a, N> {
             fifo_in,
             shutdown,
             pool,
+            metrics: None,
         })
+    }
+
+    pub fn set_metrics(&mut self, metrics: Arc<types::MarketMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     pub fn init(&self) -> Result<(), sqlx::Error> {
@@ -45,8 +53,15 @@ impl<'a, const N: usize> DatabaseEngine<'a, N> {
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
             if let Some(exec_report) = self.fifo_in.pop() {
+                let received_at = Instant::now();
                 if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
                     tracing::error!("[{}] Error persisting order update: {}", market_name(), e);
+                } else if let Some(metrics) = &self.metrics {
+                    metrics.order_db_writes.fetch_add(1, Ordering::Relaxed);
+                    let elapsed_ms = received_at.elapsed().as_millis() as u64;
+                    if let Ok(mut samples) = metrics.order_db_write_latency_ms.lock() {
+                        samples.push(elapsed_ms);
+                    }
                 }
             }
         }

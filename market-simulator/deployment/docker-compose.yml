@@ -30,6 +30,8 @@ services:
     container_name: market-simulator-players
     environment:
       DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
+      DB_MAX_CONNECTIONS: 30
+      DB_ACQUIRE_TIMEOUT_SECS: 30
       PLAYER_SERVICE_PORT: 50053
       RUST_LOG: info
     ports:
@@ -66,7 +68,7 @@ services:
     networks:
       - market-network
     restart: unless-stopped
-    command: ["gateway", "--config", "crates/config/gateway/docker.json"]
+    command: ["gateway", "--config", "crates/config/gateway/docker.local.json"]
     cpuset: "1"
 
   # NASDAQ Market Service
@@ -99,7 +101,8 @@ services:
     networks:
       - market-network
     restart: unless-stopped
-    command: ["market-simulator", "--config", "crates/config/markets/nasdaq.json"]
+    command:
+      ["market-simulator", "--config", "crates/config/markets/nasdaq.json"]
     cpuset: "2,3,4" # for docker-compose v2 syntax
 
   # NYSE Market Service
