@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use types::{OrderEvent, OrderResult};
 
 use arc_swap::ArcSwap;
@@ -47,6 +47,8 @@ pub struct OrderBookEngine<'a, const N: usize> {
     snapshot_ptr: Option<Arc<ArcSwap<Snapshot>>>,
     /// Atomic boolean flag to signal shutdown of the order book engine. When set to true, the engine will stop processing new orders and exit gracefully after processing any remaining orders in the input queue.
     shutdown: Arc<AtomicBool>,
+    /// Optional shared metrics sink for engine-stage telemetry.
+    metrics: Option<Arc<types::MarketMetrics>>,
 }
 
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
@@ -71,7 +73,12 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             order_book,
             snapshot_ptr,
             shutdown,
+            metrics: None,
         }
+    }
+
+    pub fn set_metrics(&mut self, metrics: Arc<types::MarketMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     /// Imports a batch of order events into the order book engine, processing each order and updating the snapshot after each order is processed.
@@ -312,11 +319,22 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
             }
 
             if let Some(event) = self.fifo_in.pop_timeout(Duration::from_millis(500)) {
+                let received_at = Instant::now();
                 // Process incoming order events from the input queue
                 let (event, result) = self.order_book.process_order(event);
                 // For now, I send a copy of the order event and result to each subscriber, but ideally I would like to avoid copying the order event and result in the hot path of processing orders.
                 // TODO : How can I avoid making a copy of the order in the hot path?
                 self.fan_out_execution_report(event, result);
+
+                if let Some(metrics) = &self.metrics {
+                    metrics
+                        .order_book_events
+                        .fetch_add(1, Ordering::Relaxed);
+                    let elapsed_ms = received_at.elapsed().as_millis() as u64;
+                    if let Ok(mut samples) = metrics.order_book_event_to_fanout_latency_ms.lock() {
+                        samples.push(elapsed_ms);
+                    }
+                }
 
                 // Update the snapshot with the latest state of the order book after processing the order
                 // TODO : Just send execution reports to the snapshot engine and let it update the snapshot instead of doing it in the hot path of processing orders in the order book engine. Already done in database persistance.

@@ -132,6 +132,26 @@ pub async fn metrics_handler(
     buffer.push_str(&format!("execution_latency_ms_bucket{{le=\"+Inf\"}} {}\n", exec_count));
     buffer.push_str(&format!("execution_latency_ms_sum {}\n", exec_sum));
     buffer.push_str(&format!("execution_latency_ms_count {}\n", exec_count));
+
+    buffer.push_str("# HELP order_book_events_total Total order book events processed\n");
+    buffer.push_str("# TYPE order_book_events_total counter\n");
+    buffer.push_str(&format!("order_book_events_total {}\n",
+        metrics.order_book_events.load(std::sync::atomic::Ordering::Relaxed)));
+
+    buffer.push_str("# HELP order_book_event_to_fanout_latency_ms Order book latency from event dequeue to fan-out completion in milliseconds\n");
+    buffer.push_str("# TYPE order_book_event_to_fanout_latency_ms histogram\n");
+
+    let ob_samples = metrics.order_book_event_to_fanout_latency_ms.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (ob_buckets, ob_sum, ob_count) = calculate_histogram_stats(&ob_samples);
+
+    for (bucket_bound, count) in ob_buckets {
+        buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_bucket{{le=\"+Inf\"}} {}\n", ob_count));
+    buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_sum {}\n", ob_sum));
+    buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_count {}\n", ob_count));
     
     buffer.push_str("# HELP websocket_connections Active WebSocket connections\n");
     buffer.push_str("# TYPE websocket_connections gauge\n");

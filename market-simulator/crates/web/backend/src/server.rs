@@ -37,45 +37,7 @@ fn format_error_chain(err: &(dyn Error + 'static)) -> String {
     parts.join(" | caused by: ")
 }
 
-/// All application metrics for monitoring and observability
-#[derive(Clone)]
-pub struct Metrics {
-    /// Total login attempts
-    pub login_attempts: Arc<AtomicUsize>,
-    /// Successful logins
-    pub login_success: Arc<AtomicUsize>,
-    /// Failed login attempts
-    pub login_failure: Arc<AtomicUsize>,
-    /// Total order events processed
-    pub order_events: Arc<AtomicUsize>,
-    /// Total trades executed
-    pub trades: Arc<AtomicUsize>,
-    /// Total cancel orders submitted
-    pub cancel_orders: Arc<AtomicUsize>,
-    /// Login latency histogram (milliseconds)
-    pub login_latency_ms: Arc<Mutex<Vec<u64>>>,
-    /// Order submission latency histogram (milliseconds)
-    pub order_latency_ms: Arc<Mutex<Vec<u64>>>,
-    /// Execution latency histogram (milliseconds)
-    pub execution_latency_ms: Arc<Mutex<Vec<u64>>>,
-}
-
-impl Metrics {
-    /// Create a new Metrics instance with all counters initialized to zero
-    pub fn new() -> Self {
-        Self {
-            login_attempts: Arc::new(AtomicUsize::new(0)),
-            login_success: Arc::new(AtomicUsize::new(0)),
-            login_failure: Arc::new(AtomicUsize::new(0)),
-            order_events: Arc::new(AtomicUsize::new(0)),
-            trades: Arc::new(AtomicUsize::new(0)),
-            cancel_orders: Arc::new(AtomicUsize::new(0)),
-            login_latency_ms: Arc::new(Mutex::new(Vec::new())),
-            order_latency_ms: Arc::new(Mutex::new(Vec::new())),
-            execution_latency_ms: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
+pub type Metrics = types::MarketMetrics;
 
 /// Everything axum handlers need — cheap to clone, Arc-backed internally.
 #[derive(Clone)]

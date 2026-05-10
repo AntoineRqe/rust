@@ -214,6 +214,7 @@ pub fn start_order_book_engine(
     ob_er_tx: spsc::Producer<'static, (OrderEvent, OrderResult), RB_SIZE>,
     ob_db_tx: spsc::Producer<'static, (OrderEvent, OrderResult), RB_SIZE>,
     ob_control_rx: crossbeam::channel::Receiver<OrderBookControl>,
+    metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
     pending_orders: Vec<OrderEvent>,
     order_book_core_id: usize,
@@ -240,6 +241,7 @@ pub fn start_order_book_engine(
             None,
             Arc::clone(&global_shutdown)
         );
+        order_book_engine.set_metrics(Arc::clone(&metrics));
 
         // Import initial order book state from the database before starting the engine.
         // This ensures that the engine starts with the correct state and can process new orders/events in the context of existing pending orders.

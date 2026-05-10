@@ -168,6 +168,7 @@ fn start_market(
         ob_er_tx,
         ob_db_tx,
         ob_control_rx,
+        Arc::clone(&metrics),
         Arc::clone(&global_shutdown),
         db_data.pending_orders.clone(),
         config.core_mapping.order_book_core,
