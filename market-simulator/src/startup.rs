@@ -275,6 +275,7 @@ pub fn start_web_server(
     order_book: Arc<Mutex<OrderBookState>>,
     market_database_url: String,
     bus: EventBus,
+    metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
     web_addr: Connection,
     fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
@@ -290,6 +291,7 @@ pub fn start_web_server(
         let web_ip = web_addr.ip.clone();
         let web_port = web_addr.port;
         let web_market_database_url = market_database_url.clone();
+        let metrics = Arc::clone(&metrics);
         let web_shutdown = Arc::clone(&global_shutdown);
         let order_book = Arc::clone(&order_book);
         let err_tx = Arc::clone(&market_simulator.err_tx);
@@ -299,6 +301,7 @@ pub fn start_web_server(
             match backend::run_web_server(
                 bus,
                 fix_tx,
+                metrics,
                 grpc_addr,
                 &web_ip,
                 web_port,

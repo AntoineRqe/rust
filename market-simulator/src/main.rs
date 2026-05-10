@@ -1,4 +1,5 @@
 use backend::order_book::OrderBookState;
+use backend::server::Metrics;
 use backend::state::EventBus;
 use clap::Parser;
 use config::{MarketConfig, SingleMarketConfig};
@@ -55,6 +56,7 @@ impl ThreadHandles {
 pub struct MarketSimulator {
     config: MarketConfig,
     player_service_addr: String,
+    metrics: Arc<Metrics>,
     thread_handles: Arc<Mutex<ThreadHandles>>,
     shutdown: Option<Arc<AtomicBool>>,
     // Error channel for threads to report startup errors back to main thread for logging.
@@ -115,6 +117,7 @@ fn start_market(
 
     let config = market_simulator.config.clone();
     let player_service_addr = market_simulator.player_service_addr.clone();
+    let metrics = Arc::clone(&market_simulator.metrics);
     let bus = EventBus::new();
     let global_shutdown = Arc::new(AtomicBool::new(false));
     let order_book = Arc::new(std::sync::Mutex::new(OrderBookState::new()));
@@ -187,6 +190,7 @@ fn start_market(
         Arc::clone(&order_book),
         database_url.clone(),
         bus.clone(),
+        metrics,
         Arc::clone(&global_shutdown),
         config.web.clone(),
         net_to_fix_tx.clone(),
@@ -277,6 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let simulator = Arc::new(Mutex::new(MarketSimulator {
         config: market_config,
         player_service_addr,
+        metrics: Arc::new(Metrics::new()),
         thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),
         shutdown: None,
         err_tx,

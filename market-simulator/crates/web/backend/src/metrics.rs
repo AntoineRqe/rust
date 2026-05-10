@@ -14,7 +14,7 @@ use axum::{
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
 use std::sync::Arc;
-use crate::server::AppState;
+use crate::server::{AppState, Metrics};
 
 /// Histogram buckets for latency metrics (milliseconds)
 const LATENCY_BUCKETS_MS: &[u64] = &[1, 5, 10, 25, 50, 100, 250, 500, 1000];
@@ -48,6 +48,7 @@ pub fn create_metrics_registry() -> Registry {
 /// This is called by Prometheus scraper at /metrics endpoint
 pub async fn metrics_handler(
     Extension(registry): Extension<Arc<Registry>>,
+    Extension(metrics): Extension<Arc<Metrics>>,
     State(state): State<AppState>,
 ) -> Response {
     // Encode all metrics in Prometheus text format
@@ -57,38 +58,38 @@ pub async fn metrics_handler(
     buffer.push_str("# HELP login_attempts_total Total login attempts\n");
     buffer.push_str("# TYPE login_attempts_total counter\n");
     buffer.push_str(&format!("login_attempts_total {}\n", 
-        state.metrics.login_attempts.load(std::sync::atomic::Ordering::Relaxed)));
+        metrics.login_attempts.load(std::sync::atomic::Ordering::Relaxed)));
     
     buffer.push_str("# HELP login_success_total Successful logins\n");
     buffer.push_str("# TYPE login_success_total counter\n");
     buffer.push_str(&format!("login_success_total {}\n", 
-        state.metrics.login_success.load(std::sync::atomic::Ordering::Relaxed)));
+        metrics.login_success.load(std::sync::atomic::Ordering::Relaxed)));
     
     buffer.push_str("# HELP login_failure_total Failed login attempts\n");
     buffer.push_str("# TYPE login_failure_total counter\n");
     buffer.push_str(&format!("login_failure_total {}\n", 
-        state.metrics.login_failure.load(std::sync::atomic::Ordering::Relaxed)));
+        metrics.login_failure.load(std::sync::atomic::Ordering::Relaxed)));
     
     buffer.push_str("# HELP order_events_total Total order events processed\n");
     buffer.push_str("# TYPE order_events_total counter\n");
     buffer.push_str(&format!("order_events_total {}\n", 
-        state.metrics.order_events.load(std::sync::atomic::Ordering::Relaxed)));
+        metrics.order_events.load(std::sync::atomic::Ordering::Relaxed)));
     
     buffer.push_str("# HELP trades_total Total trades executed\n");
     buffer.push_str("# TYPE trades_total counter\n");
     buffer.push_str(&format!("trades_total {}\n", 
-        state.metrics.trades.load(std::sync::atomic::Ordering::Relaxed)));
+        metrics.trades.load(std::sync::atomic::Ordering::Relaxed)));
     
     buffer.push_str("# HELP cancel_orders_total Total cancel orders submitted\n");
     buffer.push_str("# TYPE cancel_orders_total counter\n");
     buffer.push_str(&format!("cancel_orders_total {}\n", 
-        state.metrics.cancel_orders.load(std::sync::atomic::Ordering::Relaxed)));
+        metrics.cancel_orders.load(std::sync::atomic::Ordering::Relaxed)));
     
     // Export login latency histogram
     buffer.push_str("# HELP login_latency_ms Login latency in milliseconds\n");
     buffer.push_str("# TYPE login_latency_ms histogram\n");
     
-    let login_samples = state.metrics.login_latency_ms.lock()
+    let login_samples = metrics.login_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
     let (login_buckets, login_sum, login_count) = calculate_histogram_stats(&login_samples);
@@ -104,7 +105,7 @@ pub async fn metrics_handler(
     buffer.push_str("# HELP order_latency_ms Order submission latency in milliseconds\n");
     buffer.push_str("# TYPE order_latency_ms histogram\n");
     
-    let order_samples = state.metrics.order_latency_ms.lock()
+    let order_samples = metrics.order_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
     let (order_buckets, order_sum, order_count) = calculate_histogram_stats(&order_samples);
@@ -120,7 +121,7 @@ pub async fn metrics_handler(
     buffer.push_str("# HELP execution_latency_ms Execution/trade latency in milliseconds\n");
     buffer.push_str("# TYPE execution_latency_ms histogram\n");
     
-    let exec_samples = state.metrics.execution_latency_ms.lock()
+    let exec_samples = metrics.execution_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
     let (exec_buckets, exec_sum, exec_count) = calculate_histogram_stats(&exec_samples);

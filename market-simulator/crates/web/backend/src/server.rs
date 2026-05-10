@@ -96,8 +96,6 @@ pub struct AppState {
     pub fix_session_manager: FIXSessionManager,
     /// Recent trades for price chart initialization.
     pub trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
-    /// Application metrics for monitoring (login, orders, trades, etc.)
-    pub metrics: Metrics,
 }
 
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
@@ -113,6 +111,7 @@ pub struct AppState {
 pub fn run_web_server(
     bus: EventBus,
     fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
+    metrics: Arc<Metrics>,
     grpc_addr: String,
     ip: &str,
     port: u16,
@@ -133,6 +132,7 @@ pub fn run_web_server(
         .block_on(serve(
             bus,
             fix_tx,
+            metrics,
             grpc_addr,
             ip,
             port,
@@ -154,6 +154,7 @@ pub fn run_web_server(
 async fn serve(
     bus: EventBus,
     fix_tx: Arc<crossbeam_channel::Sender<FixRawMsg<RB_SIZE>>>,
+    metrics: Arc<Metrics>,
     grpc_addr: String,
     ip: &str,
     port: u16,
@@ -229,7 +230,6 @@ async fn serve(
         total_visitors: Arc::new(AtomicUsize::new(0)),
         fix_session_manager: FIXSessionManager::new(fix_tx),
         trades_queue,
-        metrics: Metrics::new(),
     };
 
     // Initialize Prometheus metrics registry
@@ -275,6 +275,7 @@ async fn serve(
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
+        .layer(Extension(metrics))
         .layer(Extension(metrics_registry))
         .with_state(state.clone());
 

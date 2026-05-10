@@ -3,9 +3,11 @@ use axum::{
     extract::State,
     http::StatusCode,
     Json,
+    Extension,
 };
 use serde::Deserialize;
-use crate::server::AppState;
+use std::sync::Arc;
+use crate::server::{AppState, Metrics};
 use crate::auth::admin_password;
 use utils::market_name;
 
@@ -22,12 +24,13 @@ pub struct LoginRequest {
 /// Returns a token issued by the Player Service.
 pub async fn api_login_handler(
     State(state): State<AppState>,
+    Extension(metrics): Extension<Arc<Metrics>>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
     let start_time = std::time::Instant::now();
     
     // Track login attempt
-    state.metrics.login_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    metrics.login_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     
     let admin_login = body.username.eq_ignore_ascii_case("admin")
         && admin_password().as_deref() == Some(body.password.as_str());
@@ -36,11 +39,11 @@ pub async fn api_login_handler(
         match state.player_client.lock().await.authenticate_or_register("admin", &body.password).await {
             Ok(auth_result) => {
                 // Track successful login
-                state.metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 
                 // Record latency sample (milliseconds)
                 let elapsed_ms = start_time.elapsed().as_millis() as u64;
-                if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+                if let Ok(mut samples) = metrics.login_latency_ms.lock() {
                     samples.push(elapsed_ms);
                 }
                 
@@ -57,11 +60,11 @@ pub async fn api_login_handler(
             }
             Err(e) => {
                 // Track failed login
-                state.metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 
                 // Record latency sample even for failures (milliseconds)
                 let elapsed_ms = start_time.elapsed().as_millis() as u64;
-                if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+                if let Ok(mut samples) = metrics.login_latency_ms.lock() {
                     samples.push(elapsed_ms);
                 }
                 
@@ -79,11 +82,11 @@ pub async fn api_login_handler(
     match state.player_client.lock().await.authenticate_or_register(&body.username, &body.password).await {
         Ok(auth_result) => {
             // Track successful login
-            state.metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.login_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             
             // Record latency sample (milliseconds)
             let elapsed_ms = start_time.elapsed().as_millis() as u64;
-            if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+            if let Ok(mut samples) = metrics.login_latency_ms.lock() {
                 samples.push(elapsed_ms);
             }
             
@@ -100,11 +103,11 @@ pub async fn api_login_handler(
         }
         Err(e) => {
             // Track failed login
-            state.metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.login_failure.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             
             // Record latency sample even for failures (milliseconds)
             let elapsed_ms = start_time.elapsed().as_millis() as u64;
-            if let Ok(mut samples) = state.metrics.login_latency_ms.lock() {
+            if let Ok(mut samples) = metrics.login_latency_ms.lock() {
                 samples.push(elapsed_ms);
             }
             

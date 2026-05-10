@@ -107,7 +107,7 @@ impl FIXSessionManager {
         username: &str,
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         bus: &EventBus,
-        metrics: Metrics,
+        metrics: Arc<Metrics>,
         order_book: Arc<Mutex<OrderBookState>>,
         trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
     ) -> mpsc::Sender<FixRawMsg<RB_SIZE>> {
@@ -134,7 +134,7 @@ impl FIXSessionManager {
             let player_client = player_client.clone();
             let bus = bus.clone();
             let sessions_ref = Arc::clone(&self.inner);
-            let metrics = metrics.clone();
+            let metrics = Arc::clone(&metrics);
             let order_book = order_book.clone();
             let trades_queue = trades_queue.clone();
             let session_key = session_key.clone();
@@ -298,7 +298,7 @@ impl FIXSessionManager {
         bytes: &[u8],
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         bus: &EventBus,
-        metrics: Metrics,
+        metrics: Arc<Metrics>,
         order_book: Arc<Mutex<OrderBookState>>,
         trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
     ) -> Result<(), String> {

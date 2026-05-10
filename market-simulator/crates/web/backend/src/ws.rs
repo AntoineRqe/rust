@@ -2,12 +2,13 @@ use axum::{
     extract::{ws::{WebSocket, Message}, WebSocketUpgrade, State, Query, ConnectInfo},
     response::IntoResponse,
     http::StatusCode,
+    Extension,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use serde::Deserialize;
-use crate::server::AppState;
+use crate::server::{AppState, Metrics};
 use crate::auth::require_admin;
 use crate::state::{WsEvent, BrowserCommand};
 use players::players::PendingOrder;
@@ -56,6 +57,7 @@ pub struct WsParams {
 pub async fn ws_handler(
     ws:           WebSocketUpgrade,
     State(state): State<AppState>,
+    Extension(metrics): Extension<Arc<Metrics>>,
     Query(params): Query<WsParams>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
@@ -69,7 +71,7 @@ pub async fn ws_handler(
         return (StatusCode::UNAUTHORIZED, "Missing token parameter").into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, username, token, addr))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, metrics, username, token, addr))
 }
 
 /// Main loop for handling a WebSocket connection with a browser client. Listens for events from the FIX engine and messages from the browser, and routes them appropriately.
@@ -79,7 +81,14 @@ pub async fn ws_handler(
 /// - `username`: The authenticated username (sent by the browser after login).
 /// - `token`: The bearer token from the Player Service (sent by the browser).
 /// - `addr`: The client's socket address, used for logging and recording connection info in the player store.
-async fn handle_socket(socket: WebSocket, state: AppState, username: String, _token: String, _addr: SocketAddr) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    metrics: Arc<Metrics>,
+    username: String,
+    _token: String,
+    _addr: SocketAddr,
+) {
     // Split into sender and receiver so we can use both concurrently
     let (mut sender, mut receiver) = socket.split();
     let mut rx: tokio::sync::broadcast::Receiver<WsEvent> = state.bus.subscribe();
@@ -174,7 +183,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, username: String, _to
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         // Handle the browser command, which may involve sending FIX messages over TCP to the engine. The FIX session thread will process those messages and publish events back to the bus, which will then be sent to this browser as needed.
-                        handle_browser_message(&text, &state, &username, is_admin).await;
+                        handle_browser_message(&text, &state, &metrics, &username, is_admin).await;
                         // After every command, push the updated player state to this client.
                         send_player_state(&mut sender, &state, &username, is_admin).await;
                     }
@@ -321,7 +330,13 @@ async fn send_trades_snapshot(
 }
 
 /// Handle a command received from the browser client. This may involve sending FIX messages over TCP to the engine, which will then process them and publish events back to the bus.
-async fn handle_browser_message(text: &str, state: &AppState, username: &str, is_admin: bool) {
+async fn handle_browser_message(
+    text: &str,
+    state: &AppState,
+    metrics: &Arc<Metrics>,
+    username: &str,
+    is_admin: bool,
+) {
     tracing::debug!("[{}] Received message from browser: {text}", market_name());
     let cmd: BrowserCommand = match serde_json::from_str(text) {
         Ok(c)  => c,
@@ -432,9 +447,9 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
             }).await;
 
             // Track the order event for metrics and latency
-            state.metrics.order_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.order_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let order_elapsed_ms = order_start_time.elapsed().as_millis() as u64;
-            if let Ok(mut samples) = state.metrics.order_latency_ms.lock() {
+            if let Ok(mut samples) = metrics.order_latency_ms.lock() {
                 samples.push(order_elapsed_ms);
             }
 
@@ -460,7 +475,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 &fix_bytes,
                 state.player_client.clone(),
                 &state.bus,
-                state.metrics.clone(),
+                Arc::clone(metrics),
                 state.order_book.clone(),
                 state.trades_queue.clone(),
             ).await {
@@ -490,7 +505,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
             state.player_client.lock().await.remove_pending_order(username, &clord_id).await;
 
             // Track the cancel order event for metrics
-            state.metrics.cancel_orders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.cancel_orders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             let fix_bytes = build_order_cancel_request(
                 username, "SERVER1",
@@ -510,7 +525,7 @@ async fn handle_browser_message(text: &str, state: &AppState, username: &str, is
                 &fix_bytes,
                 state.player_client.clone(),
                 &state.bus,
-                state.metrics.clone(),
+                Arc::clone(metrics),
                 state.order_book.clone(),
                 state.trades_queue.clone(),
             ).await {
