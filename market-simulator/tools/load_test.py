@@ -82,6 +82,9 @@ def default_market_ws_url(market: str) -> str:
     return "ws://127.0.0.1:19870/ws"
 
 
+CL_ORD_ID_MAX_LEN = 20
+
+
 @dataclass
 class Stats:
     sent: int = 0
@@ -135,6 +138,8 @@ async def run_load_test(args: argparse.Namespace) -> None:
                     if part.startswith("11="):
                         clord_id = part[3:]
                         break
+                if clord_id:
+                    clord_id = clord_id.split("\x00", 1)[0]
                 if not clord_id:
                     continue
 
@@ -155,7 +160,9 @@ async def run_load_test(args: argparse.Namespace) -> None:
                 next_send += interval
 
                 sequence += 1
-                clord_id = f"LT-{int(time.time() * 1000)}-{sequence}"
+                clord_id = f"LT{sequence:018d}"
+                if len(clord_id) > CL_ORD_ID_MAX_LEN:
+                    raise RuntimeError(f"clord_id exceeds FIX width {CL_ORD_ID_MAX_LEN}: {clord_id}")
                 payload = {
                     "action": "order",
                     "clord_id": clord_id,
@@ -171,6 +178,9 @@ async def run_load_test(args: argparse.Namespace) -> None:
                     pending[clord_id] = time.perf_counter()
                 await ws.send(json.dumps(payload))
                 stats.sent += 1
+
+            if not args.skip_clear_book:
+                await ws.send(json.dumps({"action": "clear_book"}))
 
             await asyncio.sleep(args.settle)
         finally:
@@ -208,6 +218,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rate", type=float, default=100.0, help="Target orders/sec")
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--settle", type=float, default=2.0, help="Seconds to wait for late acks")
+    parser.add_argument("--skip-clear-book", action="store_true", help="Do not send clear_book at end")
     return parser.parse_args()
 
 

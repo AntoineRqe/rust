@@ -140,6 +140,10 @@ async fn serve(
             ))) as Box<dyn std::error::Error>
         })?,
     ));
+    {
+        let mut client = player_client.lock().await;
+        client.set_metrics(Arc::clone(&metrics));
+    }
     tracing::info!(
         "[{}] Connected to player service at {}",
         market_name(),

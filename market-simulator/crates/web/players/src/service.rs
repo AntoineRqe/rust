@@ -56,8 +56,23 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                     String::new()
                 };
                 
-                // Generate a unique bearer token for this session
-                let token = generate_token();
+                // Generate a signed JWT bearer token for this session
+                // Note: is_admin is always false for regular players. Admin flag is determined
+                // by username == "admin" check in the backend login handler.
+                let token = match generate_token(&username, false) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Ok(Response::new(AuthResponse {
+                            success: false,
+                            token: String::new(),
+                            id_suffix: String::new(),
+                            username: req.username,
+                            is_admin: false,
+                            error_code: AuthErrorCode::PasswordHashFailed as i32,
+                            error_message: format!("Failed to generate token: {}", e),
+                        }))
+                    }
+                };
                 
                 Ok(Response::new(AuthResponse {
                     success: true,

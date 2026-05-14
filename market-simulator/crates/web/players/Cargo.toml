@@ -24,6 +24,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 
 utils = { path = "../../utils" }
 db = { path = "../../db" }
+jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 
 [build-dependencies]
 tonic-build = "0.13"

@@ -3,6 +3,7 @@ pub mod players;
 pub mod service;
 
 pub use players::{PlayerStore, Player, PendingOrder, INITIAL_TOKENS, AuthError, HoldingSummary, PortfolioLot};
+pub use players::token::{TokenClaims, generate_token, validate_token, get_jwt_secret};
 pub use service::PlayerServiceImpl;
 
 // Proto-generated code

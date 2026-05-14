@@ -203,6 +203,11 @@ pub async fn metrics_handler(
     buffer.push_str(&format!("fix_responses_total {}\n",
         metrics.fix_responses.load(std::sync::atomic::Ordering::Relaxed)));
 
+    buffer.push_str("# HELP fix_response_dropped_total Total FIX responses dropped because client response channel was full\n");
+    buffer.push_str("# TYPE fix_response_dropped_total counter\n");
+    buffer.push_str(&format!("fix_response_dropped_total {}\n",
+        metrics.fix_response_dropped.load(std::sync::atomic::Ordering::Relaxed)));
+
     buffer.push_str("# HELP fix_request_to_response_latency_ms FIX request to response delivery latency in milliseconds\n");
     buffer.push_str("# TYPE fix_request_to_response_latency_ms histogram\n");
 
@@ -217,6 +222,31 @@ pub async fn metrics_handler(
     buffer.push_str(&format!("fix_request_to_response_latency_ms_bucket{{le=\"+Inf\"}} {}\n", fix_count));
     buffer.push_str(&format!("fix_request_to_response_latency_ms_sum {}\n", fix_sum));
     buffer.push_str(&format!("fix_request_to_response_latency_ms_count {}\n", fix_count));
+
+    buffer.push_str("# HELP player_api_calls_total Total backend to player service API calls\n");
+    buffer.push_str("# TYPE player_api_calls_total counter\n");
+    buffer.push_str(&format!("player_api_calls_total {}\n",
+        metrics.player_api_calls.load(std::sync::atomic::Ordering::Relaxed)));
+
+    buffer.push_str("# HELP player_api_errors_total Total failed backend to player service API calls\n");
+    buffer.push_str("# TYPE player_api_errors_total counter\n");
+    buffer.push_str(&format!("player_api_errors_total {}\n",
+        metrics.player_api_errors.load(std::sync::atomic::Ordering::Relaxed)));
+
+    buffer.push_str("# HELP player_api_latency_ms Backend to player service API call latency in milliseconds\n");
+    buffer.push_str("# TYPE player_api_latency_ms histogram\n");
+
+    let player_samples = metrics.player_api_latency_ms.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (player_buckets, player_sum, player_count) = calculate_histogram_stats(&player_samples);
+
+    for (bucket_bound, count) in player_buckets {
+        buffer.push_str(&format!("player_api_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("player_api_latency_ms_bucket{{le=\"+Inf\"}} {}\n", player_count));
+    buffer.push_str(&format!("player_api_latency_ms_sum {}\n", player_sum));
+    buffer.push_str(&format!("player_api_latency_ms_count {}\n", player_count));
 
     buffer.push_str("# HELP ui_order_round_trip_latency_ms UI order round-trip latency from click to response in milliseconds\n");
     buffer.push_str("# TYPE ui_order_round_trip_latency_ms histogram\n");

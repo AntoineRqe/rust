@@ -1,5 +1,5 @@
 {
-  "ring_buffer_size": 1024,
+  "ring_buffer_size": 4096,
   "players_service": {
     "grpc": {
       "ip": "players-service",

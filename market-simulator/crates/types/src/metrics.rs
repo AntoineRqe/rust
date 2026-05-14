@@ -38,8 +38,16 @@ pub struct MarketMetrics {
     pub fix_requests: Arc<AtomicUsize>,
     /// Total FIX responses delivered
     pub fix_responses: Arc<AtomicUsize>,
+    /// Total FIX responses dropped because the client channel was full
+    pub fix_response_dropped: Arc<AtomicUsize>,
     /// Latency from FIX request receipt to response delivery (milliseconds)
     pub fix_request_to_response_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Total backend -> player service API calls
+    pub player_api_calls: Arc<AtomicUsize>,
+    /// Total backend -> player service API call failures
+    pub player_api_errors: Arc<AtomicUsize>,
+    /// Latency for backend -> player service API calls (milliseconds)
+    pub player_api_latency_ms: Arc<Mutex<Vec<u64>>>,
     /// Latency from UI click to UI receiving the first response (milliseconds)
     pub ui_order_round_trip_latency_ms: Arc<Mutex<Vec<u64>>>,
 }
@@ -65,7 +73,11 @@ impl MarketMetrics {
             order_db_write_latency_ms: Arc::new(Mutex::new(Vec::new())),
             fix_requests: Arc::new(AtomicUsize::new(0)),
             fix_responses: Arc::new(AtomicUsize::new(0)),
+            fix_response_dropped: Arc::new(AtomicUsize::new(0)),
             fix_request_to_response_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            player_api_calls: Arc::new(AtomicUsize::new(0)),
+            player_api_errors: Arc::new(AtomicUsize::new(0)),
+            player_api_latency_ms: Arc::new(Mutex::new(Vec::new())),
             ui_order_round_trip_latency_ms: Arc::new(Mutex::new(Vec::new())),
         }
     }

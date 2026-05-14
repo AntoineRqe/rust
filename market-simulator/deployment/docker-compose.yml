@@ -32,6 +32,7 @@ services:
       DB_MAX_CONNECTIONS: 30
       DB_ACQUIRE_TIMEOUT_SECS: 30
       PLAYER_SERVICE_PORT: 50053
+      JWT_SECRET: jwt-secret-key-change-in-production
       RUST_LOG: info
     ports:
       - "50053:50053"
@@ -52,6 +53,7 @@ services:
       DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
       RUST_LOG: info
       PLAYER_SERVICE_ADDR: http://players-service:50053
+      JWT_SECRET: jwt-secret-key-change-in-production
     ports:
       - "9860:9860"
     depends_on:
@@ -79,6 +81,7 @@ services:
       DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
       RUST_LOG: info
       PLAYER_SERVICE_ADDR: http://players-service:50053
+      JWT_SECRET: jwt-secret-key-change-in-production
     ports:
       - "19870:9870" # Web UI (nginx terminates TLS on :9870 → this port)
       - "50051:50051" # gRPC order book
@@ -112,6 +115,7 @@ services:
       DATABASE_URL_MARKET_SIMULATOR: postgresql://market_user:market_password@postgres:5432/market_simulator
       RUST_LOG: info
       PLAYER_SERVICE_ADDR: http://players-service:50053
+      JWT_SECRET: jwt-secret-key-change-in-production
     ports:
       - "19885:9885" # Web UI (nginx terminates TLS on :9885 → this port)
       - "50052:50052" # gRPC order book

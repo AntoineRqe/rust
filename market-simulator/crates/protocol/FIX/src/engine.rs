@@ -335,6 +335,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                             tracing::warn!("[{}] Client response channel closed, removing pending route", market_name());
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            self.shared.metrics.fix_response_dropped.fetch_add(1, Ordering::Relaxed);
                             tracing::error!("[{}] Client response channel full, dropping response", market_name());
                         }
                     }

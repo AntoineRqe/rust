@@ -44,6 +44,8 @@ use players::pb::players::v1::{
 use players::players::{PendingOrder, HoldingSummary};
 use std::collections::HashMap;
 use std::time::Duration;
+use std::time::Instant;
+use std::sync::Arc;
 use tonic::transport::{Channel, Endpoint};
 use tracing::error;
 
@@ -66,6 +68,7 @@ pub struct AuthenticationResult {
 #[derive(Clone)]
 pub struct PlayerClient {
     client: PlayerServiceClient<Channel>,
+    metrics: Option<Arc<types::MarketMetrics>>,
 }
 
 impl PlayerClient {
@@ -73,7 +76,7 @@ impl PlayerClient {
     /// 
     /// Configures:
     /// - Connection timeout: 5 seconds
-    /// - Request timeout: 60 seconds (increased from 30s to handle database deadlocks)
+    /// - Request timeout: 60 seconds
     /// - Keepalive interval: 15 seconds
     /// - Keepalive timeout: 5 seconds
     /// - Connection pooling via shared Channel
@@ -87,11 +90,13 @@ impl PlayerClient {
             .http2_keep_alive_interval(Duration::from_secs(15))
             .keep_alive_timeout(Duration::from_secs(5));
 
+        // Important part here, the channel is a single TCP connection which is going to be shared for all PlayerClient instance
+        // So HTTP/2 multiplexing carry multiple gRPC calls on the same underlying TCP calls.
         let channel = endpoint.connect().await?;
         let client = PlayerServiceClient::new(channel);
         
         tracing::info!("PlayerClient connected to {}", addr);
-        Ok(Self { client })
+        Ok(Self { client, metrics: None })
     }
 
     /// Create a new PlayerClient from an existing Channel.
@@ -99,6 +104,24 @@ impl PlayerClient {
     pub fn from_channel(channel: Channel) -> Self {
         Self {
             client: PlayerServiceClient::new(channel),
+            metrics: None,
+        }
+    }
+
+    pub fn set_metrics(&mut self, metrics: Arc<types::MarketMetrics>) {
+        self.metrics = Some(metrics);
+    }
+
+    fn record_player_api_call(&self, start: Instant, ok: bool) {
+        if let Some(metrics) = &self.metrics {
+            metrics.player_api_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if !ok {
+                metrics.player_api_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            if let Ok(mut samples) = metrics.player_api_latency_ms.lock() {
+                samples.push(elapsed_ms);
+            }
         }
     }
 
@@ -114,9 +137,11 @@ impl PlayerClient {
             password: password.to_string(),
         };
 
+        let started = Instant::now();
         match self.client.authenticate(request).await {
             Ok(response) => {
                 let auth_resp = response.into_inner();
+                self.record_player_api_call(started, auth_resp.success);
                 if auth_resp.success {
                     Ok(AuthenticationResult {
                         token: auth_resp.token,
@@ -129,6 +154,7 @@ impl PlayerClient {
                 }
             }
             Err(e) => {
+                self.record_player_api_call(started, false);
                 error!("gRPC authenticate error: {}", e);
                 Err(format!("Authentication service unavailable: {}", e))
             }
@@ -142,8 +168,10 @@ impl PlayerClient {
             token: String::new(), // TODO: pass actual token if needed
         };
 
+        let started = Instant::now();
         match self.client.get_player_state(request).await {
             Ok(response) => {
+                self.record_player_api_call(started, true);
                 let state = response.into_inner();
                 Some(PlayerStateView {
                     username: state.username,
@@ -179,6 +207,7 @@ impl PlayerClient {
                 })
             }
             Err(e) => {
+                self.record_player_api_call(started, false);
                 error!("gRPC get_player_state error: {}", e);
                 None
             }
@@ -213,9 +242,15 @@ impl PlayerClient {
             }],
         };
 
+        let started = Instant::now();
         match self.client.update_pending_orders(request).await {
-            Ok(response) => response.into_inner().success,
+            Ok(response) => {
+                let success = response.into_inner().success;
+                self.record_player_api_call(started, success);
+                success
+            }
             Err(e) => {
+                self.record_player_api_call(started, false);
                 error!("gRPC add_pending_order error: {}", e);
                 false
             }
@@ -244,9 +279,15 @@ impl PlayerClient {
                         .collect(),
                 };
 
+                let started = Instant::now();
                 match self.client.update_pending_orders(request).await {
-                    Ok(response) => response.into_inner().success,
+                    Ok(response) => {
+                        let success = response.into_inner().success;
+                        self.record_player_api_call(started, success);
+                        success
+                    }
                     Err(e) => {
+                        self.record_player_api_call(started, false);
                         error!("gRPC remove_pending_order error: {}", e);
                         false
                     }
@@ -263,16 +304,25 @@ impl PlayerClient {
             token: String::new(),
         };
 
+        let started = Instant::now();
         if let Err(e) = self.client.reset_tokens(request).await {
+            self.record_player_api_call(started, false);
             error!("gRPC reset_tokens error: {}", e);
+        } else {
+            self.record_player_api_call(started, true);
         }
     }
 
     /// Record a visitor connection and return all-time visitor count.
     pub async fn record_visit(&mut self) -> usize {
+        let started = Instant::now();
         match self.client.record_visit(RecordVisitRequest {}).await {
-            Ok(response) => response.into_inner().total_visitor_count as usize,
+            Ok(response) => {
+                self.record_player_api_call(started, true);
+                response.into_inner().total_visitor_count as usize
+            }
             Err(e) => {
+                self.record_player_api_call(started, false);
                 error!("record_visit RPC failed: {:?}", e);
                 0
             }
@@ -294,13 +344,18 @@ impl PlayerClient {
 
     /// Update visitor counts in the player service (for persistence across restarts).
     pub async fn update_visitors(&mut self, active: i32, total: i32) -> Result<(), String> {
+        let started = Instant::now();
         match self.client.update_visitors(UpdateVisitorsRequest {
             active_count: active,
             total_count: total,
             token: String::new(), // No token required for internal backend calls
         }).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.record_player_api_call(started, true);
+                Ok(())
+            }
             Err(e) => {
+                self.record_player_api_call(started, false);
                 error!("update_visitors RPC failed: {:?}", e);
                 Err(format!("update_visitors failed: {}", e))
             }
@@ -309,14 +364,17 @@ impl PlayerClient {
 
     /// Reset market state (admin command).
     pub async fn reset_market_state(&mut self) -> (usize, usize) {
+        let started = Instant::now();
         match self.client.reset_market_state(ResetMarketStateRequest {
             token: String::new(), // Token validation happens in the backend
         }).await {
             Ok(response) => {
+                self.record_player_api_call(started, true);
                 let resp = response.into_inner();
                 (resp.players_touched as usize, resp.orders_removed as usize)
             }
             Err(e) => {
+                self.record_player_api_call(started, false);
                 tracing::error!("[{}] reset_market_state RPC failed: {}", utils::market_name(), e);
                 (0, 0)
             }
@@ -325,14 +383,17 @@ impl PlayerClient {
 
     /// Reset all tokens (admin command).
     pub async fn reset_all_tokens(&mut self) -> usize {
+        let started = Instant::now();
         match self.client.reset_all_tokens(ResetAllTokensRequest {
             token: String::new(), // Token validation happens in the backend
         }).await {
             Ok(response) => {
+                self.record_player_api_call(started, true);
                 let resp = response.into_inner();
                 resp.players_reset as usize
             }
             Err(e) => {
+                self.record_player_api_call(started, false);
                 tracing::error!("[{}] reset_all_tokens RPC failed: {}", utils::market_name(), e);
                 0
             }
@@ -361,9 +422,11 @@ impl PlayerClient {
                 fix_body: fix_body.to_string(),
             };
             
+            let started = Instant::now();
             match self.client.apply_fix_execution_report(request).await {
                 Ok(response) => {
                     let result = response.into_inner();
+                    self.record_player_api_call(started, result.success);
                     if result.success {
                         tracing::info!("[{}] FIX execution report applied for '{}'", utils::market_name(), username);
                         return Ok(());
@@ -380,6 +443,7 @@ impl PlayerClient {
                     }
                 }
                 Err(e) => {
+                    self.record_player_api_call(started, false);
                     let msg = format!(
                         "gRPC call error | username='{}' | error='{}' | error_type='{:?}' | fix_body_len={} | attempt={}/{}",
                         username,
