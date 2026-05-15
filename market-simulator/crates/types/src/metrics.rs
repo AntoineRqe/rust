@@ -26,6 +26,16 @@ pub struct MarketMetrics {
     pub order_book_events: Arc<AtomicUsize>,
     /// Latency from order book event dequeue to fan-out completion (milliseconds)
     pub order_book_event_to_fanout_latency_ms: Arc<Mutex<Vec<u64>>>,
+    /// Latency from publish to browser send completion (microseconds)
+    pub websocket_fanout_to_browser_latency_us: Arc<Mutex<Vec<u64>>>,
+    /// Last observed order book size when broadcasting an order book event
+    pub websocket_fanout_order_book_levels: Arc<AtomicUsize>,
+    /// Total websocket events dropped because a browser lagged behind
+    pub websocket_lagged_events: Arc<AtomicUsize>,
+    /// Latency for sending a websocket message to a browser (microseconds)
+    pub websocket_send_latency_us: Arc<Mutex<Vec<u64>>>,
+    /// Latency for sending the post-event player state to a browser (microseconds)
+    pub websocket_player_state_send_latency_us: Arc<Mutex<Vec<u64>>>,
     /// Total execution report events processed by the execution-report engine
     pub execution_report_events: Arc<AtomicUsize>,
     /// Latency from execution-report event dequeue to fan-out completion (milliseconds)
@@ -67,6 +77,11 @@ impl MarketMetrics {
             execution_latency_ms: Arc::new(Mutex::new(Vec::new())),
             order_book_events: Arc::new(AtomicUsize::new(0)),
             order_book_event_to_fanout_latency_ms: Arc::new(Mutex::new(Vec::new())),
+            websocket_fanout_to_browser_latency_us: Arc::new(Mutex::new(Vec::new())),
+            websocket_fanout_order_book_levels: Arc::new(AtomicUsize::new(0)),
+            websocket_lagged_events: Arc::new(AtomicUsize::new(0)),
+            websocket_send_latency_us: Arc::new(Mutex::new(Vec::new())),
+            websocket_player_state_send_latency_us: Arc::new(Mutex::new(Vec::new())),
             execution_report_events: Arc::new(AtomicUsize::new(0)),
             execution_report_event_to_fanout_latency_ms: Arc::new(Mutex::new(Vec::new())),
             order_db_writes: Arc::new(AtomicUsize::new(0)),

@@ -18,9 +18,17 @@ use crate::server::{AppState, Metrics};
 
 /// Histogram buckets for latency metrics (milliseconds)
 const LATENCY_BUCKETS_MS: &[u64] = &[1, 5, 10, 25, 50, 100, 250, 500, 1000];
+/// Histogram buckets for latency metrics (microseconds)
+const LATENCY_BUCKETS_US: &[u64] = &[
+    10, 25, 50, 100, 250, 500,
+    1_000, 2_500, 5_000, 10_000,
+    25_000, 50_000, 100_000, 250_000,
+    500_000, 1_000_000, 2_000_000,
+    5_000_000, 10_000_000,
+];
 
 /// Calculate histogram bucket counts and sum from samples
-fn calculate_histogram_stats(samples: &[u64]) -> (Vec<(u64, u64)>, u64, u64) {
+fn calculate_histogram_stats(samples: &[u64], bucket_bounds: &[u64]) -> (Vec<(u64, u64)>, u64, u64) {
     let mut buckets = Vec::new();
     let mut sum = 0u64;
     let count = samples.len() as u64;
@@ -31,7 +39,7 @@ fn calculate_histogram_stats(samples: &[u64]) -> (Vec<(u64, u64)>, u64, u64) {
     }
     
     // Calculate bucket counts (cumulative)
-    for &bucket_bound in LATENCY_BUCKETS_MS {
+    for &bucket_bound in bucket_bounds {
         let bucket_count = samples.iter().filter(|&&s| s <= bucket_bound).count() as u64;
         buckets.push((bucket_bound, bucket_count));
     }
@@ -92,7 +100,7 @@ pub async fn metrics_handler(
     let login_samples = metrics.login_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (login_buckets, login_sum, login_count) = calculate_histogram_stats(&login_samples);
+    let (login_buckets, login_sum, login_count) = calculate_histogram_stats(&login_samples, LATENCY_BUCKETS_MS);
     
     for (bucket_bound, count) in login_buckets {
         buffer.push_str(&format!("login_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -108,7 +116,7 @@ pub async fn metrics_handler(
     let order_samples = metrics.order_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (order_buckets, order_sum, order_count) = calculate_histogram_stats(&order_samples);
+    let (order_buckets, order_sum, order_count) = calculate_histogram_stats(&order_samples, LATENCY_BUCKETS_MS);
     
     for (bucket_bound, count) in order_buckets {
         buffer.push_str(&format!("order_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -124,7 +132,7 @@ pub async fn metrics_handler(
     let exec_samples = metrics.execution_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (exec_buckets, exec_sum, exec_count) = calculate_histogram_stats(&exec_samples);
+    let (exec_buckets, exec_sum, exec_count) = calculate_histogram_stats(&exec_samples, LATENCY_BUCKETS_MS);
     
     for (bucket_bound, count) in exec_buckets {
         buffer.push_str(&format!("execution_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -144,7 +152,7 @@ pub async fn metrics_handler(
     let ob_samples = metrics.order_book_event_to_fanout_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (ob_buckets, ob_sum, ob_count) = calculate_histogram_stats(&ob_samples);
+    let (ob_buckets, ob_sum, ob_count) = calculate_histogram_stats(&ob_samples, LATENCY_BUCKETS_MS);
 
     for (bucket_bound, count) in ob_buckets {
         buffer.push_str(&format!("order_book_event_to_fanout_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -164,7 +172,7 @@ pub async fn metrics_handler(
     let er_samples = metrics.execution_report_event_to_fanout_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (er_buckets, er_sum, er_count) = calculate_histogram_stats(&er_samples);
+    let (er_buckets, er_sum, er_count) = calculate_histogram_stats(&er_samples, LATENCY_BUCKETS_MS);
 
     for (bucket_bound, count) in er_buckets {
         buffer.push_str(&format!("execution_report_event_to_fanout_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -184,7 +192,7 @@ pub async fn metrics_handler(
     let db_samples = metrics.order_db_write_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (db_buckets, db_sum, db_count) = calculate_histogram_stats(&db_samples);
+    let (db_buckets, db_sum, db_count) = calculate_histogram_stats(&db_samples, LATENCY_BUCKETS_MS);
 
     for (bucket_bound, count) in db_buckets {
         buffer.push_str(&format!("order_db_write_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -214,7 +222,7 @@ pub async fn metrics_handler(
     let fix_samples = metrics.fix_request_to_response_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (fix_buckets, fix_sum, fix_count) = calculate_histogram_stats(&fix_samples);
+    let (fix_buckets, fix_sum, fix_count) = calculate_histogram_stats(&fix_samples, LATENCY_BUCKETS_MS);
 
     for (bucket_bound, count) in fix_buckets {
         buffer.push_str(&format!("fix_request_to_response_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -239,7 +247,7 @@ pub async fn metrics_handler(
     let player_samples = metrics.player_api_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (player_buckets, player_sum, player_count) = calculate_histogram_stats(&player_samples);
+    let (player_buckets, player_sum, player_count) = calculate_histogram_stats(&player_samples, LATENCY_BUCKETS_MS);
 
     for (bucket_bound, count) in player_buckets {
         buffer.push_str(&format!("player_api_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -254,7 +262,7 @@ pub async fn metrics_handler(
     let ui_samples = metrics.ui_order_round_trip_latency_ms.lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let (ui_buckets, ui_sum, ui_count) = calculate_histogram_stats(&ui_samples);
+    let (ui_buckets, ui_sum, ui_count) = calculate_histogram_stats(&ui_samples, LATENCY_BUCKETS_MS);
 
     for (bucket_bound, count) in ui_buckets {
         buffer.push_str(&format!("ui_order_round_trip_latency_ms_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
@@ -262,6 +270,68 @@ pub async fn metrics_handler(
     buffer.push_str(&format!("ui_order_round_trip_latency_ms_bucket{{le=\"+Inf\"}} {}\n", ui_count));
     buffer.push_str(&format!("ui_order_round_trip_latency_ms_sum {}\n", ui_sum));
     buffer.push_str(&format!("ui_order_round_trip_latency_ms_count {}\n", ui_count));
+
+    buffer.push_str("# HELP websocket_fanout_to_browser_latency_us WebSocket fanout to browser latency in microseconds\n");
+    buffer.push_str("# TYPE websocket_fanout_to_browser_latency_us histogram\n");
+
+    let ws_samples = metrics.websocket_fanout_to_browser_latency_us.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (ws_buckets, ws_sum, ws_count) = calculate_histogram_stats(&ws_samples, LATENCY_BUCKETS_US);
+
+    for (bucket_bound, count) in ws_buckets {
+        buffer.push_str(&format!("websocket_fanout_to_browser_latency_us_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("websocket_fanout_to_browser_latency_us_bucket{{le=\"+Inf\"}} {}\n", ws_count));
+    buffer.push_str(&format!("websocket_fanout_to_browser_latency_us_sum {}\n", ws_sum));
+    buffer.push_str(&format!("websocket_fanout_to_browser_latency_us_count {}\n", ws_count));
+
+    buffer.push_str("# HELP websocket_fanout_order_book_levels Last observed order book size when broadcasting an order book event\n");
+    buffer.push_str("# TYPE websocket_fanout_order_book_levels gauge\n");
+    buffer.push_str(&format!(
+        "websocket_fanout_order_book_levels {}\n",
+        metrics
+            .websocket_fanout_order_book_levels
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    buffer.push_str("# HELP websocket_lagged_events_total Total websocket events dropped because a browser lagged behind\n");
+    buffer.push_str("# TYPE websocket_lagged_events_total counter\n");
+    buffer.push_str(&format!(
+        "websocket_lagged_events_total {}\n",
+        metrics.websocket_lagged_events.load(std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    buffer.push_str("# HELP websocket_send_latency_us WebSocket send latency in microseconds\n");
+    buffer.push_str("# TYPE websocket_send_latency_us histogram\n");
+
+    let ws_send_samples = metrics.websocket_send_latency_us.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (ws_send_buckets, ws_send_sum, ws_send_count) =
+        calculate_histogram_stats(&ws_send_samples, LATENCY_BUCKETS_US);
+
+    for (bucket_bound, count) in ws_send_buckets {
+        buffer.push_str(&format!("websocket_send_latency_us_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("websocket_send_latency_us_bucket{{le=\"+Inf\"}} {}\n", ws_send_count));
+    buffer.push_str(&format!("websocket_send_latency_us_sum {}\n", ws_send_sum));
+    buffer.push_str(&format!("websocket_send_latency_us_count {}\n", ws_send_count));
+
+    buffer.push_str("# HELP websocket_player_state_send_latency_us Player state send latency in microseconds\n");
+    buffer.push_str("# TYPE websocket_player_state_send_latency_us histogram\n");
+
+    let ps_samples = metrics.websocket_player_state_send_latency_us.lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let (ps_buckets, ps_sum, ps_count) = calculate_histogram_stats(&ps_samples, LATENCY_BUCKETS_US);
+
+    for (bucket_bound, count) in ps_buckets {
+        buffer.push_str(&format!("websocket_player_state_send_latency_us_bucket{{le=\"{}\"}} {}\n", bucket_bound, count));
+    }
+    buffer.push_str(&format!("websocket_player_state_send_latency_us_bucket{{le=\"+Inf\"}} {}\n", ps_count));
+    buffer.push_str(&format!("websocket_player_state_send_latency_us_sum {}\n", ps_sum));
+    buffer.push_str(&format!("websocket_player_state_send_latency_us_count {}\n", ps_count));
     
     buffer.push_str("# HELP websocket_connections Active WebSocket connections\n");
     buffer.push_str("# TYPE websocket_connections gauge\n");

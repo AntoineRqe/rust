@@ -2,6 +2,8 @@ use crate::order_book::L3OrderView;
 use players::players::{HoldingSummary, PendingOrder};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::sync::broadcast;
 
 /// Trade data for WebSocket transmission
@@ -103,27 +105,65 @@ pub const BROADCAST_CAPACITY: usize = 256;
 
 /// The shared handle passed into the web server and into handle_client.
 /// Cloning it is cheap — broadcast::Sender is Arc-backed internally.
+#[derive(Clone, Debug)]
+pub(crate) struct BusEvent {
+    pub(crate) event: WsEvent,
+    pub(crate) published_at: Instant,
+}
+
 #[derive(Clone)]
 pub struct EventBus {
-    tx: broadcast::Sender<WsEvent>,
+    tx: broadcast::Sender<BusEvent>,
+    metrics: Arc<OnceLock<Arc<types::MarketMetrics>>>,
 }
 
 impl EventBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-        Self { tx }
+        Self {
+            tx,
+            metrics: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn set_metrics(&self, metrics: Arc<types::MarketMetrics>) {
+        let _ = self.metrics.set(metrics);
     }
 
     /// Called from the sync FIX thread — non-blocking, never fails silently.
     /// Returns the number of active browser subscribers that received the event.
-    pub fn publish(&self, event: WsEvent) -> usize {
+    pub(crate) fn publish(&self, event: WsEvent) -> usize {
+        let order_book_levels = match &event {
+            WsEvent::OrderBook { bids, asks, .. } => Some(bids.len().saturating_add(asks.len())),
+            _ => None,
+        };
         // send() only errors if there are zero receivers — that's fine,
         // it just means no browser is connected right now.
-        self.tx.send(event).unwrap_or(0)
+        let sent = self
+            .tx
+            .send(BusEvent {
+                event,
+                published_at: Instant::now(),
+            })
+            .unwrap_or(0);
+
+        if let Some(metrics) = self.metrics.get() {
+            if let Some(levels) = order_book_levels {
+                metrics
+                    .websocket_fanout_order_book_levels
+                    .store(levels, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        sent
     }
 
     /// Subscribe a new browser WebSocket connection to the event stream.
-    pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<BusEvent> {
         self.tx.subscribe()
+    }
+
+    pub(crate) fn metrics(&self) -> Option<Arc<types::MarketMetrics>> {
+        self.metrics.get().cloned()
     }
 }

@@ -1,7 +1,7 @@
 use crate::auth::require_admin;
 use crate::fix_session::pretty_fix;
 use crate::server::{AppState, Metrics};
-use crate::state::{BrowserCommand, WsEvent};
+use crate::state::{BrowserCommand, BusEvent, WsEvent};
 use axum::{
     Extension,
     extract::{
@@ -16,6 +16,7 @@ use players::players::PendingOrder;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use utils::market_name;
 
 struct VisitorCounterGuard {
@@ -144,7 +145,8 @@ async fn handle_socket(
 
     // Split into sender and receiver so we can use both concurrently
     let (mut sender, mut receiver) = socket.split();
-    let mut rx: tokio::sync::broadcast::Receiver<WsEvent> = state.bus.subscribe();
+    let mut rx = state.bus.subscribe();
+    let ws_metrics = state.bus.metrics();
     let is_admin = claims.is_admin || username.eq_ignore_ascii_case("admin");
 
     let current_visitors = state
@@ -187,7 +189,7 @@ async fn handle_socket(
         recipient: None,
     })
     .unwrap();
-    let _ = sender.send(Message::Text(status.into())).await;
+    let _ = send_text_message(&mut sender, status.into(), ws_metrics.clone()).await;
 
     // Send the player's current state (tokens + pending orders) on every new connection.
     send_player_state(&mut sender, &state, &username, is_admin).await;
@@ -205,7 +207,8 @@ async fn handle_socket(
             // ── FIX engine → browser ─────────────────────────────────────
             result = rx.recv() => {
                 match result {
-                    Ok(event) => {
+                    Ok(bus_event) => {
+                        let BusEvent { event, published_at } = bus_event;
                         let allow_event = match &event {
                             WsEvent::FixMessage { recipient: Some(recipient), .. } => recipient == &username,
                             WsEvent::Status { recipient: Some(recipient), .. } => recipient == &username,
@@ -226,12 +229,27 @@ async fn handle_socket(
                         }
 
                         let json = serde_json::to_string(&event).unwrap();
-                        if sender.send(Message::Text(json.into())).await.is_err() {
+                        if send_text_message(&mut sender, json.into(), ws_metrics.clone())
+                            .await
+                            .is_err()
+                        {
                             break;
+                        }
+
+                        if let Some(metrics) = ws_metrics.as_ref() {
+                            let elapsed_us = published_at.elapsed().as_micros() as u64;
+                            if let Ok(mut samples) = metrics.websocket_fanout_to_browser_latency_us.lock() {
+                                samples.push(elapsed_us);
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("[{}] Browser lagged, dropped {n} events", market_name());
+                        if let Some(metrics) = ws_metrics.as_ref() {
+                            metrics
+                                .websocket_lagged_events
+                                .fetch_add(n as usize, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -280,6 +298,7 @@ async fn send_player_state(
     username: &str,
     is_admin: bool,
 ) {
+    let started = Instant::now();
     // Acquire and release the lock before the match to avoid deadlock:
     // holding the guard across the match scrutinee would prevent the None arm
     // from re-acquiring the lock for get_order_owners().
@@ -308,7 +327,7 @@ async fn send_player_state(
                 id_suffix: player_state.id_suffix,
             };
             let json = serde_json::to_string(&event).unwrap();
-            let _ = sender.send(Message::Text(json.into())).await;
+            let _ = send_text_message(sender, json.into(), state.bus.metrics()).await;
         }
         None => {
             // Player not found, send empty state
@@ -329,7 +348,13 @@ async fn send_player_state(
                 id_suffix: String::new(),
             };
             let json = serde_json::to_string(&event).unwrap();
-            let _ = sender.send(Message::Text(json.into())).await;
+            let _ = send_text_message(sender, json.into(), state.bus.metrics()).await;
+        }
+    }
+
+    if let Some(metrics) = state.bus.metrics() {
+        if let Ok(mut samples) = metrics.websocket_player_state_send_latency_us.lock() {
+            samples.push(started.elapsed().as_micros() as u64);
         }
     }
 }
@@ -385,7 +410,7 @@ async fn send_order_book_snapshots(
 
         // Send the full order book state for this symbol.
         let json = serde_json::to_string(&event).unwrap();
-        let _ = sender.send(Message::Text(json.into())).await;
+        let _ = send_text_message(sender, json.into(), state.bus.metrics()).await;
     }
 }
 
@@ -403,7 +428,7 @@ async fn send_trades_snapshot(
 
     let event = WsEvent::Trades { trades };
     let json = serde_json::to_string(&event).unwrap();
-    let _ = sender.send(Message::Text(json.into())).await;
+    let _ = send_text_message(sender, json.into(), state.bus.metrics()).await;
 
     if trades_count > 0 {
         tracing::debug!(
@@ -412,6 +437,21 @@ async fn send_trades_snapshot(
             trades_count
         );
     }
+}
+
+async fn send_text_message(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    text: String,
+    metrics: Option<Arc<Metrics>>,
+) -> Result<(), ()> {
+    let started = Instant::now();
+    let result = sender.send(Message::Text(text.into())).await.map_err(|_| ());
+    if let Some(metrics) = metrics {
+        if let Ok(mut samples) = metrics.websocket_send_latency_us.lock() {
+            samples.push(started.elapsed().as_micros() as u64);
+        }
+    }
+    result
 }
 
 /// Handle a command received from the browser client. This may involve sending FIX messages over TCP to the engine, which will then process them and publish events back to the bus.

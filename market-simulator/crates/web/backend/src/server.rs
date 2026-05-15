@@ -197,6 +197,7 @@ async fn serve(
         fix_session_manager: FIXSessionManager::new(fix_tx),
         trades_queue,
     };
+    state.bus.set_metrics(Arc::clone(&metrics));
 
     // Initialize Prometheus metrics registry
     let metrics_registry = Arc::new(create_metrics_registry());
