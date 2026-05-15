@@ -675,7 +675,6 @@ Main event loop runs with `tokio::select!` (concurrent):
 │ Supported commands:                             │
 │ - Order (place new order)                       │
 │ - Cancel (cancel order)                         │
-│ - MdRequest (subscribe to market data)          │
 │ - ResetTokens (admin: reset player funds)       │
 │ - ClearBook (admin: reset order book)           │
 │ - ResetSeq (admin: reset FIX sequence)          │

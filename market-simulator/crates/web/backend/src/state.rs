@@ -85,10 +85,6 @@ pub enum BrowserCommand {
         symbol: Option<String>,
         qty: Option<f64>,
     },
-    MdRequest {
-        symbol: String,
-        depth: Option<u32>,
-    },
     GetPlayerState,
     ResetTokens,
     ResetSeq,

@@ -836,22 +836,6 @@ async fn handle_browser_message(
             }
         }
 
-        BrowserCommand::MdRequest { symbol, depth } => {
-            let fix_bytes = build_md_request("BROWSER", "SERVER1", &symbol, depth.unwrap_or(1));
-            // TODO: Send market data request through gRPC player service
-            tracing::info!(
-                "[{}] Market data request would be sent: {}",
-                market_name(),
-                pretty_fix(&fix_bytes)
-            );
-            state.bus.publish(WsEvent::FixMessage {
-                label: "INFO".into(),
-                body: "Market data request routing through gRPC (not yet implemented)".to_string(),
-                tag: "info".into(),
-                recipient: Some(username.to_string()),
-            });
-        }
-
         BrowserCommand::GetPlayerState => {
             // No-op here: handle_socket sends PlayerState after each browser command.
             tracing::debug!(
@@ -904,18 +888,6 @@ fn build_new_order_single(
          38={qty}{SOH}40=2{SOH}44={price:.4}{SOH}",
         seq = next_seq(),
         qty = qty as u32,
-    );
-    wrap(body)
-}
-
-fn build_md_request(sender: &str, target: &str, symbol: &str, depth: u32) -> Vec<u8> {
-    let rid = format!("MDR-WEB-{}", next_seq());
-    let now = fix_now();
-    let body = format!(
-        "35=V{SOH}49={sender}{SOH}56={target}{SOH}34={seq}{SOH}52={now}{SOH}\
-         262={rid}{SOH}263=1{SOH}264={depth}{SOH}\
-         267=2{SOH}269=0{SOH}269=1{SOH}146=1{SOH}55={symbol}{SOH}",
-        seq = next_seq(),
     );
     wrap(body)
 }

@@ -232,23 +232,6 @@
   #chart-wrap{flex:1;position:relative;overflow:hidden;padding:4px 6px 6px;min-height:0}
   #price-canvas{display:block;width:100%;height:100%}
 
-  /* ── dialog ── */
-  #dlg-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);
-           align-items:center;justify-content:center;z-index:200;padding:16px}
-  #dlg-box{background:var(--panel);padding:20px 24px;width:100%;max-width:400px;
-           border:1px solid var(--border)}
-  #dlg-title{color:var(--teal);font-size:12px;font-weight:bold;
-             margin-bottom:14px;letter-spacing:.05em}
-  .dlg-row{display:flex;align-items:center;margin-bottom:8px;gap:8px}
-  .dlg-row label{color:var(--muted);width:120px;flex-shrink:0;font-size:11px}
-  .dlg-row input,.dlg-row select{
-    background:#1a1e2a;border:1px solid var(--border);color:var(--text);
-    font-family:'Courier New',monospace;font-size:11px;
-    padding:5px 6px;flex:1;outline:none;min-width:0}
-  .dlg-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
-  .dlg-foot button{padding:7px 16px;font-family:'Courier New',monospace;
-                   cursor:pointer;border:none;font-size:11px}
-
   /* ── scrollbars ── */
   ::-webkit-scrollbar{width:4px}
   ::-webkit-scrollbar-track{background:transparent}
@@ -283,9 +266,6 @@
     .btn-send{padding:14px 0;font-size:15px}
     .frow input{font-size:13px;padding:7px 6px}
     .sbtn{padding:9px 0;font-size:13px}
-    .dlg-row{flex-direction:column;align-items:flex-start}
-    .dlg-row label{width:auto;margin-bottom:3px}
-    .dlg-row input,.dlg-row select{width:100%}
     #col-log{border-top:none}
   }
 </style>
@@ -433,18 +413,6 @@
 
 </div><!-- #body -->
 
-<!-- DIALOG -->
-<div id="dlg-ov">
-  <div id="dlg-box">
-    <div id="dlg-title"></div>
-    <div id="dlg-fields"></div>
-    <div class="dlg-foot">
-      <button style="background:var(--border);color:var(--muted)" onclick="closeDlg()">CANCEL</button>
-      <button style="background:var(--blue);color:var(--text);font-weight:bold" onclick="submitDlg()">SEND</button>
-    </div>
-  </div>
-</div>
-
 <script>
 'use strict';
 
@@ -543,7 +511,6 @@ if (!AUTH_TOKEN && !hasMultiMarketAuth) {
 
 // ── state ─────────────────────────────────────────────────────────────────────
 let side      = 'BUY';
-let dlgType   = null;
 let activeLogTab = 'system';
 let ws        = null;
 const LEVELS  = 8;
@@ -2381,53 +2348,6 @@ function cancelOrder(clordId, symbol, qty, marketName) {
   
   // Request updated player state to refresh token balance
   requestPlayerState();
-}
-
-// ── MD dialogs ────────────────────────────────────────────────────────────────
-const MD_DEFS = {
-  V: { title: 'MARKET DATA REQUEST  (V)',
-       fields: [['Symbol','symbol','AAPL'],['Market Depth','depth','1']] },
-  W: { title: 'MD SNAPSHOT FULL REFRESH  (W)',
-       fields: [['Symbol','symbol','AAPL'],['Bid','bid','149.50'],
-                ['Ask','ask','150.50'],['Qty','qty','100']] },
-  X: { title: 'MD INCREMENTAL REFRESH  (X)',
-       fields: [['Symbol','symbol','AAPL'],['Price','price','150.00'],['Qty','qty','100']],
-       selects: { action:     ['0 = New','1 = Change','2 = Delete'],
-                  entry_type: ['0 = Bid','1 = Offer','2 = Trade'] } },
-  Y: { title: 'MD REQUEST REJECT  (Y)',
-       fields: [['MDReqID','req_id','MDR-0'],['Text (opt)','text','']],
-       selects: { reason_code: ['0 = Unknown Symbol','1 = Dup MDReqID',
-         '2 = Insuf. Bandwidth','3 = Insuf. Perms','4 = Unsup. SubReqType',
-         '5 = Unsup. MarketDepth','6 = Unsup. MDUpdateType',
-         '7 = Unsup. AggBook','8 = Unsup. MDEntryType'] } },
-};
-
-function openDlg(type) {
-  dlgType = type;
-  const def = MD_DEFS[type];
-  ge('dlg-title').textContent = def.title;
-  const w = ge('dlg-fields'); w.innerHTML = '';
-  def.fields.forEach(([lbl,id,val]) => {
-    w.innerHTML += `<div class="dlg-row"><label>${esc(lbl)}</label>
-      <input id="di-${id}" value="${esc(val)}"></div>`;
-  });
-  (def.selects ? Object.entries(def.selects) : []).forEach(([id,opts]) => {
-    w.innerHTML += `<div class="dlg-row"><label>${id.replace(/_/g,' ')}</label>
-      <select id="di-${id}">${opts.map(o=>`<option>${esc(o)}</option>`).join('')}
-      </select></div>`;
-  });
-  ge('dlg-ov').style.display = 'flex';
-}
-function closeDlg() { ge('dlg-ov').style.display = 'none'; }
-function submitDlg() {
-  const def = MD_DEFS[dlgType];
-  const p   = { action: 'md_request', type: dlgType };
-  def.fields.forEach(([,id]) => { p[id] = ge('di-'+id).value.trim(); });
-  (def.selects ? Object.keys(def.selects) : []).forEach(id => {
-    p[id] = ge('di-'+id).value.split('=')[0].trim();
-  });
-  closeDlg();
-  send(p, getSelectedOrderMarketName());
 }
 
 // ── log ───────────────────────────────────────────────────────────────────────
