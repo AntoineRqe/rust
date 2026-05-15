@@ -19,6 +19,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use utils::market_name;
 
+const PLAYER_STATE_FEED_DEBOUNCE_MS: u64 = 75;
+
 struct VisitorCounterGuard {
     counter: Arc<std::sync::atomic::AtomicUsize>,
     total_counter: Arc<std::sync::atomic::AtomicUsize>,
@@ -201,6 +203,10 @@ async fn handle_socket(
     send_trades_snapshot(&mut sender, &state).await;
 
     tracing::debug!("[{}] Browser WebSocket connected", market_name());
+    let mut player_state_dirty = false;
+    let mut player_state_flush_armed = false;
+    let mut player_state_flush_sleep =
+        Box::pin(tokio::time::sleep(std::time::Duration::from_secs(86_400)));
 
     loop {
         tokio::select! {
@@ -221,10 +227,16 @@ async fn handle_socket(
 
                         if let WsEvent::FixMessage { tag, .. } = &event {
                             if tag == "feed" {
-                                // Refresh this socket's player state so the browser
-                                // sees up-to-date tokens/pending orders.
-                                // Portfolio DB update already happened in the FIX session thread.
-                                send_player_state(&mut sender, &state, &username, is_admin).await;
+                                // Coalesce high-frequency feed updates and send player state
+                                // on a short trailing debounce window.
+                                player_state_dirty = true;
+                                if !player_state_flush_armed {
+                                    player_state_flush_armed = true;
+                                    player_state_flush_sleep.as_mut().reset(
+                                        tokio::time::Instant::now()
+                                            + std::time::Duration::from_millis(PLAYER_STATE_FEED_DEBOUNCE_MS),
+                                    );
+                                }
                             }
                         }
 
@@ -255,14 +267,30 @@ async fn handle_socket(
                 }
             }
 
+            // ── debounced player-state refresh (feed/command-triggered) ──
+            _ = &mut player_state_flush_sleep, if player_state_flush_armed => {
+                player_state_flush_armed = false;
+                if player_state_dirty {
+                    player_state_dirty = false;
+                    send_player_state(&mut sender, &state, &username, is_admin).await;
+                }
+            }
+
             // ── browser → FIX engine ──────────────────────────────────────
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         // Handle the browser command, which may involve sending FIX messages over TCP to the engine. The FIX session thread will process those messages and publish events back to the bus, which will then be sent to this browser as needed.
                         handle_browser_message(&text, &state, &metrics, &username, is_admin).await;
-                        // After every command, push the updated player state to this client.
-                        send_player_state(&mut sender, &state, &username, is_admin).await;
+                        // Coalesce post-command state refreshes with feed-triggered refreshes.
+                        player_state_dirty = true;
+                        if !player_state_flush_armed {
+                            player_state_flush_armed = true;
+                            player_state_flush_sleep.as_mut().reset(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(PLAYER_STATE_FEED_DEBOUNCE_MS),
+                            );
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         tracing::debug!("[{}] Browser disconnected", market_name());
