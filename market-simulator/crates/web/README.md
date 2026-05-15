@@ -26,7 +26,7 @@ web/src/
 - `generate_token()`: Create cryptographically random session tokens
 - `authenticate_token()`: Validate session tokens
 - `admin_password()`: Load admin credentials from environment
-- `advertised_markets()`: Filter markets by public/private accessibility
+- `advertised_markets()`: Return the configured markets for the gateway/login page
 - `require_admin()`: Check admin privileges and publish error messages
 - `MarketInfo`: Market configuration (name, URL)
 
@@ -519,7 +519,6 @@ Tokio broadcast channel for real-time updates:
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | `MARKET_SIMULATOR_ADMIN_PWD` | Admin login password | `super-secret` |
-| `MARKET_SIM_PUBLIC_MARKETS_ONLY` | Filter non-public URLs | `1` (true) |
 | `LOGIN_GATEWAY_URL` | Client redirect after login | `http://market.example.com:8080` |
 | `DATABASE_URL_MARKET_SIMULATOR` | PostgreSQL connection for players | `postgres://...` |
 

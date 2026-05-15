@@ -39,20 +39,6 @@ pub fn run_login_gateway(markets: Vec<MarketInfo>, ip: &str, port: u16) {
         .build()
         .expect("Failed to build tokio runtime for login gateway")
         .block_on(async move {
-            let advertised = crate::auth::advertised_markets(&markets);
-            if !markets.is_empty() {
-                if advertised.is_empty() {
-                    tracing::warn!(
-                        "[gateway] MARKET_SIM_PUBLIC_MARKETS_ONLY=1 filtered out all configured markets; /api/markets will be empty"
-                    );
-                } else if advertised.len() != markets.len() {
-                    tracing::info!(
-                        "[gateway] MARKET_SIM_PUBLIC_MARKETS_ONLY=1 filtered {} non-public market URL(s)",
-                        markets.len().saturating_sub(advertised.len())
-                    );
-                }
-            }
-
             let state = LoginGatewayState { markets };
             let app = Router::new()
                 .route("/", get(gateway_login_page_handler))
