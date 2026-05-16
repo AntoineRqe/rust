@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use types::{
-    FixedPointArithmetic, OrderEvent, Side,
+    FixedPointArithmetic, OrderEvent, Side, ExecutionReportMessage,
     macros::{EntityId, OrderId},
 };
 use utils::market_name;
@@ -31,12 +31,24 @@ pub fn kill_fix_inbound_engine<const N: usize>(
 }
 
 pub fn kill_fix_outbound_engine<const N: usize>(
-    er_to_fix_tx: &Producer<(EntityId, FixRawMsg<N>), N>,
+    er_to_fix_tx: &Producer<(EntityId, ExecutionReportMessage<N>), N>,
 ) {
     // Send a special shutdown message to the FIX engine's outbound queue
-    // The FIX engine should be designed to recognize this message and exit its run loop
-    // Here we send a message with an empty EntityId as a simple shutdown signal
-    let shutdown_msg = (EntityId::from_ascii(""), FixRawMsg::default());
+    let kill_msg = ExecutionReportMessage::new(
+        0,
+        [0u8; N],
+        types::ExecReportData {
+            order_id: 0,
+            cl_ord_id: String::new(),
+            symbol: String::new(),
+            side: 0,
+            ord_status: 0,
+            price: 0.0,
+            qty: 0.0,
+            leaves_qty: 0.0,
+        },
+    );
+    let shutdown_msg = (EntityId::from_ascii(""), kill_msg);
     er_to_fix_tx.push(shutdown_msg).unwrap();
 }
 
@@ -46,7 +58,7 @@ pub fn kill_fix_outbound_engine<const N: usize>(
 pub struct FixRawMsg<const N: usize> {
     pub len: u16,
     pub data: [u8; N],
-    pub resp_queue: Option<mpsc::Sender<FixRawMsg<N>>>, // Optional queue for sending responses back to the network layer, added for potential future use
+    pub resp_queue: Option<mpsc::Sender<ExecutionReportMessage<N>>>, // Optional queue for sending execution reports back to the player
 }
 
 impl<const N: usize> Serialize for FixRawMsg<N> {
@@ -72,7 +84,7 @@ impl<const N: usize> Default for FixRawMsg<N> {
 }
 
 impl<const N: usize> FixRawMsg<N> {
-    pub fn new(data: &[u8], resp_queue: Option<mpsc::Sender<FixRawMsg<N>>>) -> Self {
+    pub fn new(data: &[u8], resp_queue: Option<mpsc::Sender<ExecutionReportMessage<N>>>) -> Self {
         let mut msg = FixRawMsg::default();
         msg.len = data.len() as u16;
         msg.data[..data.len()].copy_from_slice(data);
@@ -92,7 +104,7 @@ impl<const N: usize> FixRawMsg<N> {
 pub struct FixEngine<'a, const N: usize> {
     request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
     request_out: Producer<'a, OrderEvent, N>,
-    response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>, // For future use if we want to send execution reports back to the FIX engine
+    response_in: Consumer<'a, (EntityId, ExecutionReportMessage<N>), N>,
     shutdown: Arc<AtomicBool>,
     pending: Arc<FixPendingConnection<N>>, // Shared state for pending response queues, used
     metrics: Arc<types::MarketMetrics>,
@@ -107,7 +119,7 @@ struct FixShared<const N: usize> {
 
 #[derive(Clone)]
 struct FixPendingRoute<const N: usize> {
-    resp_queue: mpsc::Sender<FixRawMsg<N>>,
+    resp_queue: mpsc::Sender<ExecutionReportMessage<N>>,
     received_at: Instant,
 }
 
@@ -330,7 +342,7 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
 }
 
 pub struct FixOutboundEngine<'a, const N: usize> {
-    response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
+    response_in: Consumer<'a, (EntityId, ExecutionReportMessage<N>), N>,
     counter: usize,
     shared: Arc<FixShared<N>>,
 }
@@ -340,7 +352,7 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
         let mut sweep_ticks = 0usize;
 
         loop {
-            if let Some((key, response)) = self.response_in.pop() {
+            if let Some((key, exec_msg)) = self.response_in.pop() {
                 if key == EntityId::from_ascii("") {
                     tracing::info!(
                         "[{}] Outbound FIX engine received shutdown sentinel",
@@ -350,7 +362,8 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                 }
 
                 if let Some(resp_queue) = self.shared.get_pending(&key) {
-                    match resp_queue.resp_queue.try_send(response) {
+                    // Send ExecutionReportMessage directly to player
+                    match resp_queue.resp_queue.try_send(exec_msg.clone()) {
                         Ok(_) => {
                             self.counter += 1;
                             self.shared
@@ -430,7 +443,7 @@ impl<'a, const N: usize> FixEngine<'a, N> {
     pub fn new(
         request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
         request_out: Producer<'a, OrderEvent, N>,
-        response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
+        response_in: Consumer<'a, (EntityId, ExecutionReportMessage<N>), N>,
         shutdown: Arc<AtomicBool>,
         metrics: Arc<types::MarketMetrics>,
     ) -> Self {
@@ -483,7 +496,7 @@ mod tests {
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
         // Outbound : order book -> FIX -> net
-        let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
+        let mut er_to_fix = RingBuffer::<(EntityId, ExecutionReportMessage<1024>), 1024>::new();
 
         std::thread::scope(|scope| {
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -560,7 +573,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
-        let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
+        let mut er_to_fix = RingBuffer::<(EntityId, ExecutionReportMessage<1024>), 1024>::new();
 
         std::thread::scope(|scope| {
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();

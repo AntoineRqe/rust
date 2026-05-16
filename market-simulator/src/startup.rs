@@ -2,6 +2,7 @@ use backend::order_book::OrderBookState;
 use backend::state::EventBus;
 use config::Connection;
 use execution_report::ExecutionReportEngine;
+use types::ExecutionReportMessage;
 
 use fix::engine::FixRawMsg;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
@@ -16,7 +17,7 @@ use utils::market_name;
 pub fn start_execution_report_engine(
     simulator: &mut crate::MarketSimulator,
     er_rx: spsc::Consumer<'static, (OrderEvent, OrderResult), RB_SIZE>,
-    er_tx: spsc::Producer<'static, (EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>,
+    er_tx: spsc::Producer<'static, (EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>,
     metrics: Arc<backend::server::Metrics>,
     shutdown: Arc<AtomicBool>,
     core_id: usize,
@@ -181,7 +182,7 @@ pub fn start_fix_engine(
     market_simulator: &mut crate::MarketSimulator,
     fix_rx: Arc<crossbeam_channel::Receiver<FixRawMsg<RB_SIZE>>>,
     fix_tx: spsc::Producer<'static, OrderEvent, RB_SIZE>,
-    fix_resp_rx: spsc::Consumer<'static, (EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>,
+    fix_resp_rx: spsc::Consumer<'static, (EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>,
     metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
     inbound_core_id: usize,

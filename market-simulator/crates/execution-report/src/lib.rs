@@ -1,7 +1,7 @@
-use types::{OrderEvent, OrderResult, macros::EntityId};
+use types::{OrderEvent, OrderResult, macros::EntityId, ExecReportData, ExecutionReportMessage};
+use fix::engine::FixRawMsg;
 
 use fix::{
-    engine::FixRawMsg,
     tags::{
         exec_type_code_set, msg_types, ord_status_code_set, side_code_set,
         tags::{self},
@@ -16,7 +16,7 @@ use utils::{field_str, market_name, number_to_bytes};
 
 pub struct ExecutionReportEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
-    fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>,
+    fifo_out: Producer<'a, (EntityId, ExecutionReportMessage<N>), N>,
     shutdown: Arc<AtomicBool>,
     metrics: Option<Arc<types::MarketMetrics>>,
 }
@@ -24,7 +24,7 @@ pub struct ExecutionReportEngine<'a, const N: usize> {
 impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     pub fn new(
         fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
-        fifo_out: Producer<'a, (EntityId, FixRawMsg<N>), N>,
+        fifo_out: Producer<'a, (EntityId, ExecutionReportMessage<N>), N>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -59,11 +59,21 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         }
 
         // Send kill message to FIX outbound engine to signal it to shut down gracefully
-        let mut report = FixRawMsg::<N>::default();
+        let kill_report = FixRawMsg::<N>::default();
         let kill_entity_id = EntityId::from_ascii("");
+        let kill_exec_data = ExecReportData {
+            order_id: 0,
+            cl_ord_id: String::new(),
+            symbol: String::new(),
+            side: 0,
+            ord_status: 0,
+            price: 0.0,
+            qty: 0.0,
+            leaves_qty: 0.0,
+        };
+        let kill_msg = ExecutionReportMessage::new(kill_report.len, kill_report.data, kill_exec_data);
 
-        while let Err((_, _report)) = self.fifo_out.push((kill_entity_id, report)) {
-            report = _report;
+        while let Err((_, _msg)) = self.fifo_out.push((kill_entity_id, kill_msg.clone())) {
             std::hint::spin_loop();
         }
 
@@ -485,6 +495,71 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         report
     }
 
+    /// Converts OrderEvent and OrderResult to ExecReportData for downstream processing.
+    fn to_exec_report_data(order_event: &OrderEvent, order_result: &OrderResult) -> ExecReportData {
+        // Convert side enum to FIX side code (1=Buy, 2=Sell)
+        let side = match order_event.side {
+            types::Side::Buy => 1u8,
+            types::Side::Sell => 2u8,
+        };
+
+        // Convert status enum to FIX ord_status code
+        let ord_status = match order_result.status {
+            types::OrderStatus::New => 0u8,
+            types::OrderStatus::PartiallyFilled => 1u8,
+            types::OrderStatus::Filled => 2u8,
+            types::OrderStatus::Cancelled => 4u8,
+            types::OrderStatus::CancelRejected => 0u8, // Reject leaves as New
+            types::OrderStatus::Unmatched => 3u8,      // DoneForDay
+        };
+
+        // Extract effective ClOrdId (same logic as fix_session)
+        let effective_cl_ord_id = order_event
+            .orig_cl_ord_id
+            .as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| order_event.cl_ord_id.to_string());
+
+        // Calculate stable order_id from cl_ord_id (same hash as fix_session)
+        let order_id = Self::stable_order_id_from_cl_ord_id(&effective_cl_ord_id);
+
+        // Calculate cumulative fills from trades
+        let cumulative_fills: f64 = order_result
+            .trades
+            .iter()
+            .map(|t| t.quantity.raw() as f64 / 1_000_000.0) // Convert from fixed point
+            .sum();
+
+        let qty = order_event.quantity.raw() as f64 / 1_000_000.0;
+        let leaves_qty = qty - cumulative_fills;
+
+        ExecReportData {
+            order_id,
+            cl_ord_id: effective_cl_ord_id,
+            symbol: order_event.symbol.to_string(),
+            side,
+            ord_status,
+            price: order_event.price.raw() as f64 / 1_000_000.0,
+            qty,
+            leaves_qty,
+        }
+    }
+
+    /// Stable hash of ClOrdId matching the backend order_book implementation.
+    fn stable_order_id_from_cl_ord_id(cl_ord_id: &str) -> u64 {
+        let mut fixed = [0u8; 20];
+        let bytes = cl_ord_id.as_bytes();
+        let len = bytes.len().min(20);
+        fixed[..len].copy_from_slice(&bytes[..len]);
+
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &byte in &fixed {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
         let mut reports: Vec<FixRawMsg<N>> = vec![];
 
@@ -521,11 +596,12 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         }
 
         let key = exec_report.0.sender_id;
+        let exec_report_data = Self::to_exec_report_data(&exec_report.0, &exec_report.1);
 
-        for mut report in reports.into_iter() {
+        for report in reports.into_iter() {
+            let msg = ExecutionReportMessage::new(report.len, report.data, exec_report_data.clone());
             loop {
-                if let Err((_, _report)) = self.fifo_out.push((key, report)) {
-                    report = _report;
+                if let Err((_, _msg)) = self.fifo_out.push((key, msg.clone())) {
                     std::hint::spin_loop();
                 } else {
                     break;
@@ -703,7 +779,7 @@ mod tests {
     fn test_execution_report_engine() {
         let mut rb_in = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
         let mut rb_out =
-            spsc::spsc_lock_free::RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
+            spsc::spsc_lock_free::RingBuffer::<(EntityId, ExecutionReportMessage<1024>), 1024>::new();
         let (fifo_in_tx, fifo_in_rx) = rb_in.split();
         let (fifo_out_tx, fifo_out_rx) = rb_out.split();
 
@@ -748,7 +824,7 @@ mod tests {
             assert_eq!(fifo_out_rx.len(), 1); // We should have received one execution report for the new order
             let (_, raw_report) = fifo_out_rx.pop().expect("No execution report generated");
             let mut fix_parser =
-                fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+                fix::parser::FixParser::new(&raw_report.fix_data[..raw_report.fix_len as usize]);
             let parsed_report = fix_parser.get_fields();
 
             let msg_type_field = parsed_report
@@ -862,7 +938,7 @@ mod tests {
                 .pop()
                 .expect("No execution report generated for sell order");
             let mut fix_parser =
-                fix::parser::FixParser::new(&new_report.data[..new_report.len as usize]);
+                fix::parser::FixParser::new(&new_report.fix_data[..new_report.fix_len as usize]);
             let parsed_report = fix_parser.get_fields();
             assert_eq!(
                 parsed_report
@@ -969,7 +1045,7 @@ mod tests {
                 .pop()
                 .expect("No execution report generated for sell order");
             let mut fix_parser =
-                fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+                fix::parser::FixParser::new(&raw_report.fix_data[..raw_report.fix_len as usize]);
             let parsed_report = fix_parser.get_fields();
 
             let last_qty_field = parsed_report
@@ -1005,7 +1081,7 @@ mod tests {
                 .pop()
                 .expect("No execution report generated for sell order");
             let mut fix_parser =
-                fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+                fix::parser::FixParser::new(&raw_report.fix_data[..raw_report.fix_len as usize]);
             let parsed_report = fix_parser.get_fields();
 
             let last_qty_field = parsed_report
@@ -1060,7 +1136,7 @@ mod tests {
                 .try_pop()
                 .expect("No execution report generated for cancel order");
             let mut fix_parser =
-                fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+                fix::parser::FixParser::new(&raw_report.fix_data[..raw_report.fix_len as usize]);
             let parsed_report = fix_parser.get_fields();
             let msg_type_field = parsed_report
                 .fields
@@ -1102,7 +1178,7 @@ mod tests {
                 .pop()
                 .expect("No execution report generated for cancel reject order");
             let mut fix_parser =
-                fix::parser::FixParser::new(&raw_report.data[..raw_report.len as usize]);
+                fix::parser::FixParser::new(&raw_report.fix_data[..raw_report.fix_len as usize]);
             let parsed_report = fix_parser.get_fields();
             let msg_type_field = parsed_report
                 .fields

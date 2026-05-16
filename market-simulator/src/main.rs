@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use types::consts::RB_SIZE;
 use types::macros::EntityId;
-use types::{OrderEvent, OrderResult};
+use types::{OrderEvent, OrderResult, ExecutionReportMessage};
 use utils::market_name;
 
 pub mod startup;
@@ -76,7 +76,7 @@ struct QueueHandle {
     fix_to_ob: Option<memory::SharedQueue<RB_SIZE, OrderEvent>>,
     ob_to_er: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     ob_to_db: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
-    er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>>,
+    er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, ExecutionReportMessage<RB_SIZE>)>>,
 }
 
 impl QueueHandle {
@@ -94,7 +94,7 @@ impl QueueHandle {
             &format!("{market_name}_order_book_to_db"),
             true,
         );
-        let er_to_fix = memory::open_shared_queue::<RB_SIZE, (EntityId, FixRawMsg<RB_SIZE>)>(
+        let er_to_fix = memory::open_shared_queue::<RB_SIZE, (EntityId, ExecutionReportMessage<RB_SIZE>)>(
             &format!("{market_name}_execution_report_to_fix"),
             true,
         );
