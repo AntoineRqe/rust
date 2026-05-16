@@ -473,7 +473,10 @@ async fn send_text_message(
     metrics: Option<Arc<Metrics>>,
 ) -> Result<(), ()> {
     let started = Instant::now();
-    let result = sender.send(Message::Text(text.into())).await.map_err(|_| ());
+    let result = sender
+        .send(Message::Text(text.into()))
+        .await
+        .map_err(|_| ());
     if let Some(metrics) = metrics {
         if let Ok(mut samples) = metrics.websocket_send_latency_us.lock() {
             samples.push(started.elapsed().as_micros() as u64);

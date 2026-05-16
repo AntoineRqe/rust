@@ -1,37 +1,34 @@
 /// Persistent per-player FIX TCP session manager.
 ///
-/// Each player gets exactly one long-lived TCP connection to the FIX engine.
 /// The background reader task lives independently of any WebSocket connection:
 /// it continuously applies execution reports via gRPC to the player service
 /// even when the browser is offline, and publishes them to the event bus for
 /// display when the browser reconnects.
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crossbeam_channel::TrySendError;
 use fix::engine::FixRawMsg;
 use tokio::sync::mpsc;
 use types::consts::RB_SIZE;
 
-use crate::player_client::PlayerClient;
-use crate::state::{EventBus, TradeView, WsEvent};
-use crate::server::Metrics;
 use crate::order_book::{OrderBookState, stable_order_id_from_cl_ord_id};
+use crate::player_client::PlayerClient;
+use crate::server::Metrics;
+use crate::state::{EventBus, TradeView, WsEvent};
 use utils::market_name;
 
-/// Debounces OrderBook snapshot publishes to reduce bandwidth.
-/// Batches updates: publishes when 50ms has elapsed OR 5 orders processed, whichever first.
+/// Coalesces OrderBook snapshot publishes by symbol.
+/// Under load we only publish the latest snapshot per dirty symbol on a fixed cadence.
+const ORDERBOOK_FLUSH_INTERVAL_MS: u64 = 50;
+
 #[derive(Default)]
 struct OrderBookDebouncer {
     /// Symbols with dirty (changed) order books
     dirty_symbols: std::collections::HashSet<String>,
-    /// Last publication time per symbol
-    last_publish_time: HashMap<String, Instant>,
-    /// Orders processed since last publish
-    orders_since_publish: usize,
 }
 
 impl OrderBookDebouncer {
@@ -39,29 +36,29 @@ impl OrderBookDebouncer {
         self.dirty_symbols.insert(symbol.to_string());
     }
 
-    fn should_publish(&self, symbol: &str, now: Instant) -> bool {
-        if !self.dirty_symbols.contains(symbol) {
-            return false;
+    fn take_dirty_symbols(&mut self) -> Vec<String> {
+        self.dirty_symbols.drain().collect()
+    }
+}
+
+fn publish_dirty_order_books(
+    debouncer: &mut OrderBookDebouncer,
+    order_book: &Arc<Mutex<OrderBookState>>,
+    bus: &EventBus,
+) {
+    for symbol in debouncer.take_dirty_symbols() {
+        let book = order_book.lock().unwrap();
+        if let Some(symbol_book) = book.get(&symbol) {
+            bus.publish(WsEvent::OrderBook {
+                symbol: symbol.clone(),
+                bids: symbol_book.l3_bids_sorted(),
+                asks: symbol_book.l3_asks_sorted(),
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            });
         }
-        
-        let last_publish = self.last_publish_time.get(symbol);
-        let time_elapsed = match last_publish {
-            Some(last) => now.duration_since(*last),
-            None => Duration::from_millis(100), // Force publish on first update
-        };
-
-        // Publish if 50ms elapsed OR 5 orders processed
-        time_elapsed >= Duration::from_millis(50) || self.orders_since_publish >= 5
-    }
-
-    fn publish(&mut self, symbol: &str, now: Instant) {
-        self.dirty_symbols.remove(symbol);
-        self.last_publish_time.insert(symbol.to_string(), now);
-        self.orders_since_publish = 0;
-    }
-
-    fn increment_order_count(&mut self) {
-        self.orders_since_publish += 1;
     }
 }
 
@@ -142,6 +139,10 @@ impl FIXSessionManager {
             // Spawn the background reader task for this session.
             tokio::spawn(async move {
                 let mut debouncer = OrderBookDebouncer::default();
+                let mut order_book_flush_tick =
+                    tokio::time::interval(Duration::from_millis(ORDERBOOK_FLUSH_INTERVAL_MS));
+                order_book_flush_tick
+                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 tracing::info!(
                     "[{}] FIX session reader started for '{username}'",
@@ -149,15 +150,18 @@ impl FIXSessionManager {
                 );
 
                 while !stop_flag.load(Ordering::Relaxed) {
-                    match tokio::time::timeout(Duration::from_millis(100), response_rx.recv()).await {
-                        Ok(Some(msg)) => {
+                    tokio::select! {
+                        maybe_msg = response_rx.recv() => match maybe_msg {
+                            Some(msg) => {
                             let raw_msg = msg.data[..msg.len as usize].to_vec();
                             let body = pretty_fix(&raw_msg);
                             let exec_start_time = std::time::Instant::now();
 
                             // Apply execution report via gRPC to player service
                             let mut client = player_client.lock().await;
-                            if let Err(e) = client.apply_fix_execution_report(&username, &body).await {
+                            if let Err(e) =
+                                client.apply_fix_execution_report(&username, &body).await
+                            {
                                 tracing::error!(
                                     "[{}] FIX execution report failed for username='{username}' | error='{e}' | full_fix_msg='{body}'",
                                     market_name()
@@ -176,36 +180,10 @@ impl FIXSessionManager {
 
                             // Update backend order book from ExecutionReport
                             if let Some(exec_data) = parse_execution_report(&body) {
-                                update_backend_order_book_from_exec_report(
-                                    &exec_data,
-                                    &order_book,
-                                );
+                                update_backend_order_book_from_exec_report(&exec_data, &order_book);
 
-                                // Mark symbol as dirty (debounced publish)
+                                // Mark symbol dirty; snapshots are coalesced and flushed on tick.
                                 debouncer.mark_dirty(&exec_data.symbol);
-                                debouncer.increment_order_count();
-
-                                // Publish new/partial (status 0/1) and terminal updates immediately without debounce delay.
-                                // This ensures the UI sees orders as soon as they're added, and removals when they're canceled/filled.
-                                let now = Instant::now();
-                                let should_publish_immediately = is_terminal_order_status(exec_data.ord_status)
-                                    || matches!(exec_data.ord_status, 0 | 1); // New or Partially Filled
-                                
-                                if should_publish_immediately || debouncer.should_publish(&exec_data.symbol, now) {
-                                    let book = order_book.lock().unwrap();
-                                    if let Some(symbol_book) = book.get(&exec_data.symbol) {
-                                        bus.publish(WsEvent::OrderBook {
-                                            symbol: exec_data.symbol.clone(),
-                                            bids: symbol_book.l3_bids_sorted(),
-                                            asks: symbol_book.l3_asks_sorted(),
-                                            timestamp_ms: std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_millis() as u64)
-                                                .unwrap_or(0),
-                                        });
-                                    }
-                                    debouncer.publish(&exec_data.symbol, now);
-                                }
                             }
 
                             // Track execution latency
@@ -216,7 +194,9 @@ impl FIXSessionManager {
 
                             // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
                             if is_trade_execution(&body) {
-                                metrics.trades.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics
+                                    .trades
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                                 if let Some(trade_view) = extract_trade_view(&body) {
                                     {
@@ -239,35 +219,23 @@ impl FIXSessionManager {
                                 tag: "feed".into(),
                                 recipient: Some(username.clone()),
                             });
-                        }
-                        Ok(None) => {
-                            tracing::info!(
-                                "[{}] FIX session channel closed for '{username}'",
-                                market_name()
-                            );
-                            break;
-                        }
-                        Err(_) => {
-                            // Timeout is expected on idle - flush any pending dirty symbols
-                            let now = Instant::now();
-                            for symbol in debouncer.dirty_symbols.iter().cloned().collect::<Vec<_>>() {
-                                let book = order_book.lock().unwrap();
-                                if let Some(symbol_book) = book.get(&symbol) {
-                                    bus.publish(WsEvent::OrderBook {
-                                        symbol: symbol.clone(),
-                                        bids: symbol_book.l3_bids_sorted(),
-                                        asks: symbol_book.l3_asks_sorted(),
-                                        timestamp_ms: std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_millis() as u64)
-                                            .unwrap_or(0),
-                                    });
-                                }
-                                debouncer.publish(&symbol, now);
                             }
+                            None => {
+                                tracing::info!(
+                                    "[{}] FIX session channel closed for '{username}'",
+                                    market_name()
+                                );
+                                break;
+                            }
+                        },
+                        _ = order_book_flush_tick.tick() => {
+                            publish_dirty_order_books(&mut debouncer, &order_book, &bus);
                         }
                     }
                 }
+
+                // Flush any pending snapshots before exiting the session reader.
+                publish_dirty_order_books(&mut debouncer, &order_book, &bus);
 
                 sessions_ref.lock().unwrap().remove(&session_key);
                 tracing::debug!(
@@ -275,7 +243,6 @@ impl FIXSessionManager {
                     market_name()
                 );
             });
-
         }
 
         tracing::info!(
@@ -374,7 +341,7 @@ pub fn classify_fix_msg(raw: &[u8]) -> String {
         "0" => "◀ HEARTBEAT (0)".into(),
         "A" => "◀ LOGON (A)".into(),
         "5" => "◀ LOGOUT (5)".into(),
-        t   => format!("◀ MSG ({t})"),
+        t => format!("◀ MSG ({t})"),
     }
 }
 
@@ -445,18 +412,14 @@ fn extract_trade_view(body: &str) -> Option<TradeView> {
 /// ExecutionReport data extracted from FIX message
 #[derive(Debug, Clone)]
 struct ExecReportData {
-    order_id: u64,       // Stable hash of effective_cl_ord_id (consistent with startup load)
-    cl_ord_id: String,   // Effective ClOrdId of the target order (field 11 for new, field 41 for cancel ack)
-    symbol: String,      // FIX field 55
-    side: u8,            // FIX field 54
-    ord_status: u8,      // FIX field 39 (0=New, 1=PartialFill, 2=Fill, 3=DoneForDay, 4=Canceled)
-    price: f64,          // FIX field 44
-    qty: f64,            // FIX field 38
-    leaves_qty: f64,     // FIX field 151
-}
-
-fn is_terminal_order_status(ord_status: u8) -> bool {
-    matches!(ord_status, 2 | 3 | 4 | 8)
+    order_id: u64,     // Stable hash of effective_cl_ord_id (consistent with startup load)
+    cl_ord_id: String, // Effective ClOrdId of the target order (field 11 for new, field 41 for cancel ack)
+    symbol: String,    // FIX field 55
+    side: u8,          // FIX field 54
+    ord_status: u8,    // FIX field 39 (0=New, 1=PartialFill, 2=Fill, 3=DoneForDay, 4=Canceled)
+    price: f64,        // FIX field 44
+    qty: f64,          // FIX field 38
+    leaves_qty: f64,   // FIX field 151
 }
 
 /// Extract a single FIX field value from pretty_fix format.
@@ -564,7 +527,7 @@ fn update_backend_order_book_from_exec_report(
                     .unwrap_or(0),
             );
         }
-        _ => {}  // Unknown status, ignore
+        _ => {} // Unknown status, ignore
     }
 }
 
@@ -576,31 +539,41 @@ mod tests {
     fn test_extract_field_pretty_fix_format() {
         let msg = "35=8 │ 11=5544843609372783994 │ 41=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100";
         assert_eq!(extract_field(msg, "35"), Some("8".to_string()));
-        assert_eq!(extract_field(msg, "11"), Some("5544843609372783994".to_string()));
-        assert_eq!(extract_field(msg, "41"), Some("ARETEST988945002".to_string()));
+        assert_eq!(
+            extract_field(msg, "11"),
+            Some("5544843609372783994".to_string())
+        );
+        assert_eq!(
+            extract_field(msg, "41"),
+            Some("ARETEST988945002".to_string())
+        );
         assert_eq!(extract_field(msg, "39"), Some("0".to_string()));
         assert_eq!(extract_field(msg, "55"), Some("AAPL".to_string()));
         assert_eq!(extract_field(msg, "54"), Some("1".to_string()));
         assert_eq!(extract_field(msg, "44"), Some("150.25".to_string()));
         assert_eq!(extract_field(msg, "38"), Some("100".to_string()));
-        assert_eq!(extract_field(msg, "999"), None);  // Non-existent field
+        assert_eq!(extract_field(msg, "999"), None); // Non-existent field
     }
 
     #[test]
     fn test_parse_execution_report_new_order() {
         // Real FIX new order exec report: field 11 = ClOrdId string (not numeric), no field 41
-        let body = "35=8 │ 11=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
-        
+        let body =
+            "35=8 │ 11=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=100";
+
         let exec_data = parse_execution_report(body);
         assert!(exec_data.is_some());
-        
+
         let data = exec_data.unwrap();
         // cl_ord_id = field 11 for new orders; order_id = stable hash of cl_ord_id
         assert_eq!(data.cl_ord_id, "ARETEST988945002");
-        assert_eq!(data.order_id, stable_order_id_from_cl_ord_id("ARETEST988945002"));
+        assert_eq!(
+            data.order_id,
+            stable_order_id_from_cl_ord_id("ARETEST988945002")
+        );
         assert_eq!(data.symbol, "AAPL");
         assert_eq!(data.side, 1);
-        assert_eq!(data.ord_status, 0);  // New
+        assert_eq!(data.ord_status, 0); // New
         assert_eq!(data.price, 150.25);
         assert_eq!(data.qty, 100.0);
         assert_eq!(data.leaves_qty, 100.0);
@@ -608,19 +581,21 @@ mod tests {
 
     #[test]
     fn test_parse_execution_report_partial_fill() {
-        let body = "35=8 │ 11=ARETEST988945002 │ 39=1 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=50";
-        
+        let body =
+            "35=8 │ 11=ARETEST988945002 │ 39=1 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=50";
+
         let data = parse_execution_report(body).unwrap();
-        assert_eq!(data.ord_status, 1);  // PartialFill
+        assert_eq!(data.ord_status, 1); // PartialFill
         assert_eq!(data.leaves_qty, 50.0);
     }
 
     #[test]
     fn test_parse_execution_report_filled() {
-        let body = "35=8 │ 11=ARETEST988945002 │ 39=2 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=0";
-        
+        let body =
+            "35=8 │ 11=ARETEST988945002 │ 39=2 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100 │ 151=0";
+
         let data = parse_execution_report(body).unwrap();
-        assert_eq!(data.ord_status, 2);  // Filled
+        assert_eq!(data.ord_status, 2); // Filled
         assert_eq!(data.leaves_qty, 0.0);
     }
 
@@ -629,18 +604,21 @@ mod tests {
         // Cancel ack: field 11 = cancel req id, field 41 = original order's ClOrdId.
         // Price/qty/leaves may be absent in delete/cancel payloads.
         let body = "35=8 │ 11=ORD-WEB-8 │ 41=ARETEST988945002 │ 39=4 │ 55=AAPL";
-        
+
         let data = parse_execution_report(body).unwrap();
-        assert_eq!(data.ord_status, 4);  // Canceled
+        assert_eq!(data.ord_status, 4); // Canceled
         // For cancel acks, effective ClOrdId = field 41 (original order)
         assert_eq!(data.cl_ord_id, "ARETEST988945002");
-        assert_eq!(data.order_id, stable_order_id_from_cl_ord_id("ARETEST988945002"));
+        assert_eq!(
+            data.order_id,
+            stable_order_id_from_cl_ord_id("ARETEST988945002")
+        );
     }
 
     #[test]
     fn test_parse_non_execution_report_message() {
-        let body = "35=A │ 49=CLIENT │ 56=SERVER";  // Logon message, not exec report
-        
+        let body = "35=A │ 49=CLIENT │ 56=SERVER"; // Logon message, not exec report
+
         let exec_data = parse_execution_report(body);
         assert!(exec_data.is_none());
     }
@@ -649,9 +627,9 @@ mod tests {
     fn test_parse_execution_report_missing_fields() {
         // Missing field 151 (leaves_qty)
         let body = "35=8 │ 11=ARETEST988945002 │ 39=0 │ 55=AAPL │ 54=1 │ 44=150.25 │ 38=100";
-        
+
         let exec_data = parse_execution_report(body);
-        assert!(exec_data.is_none());  // Missing required field
+        assert!(exec_data.is_none()); // Missing required field
     }
 
     #[test]
