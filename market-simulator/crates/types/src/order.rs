@@ -1,9 +1,8 @@
+use crate::arithmetic::FixedPointArithmetic;
+use crate::trade::Trades;
+use crate::{EntityId, OrderId, SymbolId};
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::{SymbolId, EntityId, OrderId};
-use crate::arithmetic::FixedPointArithmetic;
-use crate::trade::{Trades};
-
 
 // ---------------------------------------
 // ---- Order and related types ----
@@ -11,7 +10,7 @@ use crate::trade::{Trades};
 /// Represents an order in the order book.
 /// Orders are compared based on price for sorting in the order book.
 /// For buy orders, higher prices have priority; for sell orders, lower prices have priority.
-/// 
+///
 /// Arguments:
 /// - `price`: The price of the order.
 /// - `quantity`: The quantity of the order.
@@ -73,7 +72,9 @@ impl std::fmt::Display for OrderEvent {
             self.side,
             self.order_type,
             self.cl_ord_id,
-            self.orig_cl_ord_id.map(|id| id.to_string()).unwrap_or("None".to_string()),
+            self.orig_cl_ord_id
+                .map(|id| id.to_string())
+                .unwrap_or("None".to_string()),
             self.sender_id,
             self.target_id,
             self.symbol,
@@ -110,7 +111,7 @@ impl OrderEvent {
     }
 
     pub fn check_valid(&self) -> Result<(), &'static str> {
-         if self.side != Side::Buy && self.side != Side::Sell {
+        if self.side != Side::Buy && self.side != Side::Sell {
             return Err("Invalid side");
         }
 
@@ -120,12 +121,11 @@ impl OrderEvent {
 
         if self.order_type == OrderType::LimitOrder || self.order_type == OrderType::MarketOrder {
             return self.check_order_valid();
-        } else if self.order_type == OrderType::CancelOrder{
+        } else if self.order_type == OrderType::CancelOrder {
             return self.check_cancel_valid();
         } else {
             return Err("Invalid order type");
         }
-
     }
 
     fn check_general_valid(&self) -> Result<(), &'static str> {
@@ -179,8 +179,7 @@ impl PartialOrd for OrderEvent {
 impl Ord for OrderEvent {
     fn cmp(&self, other: &Self) -> Ordering {
         // Higher price first
-        self.price
-            .cmp(&other.price)
+        self.price.cmp(&other.price)
     }
 }
 
@@ -190,7 +189,7 @@ impl Ord for OrderEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderResult {
     pub internal_order_id: u64, // Internal order ID assigned by the engine, can be used for tracking and debugging
-    pub trades: Trades<4>, // Fixed-size array for trades, adjust size as needed
+    pub trades: Trades<4>,      // Fixed-size array for trades, adjust size as needed
     pub status: OrderStatus,
     pub timestamp_ms: u64, // Timestamp in milliseconds since epoch, added for potential future use in time-priority sorting
 }
@@ -217,16 +216,17 @@ impl std::fmt::Display for OrderResult {
             \tinternal_order_id: {}
              \tstatus: {}
              \ttimestamp_ms: {}",
-             self.internal_order_id,
-            self.status,
-            self.timestamp_ms
+            self.internal_order_id, self.status, self.timestamp_ms
         )?;
         for i in 0..self.trades.len() {
             let trade = self.trades[i];
             write!(
                 f,
                 "  Trade {{ price: {}, quantity: {}, id: {:?}, cl_ord_id: {} }}\n",
-                trade.price.raw(), trade.quantity, trade.id, trade.cl_ord_id
+                trade.price.raw(),
+                trade.quantity,
+                trade.id,
+                trade.cl_ord_id
             )?;
         }
         Ok(())

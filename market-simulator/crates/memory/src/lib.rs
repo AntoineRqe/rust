@@ -1,12 +1,15 @@
-use std::fs::OpenOptions;
 use memmap2::MmapMut;
-use spsc::spsc_lock_free::{RingBuffer};
+use spsc::spsc_lock_free::RingBuffer;
+use std::fs::OpenOptions;
 
 pub struct SharedQueue<const N: usize, T: 'static> {
     pub queue: &'static mut RingBuffer<T, N>,
 }
 
-pub fn open_shared_queue<const N: usize, T: 'static>(name: &str, create: bool) -> SharedQueue<N, T> {
+pub fn open_shared_queue<const N: usize, T: 'static>(
+    name: &str,
+    create: bool,
+) -> SharedQueue<N, T> {
     let size = std::mem::size_of::<RingBuffer<T, N>>();
     let path = format!("/dev/shm/{name}");
 
@@ -30,11 +33,7 @@ pub fn open_shared_queue<const N: usize, T: 'static>(name: &str, create: bool) -
             Err(e) => panic!("Failed to create shared queue file '{path}': {e}"),
         }
     } else {
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-        {
+        match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
             Err(e) => panic!("Failed to open shared queue file '{path}': {e}"),
         }

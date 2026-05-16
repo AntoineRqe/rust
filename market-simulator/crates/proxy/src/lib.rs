@@ -1,7 +1,10 @@
 use std::io;
-use types::multicast::{MulticastSource, SourceSocket};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::broadcast;
+use types::multicast::{MulticastSource, SourceSocket};
 mod server;
 
 pub struct MarketDataProxy {
@@ -22,7 +25,7 @@ impl MarketDataProxy {
         // - No worker thread counter is set, so it defaults to the number of CPU cores, which should be sufficient for our use case
         // TODO: Consider fine-tuning worker thread count and pining them to specific cores for better performance and isolation.
         let core_id = self.core_id;
-        
+
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .thread_name("market-data-proxy-runtime")
             .worker_threads(3)
@@ -30,13 +33,14 @@ impl MarketDataProxy {
                 core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
             })
             .enable_all()
-            .build() {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!("Failed to build Tokio runtime: {}", e);
-                    return Err(Box::new(e));
-                }
-            };
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!("Failed to build Tokio runtime: {}", e);
+                return Err(Box::new(e));
+            }
+        };
         rt.block_on(self.run_async())
     }
 
@@ -72,12 +76,18 @@ impl MarketDataProxy {
         // As listen_and_forward is a blocking function that runs an infinite loop
         // we use spawn_blocking to run it on a separate thread without blocking the async runtime.
         // This allows us to run the Axum server concurrently with the multicast listeners.
-        let market_source = self.market_feed_source.take().expect("Market feed source must be provided");
+        let market_source = self
+            .market_feed_source
+            .take()
+            .expect("Market feed source must be provided");
         let market_handle = tokio::task::spawn(async move {
             listen_and_forward(market_source, shutdown_market, market_tx_clone).await
         });
 
-        let snapshot_source = self.snapshot_feed_source.take().expect("Snapshot feed source must be provided");
+        let snapshot_source = self
+            .snapshot_feed_source
+            .take()
+            .expect("Snapshot feed source must be provided");
         let snapshot_handle = tokio::task::spawn(async move {
             listen_and_forward(snapshot_source, shutdown_snapshot, snapshot_tx_clone).await
         });
@@ -89,7 +99,8 @@ impl MarketDataProxy {
             self.ws_ip.clone(),
             self.ws_port,
             self.shutdown.clone(),
-        ).await?;
+        )
+        .await?;
 
         // Await multicast listener tasks and propagate errors
         match market_handle.await {
@@ -97,22 +108,22 @@ impl MarketDataProxy {
             Ok(Err(e)) => {
                 tracing::error!("Market feed listener error: {}", e);
                 return Err(e);
-            },
+            }
             Err(e) => {
                 tracing::error!("Market feed listener task panicked: {}", e);
                 return Err(Box::new(e));
-            },
+            }
         }
         match snapshot_handle.await {
             Ok(Ok(())) => tracing::info!("Snapshot feed listener exited successfully"),
             Ok(Err(e)) => {
                 tracing::error!("Snapshot feed listener error: {}", e);
                 return Err(e);
-            },
+            }
             Err(e) => {
                 tracing::error!("Snapshot feed listener task panicked: {}", e);
                 return Err(Box::new(e));
-            },
+            }
         }
 
         Ok(())
@@ -122,13 +133,17 @@ impl MarketDataProxy {
 async fn listen_and_forward(
     source: MulticastSource,
     shutdown: Arc<AtomicBool>,
-    tx: broadcast::Sender<Vec<u8>>
+    tx: broadcast::Sender<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-
     let socket = match SourceSocket::create_multicast_receiver_socket_async(source.port).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("Failed to create socket for {}:{} - {}", source.ip, source.port, e);
+            tracing::error!(
+                "Failed to create socket for {}:{} - {}",
+                source.ip,
+                source.port,
+                e
+            );
             return Err(Box::new(e));
         }
     };
@@ -137,19 +152,25 @@ async fn listen_and_forward(
         Ok(addr) => addr,
         Err(e) => {
             tracing::error!("Invalid multicast IP address {}: {}", source.ip, e);
-            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Invalid multicast IP address {}: {}", source.ip, e))));
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid multicast IP address {}: {}", source.ip, e),
+            )));
         }
     };
 
     if let Err(e) = socket.join_multicast_v4(group_addr, std::net::Ipv4Addr::UNSPECIFIED) {
         tracing::error!("Failed to join multicast group {}: {}", source.ip, e);
-        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to join multicast group: {e}"))));
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to join multicast group: {e}"),
+        )));
     }
 
     let mut buf = [0u8; 65536];
 
     while !shutdown.load(Ordering::Relaxed) {
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
         tokio::select! {
             recv_result = socket.recv_from(&mut buf) => {
                 match recv_result {
@@ -171,7 +192,12 @@ async fn listen_and_forward(
         }
     }
 
-    tracing::info!("[{}] Shutting down multicast subscriber for {}:{}", utils::market_name(), source.ip, source.port);
+    tracing::info!(
+        "[{}] Shutting down multicast subscriber for {}:{}",
+        utils::market_name(),
+        source.ip,
+        source.port
+    );
 
     Ok(())
 }

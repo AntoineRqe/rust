@@ -1,9 +1,9 @@
-use spsc::spsc_lock::{SpscLock};
+use spsc::spsc_lock::SpscLock;
 use std::thread;
 extern crate core_affinity;
-use std::sync::OnceLock;
 use core_affinity::CoreId;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 const N: usize = 4096; // Size of the ring buffer
 #[allow(dead_code)]
@@ -56,7 +56,6 @@ fn consume_single(consumer: Arc<SpscLock<usize, N>>, total_count: usize) {
 
 #[allow(dead_code)]
 fn profile_single_spsc(producer: Arc<SpscLock<usize, N>>, consumer: Arc<SpscLock<usize, N>>) {
-
     println!("Starting SPSC Lock profile for single item operations...");
 
     let core_ids = get_cores();
@@ -80,7 +79,6 @@ fn profile_single_spsc(producer: Arc<SpscLock<usize, N>>, consumer: Arc<SpscLock
 }
 
 fn main() {
-
     let rb = Arc::new(SpscLock::<usize, N>::new());
 
     profile_single_spsc(Arc::clone(&rb), Arc::clone(&rb));

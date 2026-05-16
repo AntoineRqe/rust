@@ -1,10 +1,9 @@
-use types::{OrderEvent};
 use std::time::{SystemTime, UNIX_EPOCH};
+use types::OrderEvent;
 
 /// This module defines the data structures for representing order book snapshots and market data feeds.
 
 const MAX_SNAPSHOT_DEPTH: usize = 10;
-
 
 #[derive(Debug)]
 /// Represents a snapshot of the order book at a specific point in time, including bids and asks.
@@ -31,7 +30,12 @@ impl Default for OrderBookSnapshot {
 }
 
 impl OrderBookSnapshot {
-    pub fn new(bids: [OrderEvent; MAX_SNAPSHOT_DEPTH], asks: [OrderEvent; MAX_SNAPSHOT_DEPTH], bids_len: usize, asks_len: usize) -> Self {
+    pub fn new(
+        bids: [OrderEvent; MAX_SNAPSHOT_DEPTH],
+        asks: [OrderEvent; MAX_SNAPSHOT_DEPTH],
+        bids_len: usize,
+        asks_len: usize,
+    ) -> Self {
         Self {
             bids,
             asks,

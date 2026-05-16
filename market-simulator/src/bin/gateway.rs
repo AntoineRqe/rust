@@ -27,7 +27,7 @@ fn main() {
 
     let gateway_ip = config.entry_point.ip.clone();
     let gateway_port = config.entry_point.port;
-    
+
     let gateway_markets: Vec<backend::MarketInfo> = config
         .markets
         .iter()

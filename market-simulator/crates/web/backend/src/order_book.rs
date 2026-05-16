@@ -73,7 +73,12 @@ impl SymbolOrderBook {
     }
 
     /// Apply a snapshot: replace all bids and asks using synthetic order IDs per level.
-    pub fn apply_snapshot(&mut self, bids: Vec<PriceLevel>, asks: Vec<PriceLevel>, timestamp_ms: u64) {
+    pub fn apply_snapshot(
+        &mut self,
+        bids: Vec<PriceLevel>,
+        asks: Vec<PriceLevel>,
+        timestamp_ms: u64,
+    ) {
         self.bids.clear();
         self.asks.clear();
         self.order_side.clear();
@@ -140,7 +145,11 @@ impl SymbolOrderBook {
             }
         }
 
-        let preserved_cl_ord_id = cl_ord_id.or_else(|| existing_order.as_ref().and_then(|order| order.cl_ord_id.clone()));
+        let preserved_cl_ord_id = cl_ord_id.or_else(|| {
+            existing_order
+                .as_ref()
+                .and_then(|order| order.cl_ord_id.clone())
+        });
 
         let time_priority = if let Some(existing) = existing_order {
             existing.time_priority
@@ -182,7 +191,13 @@ impl SymbolOrderBook {
     }
 
     /// Modify an existing order by order_id (side is inferred from order_side).
-    pub fn modify_order(&mut self, order_id: u64, new_price: f64, new_quantity: f64, timestamp_ms: u64) {
+    pub fn modify_order(
+        &mut self,
+        order_id: u64,
+        new_price: f64,
+        new_quantity: f64,
+        timestamp_ms: u64,
+    ) {
         match self.order_side.get(&order_id).copied() {
             Some(1) => {
                 if let Some(order) = self.bids.get_mut(&order_id) {
@@ -210,7 +225,13 @@ impl SymbolOrderBook {
     ///
     /// `aggressor_side`: 1=buy, 2=sell.
     /// A buy aggressor consumes asks, a sell aggressor consumes bids.
-    pub fn apply_trade(&mut self, aggressor_side: u8, trade_price: f64, trade_qty: f64, timestamp_ms: u64) {
+    pub fn apply_trade(
+        &mut self,
+        aggressor_side: u8,
+        trade_price: f64,
+        trade_qty: f64,
+        timestamp_ms: u64,
+    ) {
         if !(trade_qty.is_finite() && trade_qty > 0.0 && trade_price.is_finite()) {
             self.last_update_ms = timestamp_ms;
             return;

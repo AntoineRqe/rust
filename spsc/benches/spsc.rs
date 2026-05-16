@@ -1,17 +1,16 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
+use hdrhistogram::Histogram;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Instant;
-use hdrhistogram::Histogram;
-use std::sync::OnceLock;
 
-use spsc::spsc_lock_free::RingBuffer;
-use crossbeam::queue::ArrayQueue;
 use core_affinity::CoreId;
-use std::time::Duration;
+use crossbeam::queue::ArrayQueue;
+use spsc::spsc_lock_free::RingBuffer;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool};
-
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 const N: usize = 2; // Size of the ring buffer
 const PRODUCER_CORE_OFFSET: usize = 0; // Offset for producer core
@@ -48,16 +47,21 @@ fn get_cores() -> &'static Vec<CoreId> {
     })
 }
 
-fn benchmark_latency_ringbuffer_non_blocking(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
-    
+fn benchmark_latency_ringbuffer_non_blocking(
+    iters: u64,
+    histogram: &mut Histogram<u64>,
+) -> Duration {
     let cores = get_cores();
 
     if cores.len() < 2 {
         panic!("Need at least 2 cores available.");
     }
 
-    let (producer_core, consumer_core) = (cores[PRODUCER_CORE_OFFSET % cores.len()], cores[CONSUMER_CORE_OFFSET % cores.len()]);
-    
+    let (producer_core, consumer_core) = (
+        cores[PRODUCER_CORE_OFFSET % cores.len()],
+        cores[CONSUMER_CORE_OFFSET % cores.len()],
+    );
+
     let mut buffer = RingBuffer::<Instant, N>::new();
     let start = Instant::now();
 
@@ -87,9 +91,8 @@ fn benchmark_latency_ringbuffer_non_blocking(iters: u64, histogram: &mut Histogr
             };
 
             histogram
-            .record(ts.elapsed()
-            .as_nanos() as u64)
-            .expect("Value out of histogram range");
+                .record(ts.elapsed().as_nanos() as u64)
+                .expect("Value out of histogram range");
 
             // Signal producer to send the next item
         }
@@ -98,16 +101,22 @@ fn benchmark_latency_ringbuffer_non_blocking(iters: u64, histogram: &mut Histogr
     start.elapsed()
 }
 
-fn benchmark_throughput_ringbuffer_non_blocking(iters: u64, histogram: &mut Histogram<u64>, consumer_delay_ns: u64) -> Duration {
-    
+fn benchmark_throughput_ringbuffer_non_blocking(
+    iters: u64,
+    histogram: &mut Histogram<u64>,
+    consumer_delay_ns: u64,
+) -> Duration {
     let cores = get_cores();
 
     if cores.len() < 2 {
         panic!("Need at least 2 cores available.");
     }
 
-    let (producer_core, consumer_core) = (cores[PRODUCER_CORE_OFFSET % cores.len()], cores[CONSUMER_CORE_OFFSET % cores.len()]);
-    
+    let (producer_core, consumer_core) = (
+        cores[PRODUCER_CORE_OFFSET % cores.len()],
+        cores[CONSUMER_CORE_OFFSET % cores.len()],
+    );
+
     let mut buffer = RingBuffer::<Instant, N>::new();
     let start = Instant::now();
 
@@ -137,9 +146,8 @@ fn benchmark_throughput_ringbuffer_non_blocking(iters: u64, histogram: &mut Hist
             };
 
             histogram
-            .record(ts.elapsed()
-            .as_nanos() as u64)
-            .expect("Value out of histogram range");
+                .record(ts.elapsed().as_nanos() as u64)
+                .expect("Value out of histogram range");
 
             // Simulate consumer processing work — tune this to create backpressure
             spin_ns(consumer_delay_ns);
@@ -151,7 +159,6 @@ fn benchmark_throughput_ringbuffer_non_blocking(iters: u64, histogram: &mut Hist
 
 /// Benchmark your SPSC RingBuffer
 fn benchmark_latency_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u64>) -> Duration {
-    
     let cores = get_cores();
     let ready = Arc::new(AtomicBool::new(false)); // consumer signals "I popped, send next"
 
@@ -159,8 +166,11 @@ fn benchmark_latency_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u
         panic!("Need at least 2 cores available.");
     }
 
-    let (producer_core, consumer_core) = (cores[PRODUCER_CORE_OFFSET % cores.len()], cores[CONSUMER_CORE_OFFSET % cores.len()]);
-    
+    let (producer_core, consumer_core) = (
+        cores[PRODUCER_CORE_OFFSET % cores.len()],
+        cores[CONSUMER_CORE_OFFSET % cores.len()],
+    );
+
     let mut buffer = RingBuffer::<Instant, N>::new();
     let start = Instant::now();
 
@@ -171,7 +181,8 @@ fn benchmark_latency_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
             for i in 0..iters {
-                if i > 0 { // Send the first item immediately, then wait for consumer signal on subsequent items
+                if i > 0 {
+                    // Send the first item immediately, then wait for consumer signal on subsequent items
                     // Wait for consumer to signal that it popped the last item
                     while !ready_producer.load(std::sync::atomic::Ordering::Acquire) {
                         std::hint::spin_loop();
@@ -180,10 +191,10 @@ fn benchmark_latency_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u
                 }
 
                 loop {
-                        if producer.push(Instant::now()).is_ok() {
-                            break;
-                        }
-                        std::hint::spin_loop();
+                    if producer.push(Instant::now()).is_ok() {
+                        break;
+                    }
+                    std::hint::spin_loop();
                 }
             }
         });
@@ -198,7 +209,9 @@ fn benchmark_latency_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u
                 std::hint::spin_loop();
             };
 
-            histogram.record(ts.elapsed().as_nanos() as u64).expect("Value out of histogram range");
+            histogram
+                .record(ts.elapsed().as_nanos() as u64)
+                .expect("Value out of histogram range");
 
             // Signal producer to send the next item
             ready.store(true, std::sync::atomic::Ordering::Release);
@@ -208,16 +221,22 @@ fn benchmark_latency_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u
     start.elapsed()
 }
 
-fn benchmark_throughput_ringbuffer_blocking(iters: u64, histogram: &mut Histogram<u64>, consumer_delay_ns: u64) -> Duration {
-    
+fn benchmark_throughput_ringbuffer_blocking(
+    iters: u64,
+    histogram: &mut Histogram<u64>,
+    consumer_delay_ns: u64,
+) -> Duration {
     let cores = get_cores();
 
     if cores.len() < 2 {
         panic!("Need at least 2 cores available.");
     }
 
-    let (producer_core, consumer_core) = (cores[PRODUCER_CORE_OFFSET % cores.len()], cores[CONSUMER_CORE_OFFSET % cores.len()]);
-    
+    let (producer_core, consumer_core) = (
+        cores[PRODUCER_CORE_OFFSET % cores.len()],
+        cores[CONSUMER_CORE_OFFSET % cores.len()],
+    );
+
     let mut buffer = RingBuffer::<Instant, N>::new();
     let start = Instant::now();
 
@@ -247,9 +266,8 @@ fn benchmark_throughput_ringbuffer_blocking(iters: u64, histogram: &mut Histogra
             };
 
             histogram
-            .record(ts.elapsed()
-            .as_nanos() as u64)
-            .expect("Value out of histogram range");
+                .record(ts.elapsed().as_nanos() as u64)
+                .expect("Value out of histogram range");
 
             // Simulate consumer processing work — tune this to create backpressure
             spin_ns(consumer_delay_ns);
@@ -270,7 +288,7 @@ fn benchmark_latency_crossbeam(iters: u64, histogram: &mut Histogram<u64>) -> Du
     if cores.len() < 2 {
         panic!("Need at least 2 cores available. Run with: taskset -c 0,1 cargo bench");
     }
-    
+
     let producer_core = cores[PRODUCER_CORE_OFFSET % cores.len()];
     let consumer_core = cores[CONSUMER_CORE_OFFSET % cores.len()];
 
@@ -280,7 +298,6 @@ fn benchmark_latency_crossbeam(iters: u64, histogram: &mut Histogram<u64>) -> Du
         let buffer_producer = Arc::clone(&buffer);
         let ready_producer = Arc::clone(&ready);
         let producer = s.spawn(move || {
-
             core_affinity::set_for_current(producer_core);
             for i in 0..iters {
                 if i > 0 {
@@ -311,7 +328,9 @@ fn benchmark_latency_crossbeam(iters: u64, histogram: &mut Histogram<u64>) -> Du
             };
 
             let latency = ts.elapsed();
-            histogram.record(latency.as_nanos() as u64).expect("Value out of histogram");
+            histogram
+                .record(latency.as_nanos() as u64)
+                .expect("Value out of histogram");
 
             // Signal producer to send the next item
             ready.store(true, std::sync::atomic::Ordering::Release);
@@ -324,7 +343,11 @@ fn benchmark_latency_crossbeam(iters: u64, histogram: &mut Histogram<u64>) -> Du
 }
 
 /// Benchmark Crossbeam ArrayQueue
-fn benchmark_throughput_crossbeam(iters: u64, histogram: &mut Histogram<u64>, consumer_delay_ns: u64) -> Duration {
+fn benchmark_throughput_crossbeam(
+    iters: u64,
+    histogram: &mut Histogram<u64>,
+    consumer_delay_ns: u64,
+) -> Duration {
     let buffer = Arc::new(ArrayQueue::<Instant>::new(N));
     let buffer_consumer = Arc::clone(&buffer);
 
@@ -333,7 +356,7 @@ fn benchmark_throughput_crossbeam(iters: u64, histogram: &mut Histogram<u64>, co
     if cores.len() < 2 {
         panic!("Need at least 2 cores available. Run with: taskset -c 0,1 cargo bench");
     }
-    
+
     let producer_core = cores[PRODUCER_CORE_OFFSET % cores.len()];
     let consumer_core = cores[CONSUMER_CORE_OFFSET % cores.len()];
 
@@ -342,7 +365,6 @@ fn benchmark_throughput_crossbeam(iters: u64, histogram: &mut Histogram<u64>, co
     thread::scope(|s| {
         let buffer_producer = Arc::clone(&buffer);
         let producer = s.spawn(move || {
-
             core_affinity::set_for_current(producer_core);
             for _ in 0..iters {
                 loop {
@@ -365,7 +387,9 @@ fn benchmark_throughput_crossbeam(iters: u64, histogram: &mut Histogram<u64>, co
             };
 
             let latency = ts.elapsed();
-            histogram.record(latency.as_nanos() as u64).expect("Value out of histogram");
+            histogram
+                .record(latency.as_nanos() as u64)
+                .expect("Value out of histogram");
 
             // Simulate consumer processing work — tune this to create backpressure
             spin_ns(consumer_delay_ns);
@@ -380,14 +404,19 @@ fn benchmark_throughput_crossbeam(iters: u64, histogram: &mut Histogram<u64>, co
 fn benchmark_latency(c: &mut Criterion) {
     let functions: &[(&str, fn(u64, &mut Histogram<u64>) -> Duration); 3] = &[
         ("Latency Crossbeam ArrayQueue", benchmark_latency_crossbeam),
-        ("Latency RingBuffer SPSC Blocking", benchmark_latency_ringbuffer_blocking),
-        ("Latency RingBuffer SPSC Non-Blocking", benchmark_latency_ringbuffer_non_blocking),
+        (
+            "Latency RingBuffer SPSC Blocking",
+            benchmark_latency_ringbuffer_blocking,
+        ),
+        (
+            "Latency RingBuffer SPSC Non-Blocking",
+            benchmark_latency_ringbuffer_non_blocking,
+        ),
     ];
 
     for (name, func) in functions {
-        let mut histogram =
-            hdrhistogram::Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
-                .expect("Failed to create histogram");
+        let mut histogram = hdrhistogram::Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
+            .expect("Failed to create histogram");
         histogram.auto(true);
 
         c.bench_function(name, |b| {
@@ -418,8 +447,14 @@ fn benchmark_latency(c: &mut Criterion) {
 fn benchmark_throughput(c: &mut Criterion) {
     let functions: &[(&str, fn(u64, &mut Histogram<u64>, u64) -> Duration)] = &[
         ("Crossbeam ArrayQueue", benchmark_throughput_crossbeam),
-        ("RingBuffer Blocking", benchmark_throughput_ringbuffer_blocking),
-        ("RingBuffer Non-Blocking", benchmark_throughput_ringbuffer_non_blocking),
+        (
+            "RingBuffer Blocking",
+            benchmark_throughput_ringbuffer_blocking,
+        ),
+        (
+            "RingBuffer Non-Blocking",
+            benchmark_throughput_ringbuffer_non_blocking,
+        ),
     ];
 
     let delays = [0u64, 200, 500, 1000, 2000, 5000];
@@ -437,9 +472,7 @@ fn benchmark_throughput(c: &mut Criterion) {
             let bench_name = format!("{} delay={}ns", name, consumer_delay_ns);
 
             c.bench_function(&bench_name, |b| {
-                b.iter_custom(|_| {
-                    func(BENCH_ITERS, &mut histogram, consumer_delay_ns)
-                });
+                b.iter_custom(|_| func(BENCH_ITERS, &mut histogram, consumer_delay_ns));
             });
 
             group_results.push(BenchResult {
@@ -473,12 +506,7 @@ fn print_summary(results: &[BenchResult]) {
     let base_p50 = base.p50.as_nanos() as f64;
 
     // Dynamic width based on longest name
-    let name_width = results
-        .iter()
-        .map(|r| r.name.len())
-        .max()
-        .unwrap()
-        .max(20);
+    let name_width = results.iter().map(|r| r.name.len()).max().unwrap().max(20);
 
     println!();
     println!("SPSC Queue Latency Summary");
@@ -500,11 +528,7 @@ fn print_summary(results: &[BenchResult]) {
         let p50 = r.p50.as_nanos() as f64;
         let p99 = r.p99.as_nanos() as f64;
 
-        let ratio = if base_p50 > 0.0 {
-            p50 / base_p50
-        } else {
-            1.0
-        };
+        let ratio = if base_p50 > 0.0 { p50 / base_p50 } else { 1.0 };
 
         println!(
             "{:<name_width$} │ {:>10} │ {:>10} │ {:>9.2}x",
@@ -519,5 +543,5 @@ fn print_summary(results: &[BenchResult]) {
     println!();
 }
 
-criterion_group!(benches, benchmark_latency,benchmark_throughput);
+criterion_group!(benches, benchmark_latency, benchmark_throughput);
 criterion_main!(benches);

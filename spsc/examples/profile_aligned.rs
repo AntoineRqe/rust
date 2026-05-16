@@ -1,8 +1,8 @@
-use spsc::spsc_lock_free::{Producer, Consumer, RingBuffer};
+use spsc::spsc_lock_free::{Consumer, Producer, RingBuffer};
 use std::thread;
 extern crate core_affinity;
-use std::sync::OnceLock;
 use core_affinity::CoreId;
+use std::sync::OnceLock;
 
 const N: usize = 4096; // Size of the ring buffer
 #[allow(dead_code)]
@@ -34,10 +34,7 @@ fn produce_single(producer: &Producer<usize, N>, start: usize, count: usize) {
 }
 
 #[allow(dead_code)]
-fn consume_single(
-    consumer: &Consumer<usize, N>,
-    total_count: usize,
-) {
+fn consume_single(consumer: &Consumer<usize, N>, total_count: usize) {
     let mut expected: usize = 0;
 
     for _ in 0..total_count {
@@ -116,7 +113,6 @@ fn produce_batch(producer: &Producer<usize, N>, start: usize, count: usize) {
 
 #[allow(dead_code)]
 fn profile_single_spsc(producer: Producer<usize, N>, consumer: Consumer<usize, N>) {
-
     println!("Starting SPSC RingBuffer profile for single item operations...");
 
     let core_ids = get_cores();
@@ -141,7 +137,6 @@ fn profile_single_spsc(producer: Producer<usize, N>, consumer: Consumer<usize, N
 
 #[allow(dead_code)]
 fn profile_batch_spsc(producer: Producer<usize, N>, consumer: Consumer<usize, N>) {
-
     println!("Starting SPSC RingBuffer profile for batch item operations...");
 
     let core_ids = get_cores();
@@ -165,7 +160,6 @@ fn profile_batch_spsc(producer: Producer<usize, N>, consumer: Consumer<usize, N>
 }
 
 fn main() {
-
     let mut rb = RingBuffer::<usize, N>::new();
     let (producer, consumer) = rb.split();
 

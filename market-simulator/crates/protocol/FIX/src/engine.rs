@@ -1,31 +1,27 @@
-use std::{collections::HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
-use crate::tags::{tags, msg_types, side_code_set};
-use types::{
-    FixedPointArithmetic,
-    OrderEvent,
-    Side,
-    macros::{
-        EntityId,
-        OrderId,
-    }
-};
+use crate::tags::{msg_types, side_code_set, tags};
+use crossbeam::queue::ArrayQueue;
+use serde::Serialize;
 use spsc::spsc_lock_free::{Consumer, Producer};
+use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use crossbeam::queue::{ArrayQueue};
-use std::cell::UnsafeCell;
-use serde::Serialize;
-use tokio::sync::mpsc;
 use std::time::Instant;
+use tokio::sync::mpsc;
+use types::{
+    FixedPointArithmetic, OrderEvent, Side,
+    macros::{EntityId, OrderId},
+};
 use utils::market_name;
 
 pub type RequestQueue<const N: usize> = Arc<ArrayQueue<FixRawMsg<N>>>;
 pub type ResponseQueue<const N: usize> = Arc<ArrayQueue<(u64, FixRawMsg<N>)>>;
 
-
-pub fn kill_fix_inbound_engine<const N: usize>(net_to_fix_tx: &crossbeam::channel::Sender<FixRawMsg<N>>) {
+pub fn kill_fix_inbound_engine<const N: usize>(
+    net_to_fix_tx: &crossbeam::channel::Sender<FixRawMsg<N>>,
+) {
     // Send a special shutdown message to the FIX engine's inbound queue
     // The FIX engine should be designed to recognize this message and exit its run loop
     // For example, we could send a message with a specific tag or an empty message
@@ -34,7 +30,9 @@ pub fn kill_fix_inbound_engine<const N: usize>(net_to_fix_tx: &crossbeam::channe
     net_to_fix_tx.send(shutdown_msg).unwrap();
 }
 
-pub fn kill_fix_outbound_engine<const N: usize>(er_to_fix_tx: &Producer<(EntityId, FixRawMsg<N>), N>) {
+pub fn kill_fix_outbound_engine<const N: usize>(
+    er_to_fix_tx: &Producer<(EntityId, FixRawMsg<N>), N>,
+) {
     // Send a special shutdown message to the FIX engine's outbound queue
     // The FIX engine should be designed to recognize this message and exit its run loop
     // Here we send a message with an empty EntityId as a simple shutdown signal
@@ -57,8 +55,8 @@ impl<const N: usize> Serialize for FixRawMsg<N> {
         S: serde::Serializer,
     {
         // Convert the raw FIX message to a human-readable string by replacing SOH with " | "
-        let human_readable = String::from_utf8_lossy(&self.data[..self.len as usize])
-            .replace('\x01', " | ");
+        let human_readable =
+            String::from_utf8_lossy(&self.data[..self.len as usize]).replace('\x01', " | ");
         serializer.serialize_str(&human_readable)
     }
 }
@@ -73,7 +71,7 @@ impl<const N: usize> Default for FixRawMsg<N> {
     }
 }
 
-impl <const N: usize> FixRawMsg<N> {
+impl<const N: usize> FixRawMsg<N> {
     pub fn new(data: &[u8], resp_queue: Option<mpsc::Sender<FixRawMsg<N>>>) -> Self {
         let mut msg = FixRawMsg::default();
         msg.len = data.len() as u16;
@@ -113,11 +111,12 @@ struct FixPendingRoute<const N: usize> {
     received_at: Instant,
 }
 
-impl <const N: usize> FixShared<N> {
-
+impl<const N: usize> FixShared<N> {
     fn update_pending(&self, key: EntityId, route: FixPendingRoute<N>) {
         // loop while locked is true, then set locked to true and update the pending queue, then set locked to false. This is a very basic spinlock implementation, in a real implementation you would want to use a more robust locking mechanism or a lock-free data structure to avoid contention and improve performance.
-        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
+        while self.pending.locked.swap(true, Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
         unsafe {
             (*self.pending.pending.get()).insert(key, route);
         }
@@ -125,16 +124,18 @@ impl <const N: usize> FixShared<N> {
     }
 
     fn get_pending(&self, key: &EntityId) -> Option<FixPendingRoute<N>> {
-        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
-        let result = unsafe {
-            (*self.pending.pending.get()).get(key).cloned()
-        };
+        while self.pending.locked.swap(true, Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        let result = unsafe { (*self.pending.pending.get()).get(key).cloned() };
         self.pending.locked.store(false, Ordering::Release);
         result
     }
 
     fn remove_pending(&self, key: &EntityId) {
-        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
+        while self.pending.locked.swap(true, Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
         unsafe {
             (*self.pending.pending.get()).remove(key);
         }
@@ -142,7 +143,9 @@ impl <const N: usize> FixShared<N> {
     }
 
     fn prune_closed_pending(&self) -> usize {
-        while self.pending.locked.swap(true, Ordering::Acquire) { std::hint::spin_loop(); }
+        while self.pending.locked.swap(true, Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
         let removed = unsafe {
             let pending = &mut *self.pending.pending.get();
             let before = pending.len();
@@ -162,8 +165,8 @@ pub struct FixInboundEngine<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> FixInboundEngine<'a, N> {
-        // Blocking wait for new inbound FIX messages. Shutdown is signaled via a
-        // sentinel message (len == 0) or by disconnecting the input channel.
+    // Blocking wait for new inbound FIX messages. Shutdown is signaled via a
+    // sentinel message (len == 0) or by disconnecting the input channel.
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             let mut msg = match self.request_in.recv() {
@@ -172,27 +175,41 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
             };
 
             if msg.len == 0 {
-                tracing::info!("[{}] Inbound FIX engine received shutdown sentinel", market_name());
+                tracing::info!(
+                    "[{}] Inbound FIX engine received shutdown sentinel",
+                    market_name()
+                );
                 break;
             }
 
-            self.shared.metrics.fix_requests.fetch_add(1, Ordering::Relaxed);
+            self.shared
+                .metrics
+                .fix_requests
+                .fetch_add(1, Ordering::Relaxed);
             let resp_queue = msg.resp_queue.take(); // Take ownership of the response queue if provided, so we can use it later when sending responses back to the client
             let received_at = Instant::now();
 
             let order_event = match self.build_order(msg) {
                 Ok(event) => event,
                 Err(e) => {
-                    tracing::error!("[{}] Failed to parse FIX message: {}, skipping", market_name(), e);
+                    tracing::error!(
+                        "[{}] Failed to parse FIX message: {}, skipping",
+                        market_name(),
+                        e
+                    );
                     continue; // Skip malformed messages
                 }
             };
 
             // Check validity of the parsed order event before pushing to the order book queue, this is important to avoid processing invalid events downstream
             match order_event.check_valid() {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
-                    tracing::error!("[{}] Invalid order event parsed: {}, skipping", market_name(), e);
+                    tracing::error!(
+                        "[{}] Invalid order event parsed: {}, skipping",
+                        market_name(),
+                        e
+                    );
                     continue; // Skip invalid events
                 }
             }
@@ -201,20 +218,30 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
 
             // Store the response queue for this order event if provided, so that we can send a response back to the client after processing the order.
             if let Some(resp_queue) = resp_queue {
-                self.shared.update_pending(order_event.sender_id, FixPendingRoute {
-                    resp_queue,
-                    received_at,
-                });
+                self.shared.update_pending(
+                    order_event.sender_id,
+                    FixPendingRoute {
+                        resp_queue,
+                        received_at,
+                    },
+                );
             }
 
             // Push the structured order event to the order book queue.
             match self.request_out.push(order_event) {
                 Ok(_) => {
-                    tracing::debug!("[{}] Parsed order event pushed to order book queue successfully", market_name());
+                    tracing::debug!(
+                        "[{}] Parsed order event pushed to order book queue successfully",
+                        market_name()
+                    );
                     self.counter += 1;
-                },
+                }
                 Err(e) => {
-                    tracing::error!("[{}] Failed to push order event to order book queue: {}, skipping", market_name(), e);
+                    tracing::error!(
+                        "[{}] Failed to push order event to order book queue: {}, skipping",
+                        market_name(),
+                        e
+                    );
                     continue; // In a real implementation, you would want to handle this case properly, maybe with a retry mechanism or backpressure
                 }
             }
@@ -223,14 +250,15 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
         // Propagate kill signal to order book engine by setting the shutdown flag, which the order book engine checks to know when to exit gracefully.
         self.request_out.push(OrderEvent::default()).unwrap(); // Send a final order event with default values to unblock any subscribers that may be waiting for order events, such as the order book engine, allowing them to check the shutdown flag and exit gracefully.
 
-        tracing::info!("[{}] Inbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
+        tracing::info!(
+            "[{}] Inbound FIX engine shutting down, processed {} messages",
+            market_name(),
+            self.counter
+        );
         Ok(())
     }
 
-    fn build_order(
-        &self,
-        msg: FixRawMsg<N>,
-    ) -> Result<OrderEvent, &'static str> {
+    fn build_order(&self, msg: FixRawMsg<N>) -> Result<OrderEvent, &'static str> {
         let mut order_event = OrderEvent::default();
 
         let mut parser = crate::parser::FixParser::new(&msg.data[..msg.len as usize]);
@@ -241,59 +269,58 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
                 tags::MSG_TYPE => {
                     match field.value {
                         // Only handling New Order Single for this example, but could add more message types here
-                        msg_types::NEW_ORDER_SINGLE => {
-                        },
-                        msg_types::ORDER_CANCEL_REQUEST=> {
+                        msg_types::NEW_ORDER_SINGLE => {}
+                        msg_types::ORDER_CANCEL_REQUEST => {
                             order_event.order_type = types::OrderType::CancelOrder;
-                        },
+                        }
                         _ => return Err("Unsupported message type"), // Unsupported message type
                     }
-                },
+                }
                 tags::SIDE => {
                     match field.value {
                         side_code_set::BUY => order_event.side = Side::Buy,
                         side_code_set::SELL => order_event.side = Side::Sell,
                         _ => return Err("Unsupported side code"), // Unsupported side code
                     }
-                },
+                }
                 tags::PRICE => {
                     if let Some(price) = FixedPointArithmetic::from_fix_bytes(field.value) {
                         order_event.price = price;
                     } else {
                         return Err("Invalid price format"); // Invalid price format
                     }
-                },
+                }
                 tags::CL_ORD_ID => {
                     utils::copy_array(&mut order_event.cl_ord_id.0, field.value);
-                },
+                }
                 tags::ORIG_CL_ORD_ID => {
                     let mut orig_cl_ord_id = OrderId::default();
                     utils::copy_array(&mut orig_cl_ord_id.0, field.value);
                     order_event.orig_cl_ord_id = Some(orig_cl_ord_id);
-                },  
+                }
                 tags::SYMBOL => {
                     utils::copy_array(&mut order_event.symbol.0, field.value);
-                },
+                }
                 tags::SENDER_COMP_ID => {
                     utils::copy_array(&mut order_event.sender_id.0, field.value);
-                },
+                }
                 tags::TARGET_COMP_ID => {
                     utils::copy_array(&mut order_event.target_id.0, field.value);
-                },
+                }
                 tags::ORDER_QTY => {
                     if let Some(qty) = FixedPointArithmetic::from_fix_bytes(field.value) {
                         order_event.quantity = qty;
                     } else {
                         return Err("Invalid quantity format"); // Invalid quantity format
                     }
-                },
+                }
                 tags::SENDING_TIME => {
                     if let Some(timestamp) = utils::UtcTimestamp::from_fix_bytes(field.value) {
                         order_event.timestamp_ms = timestamp.to_unix_ms();
                     } else {
                         return Err("Invalid timestamp format"); // Invalid timestamp format
                     }
-                },
+                }
                 _ => continue, // Skip unsupported tags
             }
         }
@@ -301,7 +328,6 @@ impl<'a, const N: usize> FixInboundEngine<'a, N> {
         Ok(order_event)
     }
 }
-
 
 pub struct FixOutboundEngine<'a, const N: usize> {
     response_in: Consumer<'a, (EntityId, FixRawMsg<N>), N>,
@@ -316,7 +342,10 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
         loop {
             if let Some((key, response)) = self.response_in.pop() {
                 if key == EntityId::from_ascii("") {
-                    tracing::info!("[{}] Outbound FIX engine received shutdown sentinel", market_name());
+                    tracing::info!(
+                        "[{}] Outbound FIX engine received shutdown sentinel",
+                        market_name()
+                    );
                     break;
                 }
 
@@ -324,19 +353,36 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
                     match resp_queue.resp_queue.try_send(response) {
                         Ok(_) => {
                             self.counter += 1;
-                            self.shared.metrics.fix_responses.fetch_add(1, Ordering::Relaxed);
+                            self.shared
+                                .metrics
+                                .fix_responses
+                                .fetch_add(1, Ordering::Relaxed);
                             let elapsed_ms = resp_queue.received_at.elapsed().as_millis() as u64;
-                            if let Ok(mut samples) = self.shared.metrics.fix_request_to_response_latency_ms.lock() {
+                            if let Ok(mut samples) = self
+                                .shared
+                                .metrics
+                                .fix_request_to_response_latency_ms
+                                .lock()
+                            {
                                 samples.push(elapsed_ms);
                             }
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                             self.shared.remove_pending(&key);
-                            tracing::warn!("[{}] Client response channel closed, removing pending route", market_name());
+                            tracing::warn!(
+                                "[{}] Client response channel closed, removing pending route",
+                                market_name()
+                            );
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            self.shared.metrics.fix_response_dropped.fetch_add(1, Ordering::Relaxed);
-                            tracing::error!("[{}] Client response channel full, dropping response", market_name());
+                            self.shared
+                                .metrics
+                                .fix_response_dropped
+                                .fetch_add(1, Ordering::Relaxed);
+                            tracing::error!(
+                                "[{}] Client response channel full, dropping response",
+                                market_name()
+                            );
                         }
                     }
                 }
@@ -353,13 +399,21 @@ impl<'a, const N: usize> FixOutboundEngine<'a, N> {
             if sweep_ticks >= 10_000 {
                 let removed = self.shared.prune_closed_pending();
                 if removed > 0 {
-                    tracing::debug!("[{}] Pruned {} stale pending FIX response route(s)", market_name(), removed);
+                    tracing::debug!(
+                        "[{}] Pruned {} stale pending FIX response route(s)",
+                        market_name(),
+                        removed
+                    );
                 }
                 sweep_ticks = 0;
             }
         }
 
-        tracing::info!("[{}] Outbound FIX engine shutting down, processed {} messages", market_name(), self.counter);
+        tracing::info!(
+            "[{}] Outbound FIX engine shutting down, processed {} messages",
+            market_name(),
+            self.counter
+        );
         Ok(())
     }
 }
@@ -373,7 +427,6 @@ unsafe impl<const N: usize> Send for FixPendingConnection<N> {}
 unsafe impl<const N: usize> Sync for FixPendingConnection<N> {}
 
 impl<'a, const N: usize> FixEngine<'a, N> {
-    
     pub fn new(
         request_in: Arc<crossbeam_channel::Receiver<FixRawMsg<N>>>,
         request_out: Producer<'a, OrderEvent, N>,
@@ -395,13 +448,11 @@ impl<'a, const N: usize> FixEngine<'a, N> {
     }
 
     pub fn split(self) -> (FixInboundEngine<'a, N>, FixOutboundEngine<'a, N>) {
-            
         let shared = Arc::new(FixShared {
             shutdown: Arc::clone(&self.shutdown),
             pending: Arc::clone(&self.pending),
             metrics: Arc::clone(&self.metrics),
         });
-
 
         let inbound = FixInboundEngine {
             request_in: self.request_in,
@@ -417,21 +468,17 @@ impl<'a, const N: usize> FixEngine<'a, N> {
         };
 
         (inbound, outbound)
-
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use utils::field_str;
     use spsc::spsc_lock_free::RingBuffer;
-
+    use utils::field_str;
 
     #[test]
     fn test_fix_engine() {
-
         // Inbound : net -> FIX -> order book
         let (net_to_fix_tx, net_to_fix_rx) = crossbeam_channel::bounded::<FixRawMsg<1024>>(1024);
         let mut fix_to_ob = RingBuffer::<OrderEvent, 1024>::new();
@@ -439,7 +486,6 @@ mod tests {
         let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<1024>), 1024>::new();
 
         std::thread::scope(|scope| {
-
             let shutdown = Arc::new(AtomicBool::new(false));
             let metrics = Arc::new(types::MarketMetrics::new());
             let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
@@ -455,12 +501,12 @@ mod tests {
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
 
-             // Spawn a thread to run the FIX engine
-    
+            // Spawn a thread to run the FIX engine
+
             let inbound_handle = scope.spawn(move || {
                 let _ = inbound_engine.run();
             });
-            
+
             let outbound_handle = scope.spawn(move || {
                 let _ = outbound_engine.run();
             });
@@ -483,11 +529,14 @@ mod tests {
             assert_eq!(fix_to_ob_rx.len(), 1); // We should have received one order event in the order book queue
 
             let order_event = fix_to_ob_rx.pop().unwrap();
-    
-            assert_eq!(field_str(order_event.cl_ord_id.as_ref()),  b"12345");
+
+            assert_eq!(field_str(order_event.cl_ord_id.as_ref()), b"12345");
             assert_eq!(field_str(order_event.sender_id.as_ref()), b"SENDER");
             assert_eq!(field_str(order_event.target_id.as_ref()), b"TARGET");
-            assert_eq!(order_event.quantity, FixedPointArithmetic::from_number(1000000));
+            assert_eq!(
+                order_event.quantity,
+                FixedPointArithmetic::from_number(1000000)
+            );
             assert_eq!(order_event.price, FixedPointArithmetic::from_f64(1.23456));
             assert_eq!(order_event.side, Side::Buy);
 
@@ -497,8 +546,12 @@ mod tests {
             kill_fix_outbound_engine(&er_to_fix_tx);
 
             // Wait a bit to ensure the FIX engine has stopped before ending the test, in a real implementation you would want a more robust way to ensure the thread has stopped
-            inbound_handle.join().expect("Failed to join inbound FIX engine thread");
-            outbound_handle.join().expect("Failed to join outbound FIX engine thread");
+            inbound_handle
+                .join()
+                .expect("Failed to join inbound FIX engine thread");
+            outbound_handle
+                .join()
+                .expect("Failed to join outbound FIX engine thread");
         });
     }
 
@@ -524,7 +577,7 @@ mod tests {
 
             let (mut inbound_engine, mut outbound_engine) = handle.split();
 
-             // Spawn a thread to run the FIX engine
+            // Spawn a thread to run the FIX engine
 
             let inbound_handle = scope.spawn(move || {
                 let _ = inbound_engine.run();
@@ -567,8 +620,12 @@ mod tests {
             kill_fix_inbound_engine(&net_to_fix_tx);
             kill_fix_outbound_engine(&er_to_fix_tx);
 
-            inbound_handle.join().expect("Failed to join inbound FIX engine thread");
-            outbound_handle.join().expect("Failed to join outbound FIX engine thread");
+            inbound_handle
+                .join()
+                .expect("Failed to join inbound FIX engine thread");
+            outbound_handle
+                .join()
+                .expect("Failed to join outbound FIX engine thread");
         });
     }
 }

@@ -2,7 +2,7 @@ use crate::order_book::L3OrderView;
 use players::players::{HoldingSummary, PendingOrder};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
 
@@ -102,6 +102,7 @@ pub enum BrowserCommand {
 /// Capacity of the broadcast channel.
 /// If a slow browser client falls this many events behind, it gets dropped.
 pub const BROADCAST_CAPACITY: usize = 256;
+pub const TARGETED_BROADCAST_CAPACITY: usize = 256;
 
 /// The shared handle passed into the web server and into handle_client.
 /// Cloning it is cheap — broadcast::Sender is Arc-backed internally.
@@ -114,6 +115,7 @@ pub(crate) struct BusEvent {
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<BusEvent>,
+    targeted_txs: Arc<Mutex<HashMap<String, broadcast::Sender<BusEvent>>>>,
     metrics: Arc<OnceLock<Arc<types::MarketMetrics>>>,
 }
 
@@ -122,6 +124,7 @@ impl EventBus {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             tx,
+            targeted_txs: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new(OnceLock::new()),
         }
     }
@@ -133,6 +136,10 @@ impl EventBus {
     /// Called from the sync FIX thread — non-blocking, never fails silently.
     /// Returns the number of active browser subscribers that received the event.
     pub(crate) fn publish(&self, event: WsEvent) -> usize {
+        if let Some(recipient) = recipient_key(&event) {
+            return self.publish_targeted(&recipient, event);
+        }
+
         let order_book_levels = match &event {
             WsEvent::OrderBook { bids, asks, .. } => Some(bids.len().saturating_add(asks.len())),
             _ => None,
@@ -158,6 +165,18 @@ impl EventBus {
         sent
     }
 
+    pub(crate) fn subscribe_targeted(&self, username: &str) -> broadcast::Receiver<BusEvent> {
+        let mut targeted_txs = self.targeted_txs.lock().unwrap();
+        let tx = targeted_txs
+            .entry(username.to_string())
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(TARGETED_BROADCAST_CAPACITY);
+                tx
+            })
+            .clone();
+        tx.subscribe()
+    }
+
     /// Subscribe a new browser WebSocket connection to the event stream.
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<BusEvent> {
         self.tx.subscribe()
@@ -165,5 +184,36 @@ impl EventBus {
 
     pub(crate) fn metrics(&self) -> Option<Arc<types::MarketMetrics>> {
         self.metrics.get().cloned()
+    }
+
+    fn publish_targeted(&self, recipient: &str, event: WsEvent) -> usize {
+        let tx = self.targeted_txs.lock().unwrap().get(recipient).cloned();
+        let Some(tx) = tx else {
+            return 0;
+        };
+
+        tx.send(BusEvent {
+            event,
+            published_at: Instant::now(),
+        })
+        .unwrap_or_else(|_| {
+            // Drop stale per-user channel entries once all listeners are gone.
+            self.targeted_txs.lock().unwrap().remove(recipient);
+            0
+        })
+    }
+}
+
+fn recipient_key(event: &WsEvent) -> Option<String> {
+    match event {
+        WsEvent::FixMessage {
+            recipient: Some(recipient),
+            ..
+        }
+        | WsEvent::Status {
+            recipient: Some(recipient),
+            ..
+        } => Some(recipient.clone()),
+        _ => None,
     }
 }

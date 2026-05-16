@@ -148,6 +148,7 @@ async fn handle_socket(
     // Split into sender and receiver so we can use both concurrently
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.bus.subscribe();
+    let mut targeted_rx = state.bus.subscribe_targeted(&username);
     let ws_metrics = state.bus.metrics();
     let is_admin = claims.is_admin || username.eq_ignore_ascii_case("admin");
 
@@ -183,9 +184,8 @@ async fn handle_socket(
         recipient: Some(username.clone()),
     });
 
-    // Also send it directly to this socket immediately
-    // (the broadcast above goes to all OTHER subscribers,
-    //  but this socket just subscribed so it missed it)
+    // Also send it directly to this socket immediately.
+    // This keeps first-render UX deterministic even if targeted queue delivery is delayed.
     let status = serde_json::to_string(&WsEvent::Status {
         connected: true,
         recipient: None,
@@ -214,49 +214,54 @@ async fn handle_socket(
             result = rx.recv() => {
                 match result {
                     Ok(bus_event) => {
-                        let BusEvent { event, published_at } = bus_event;
-                        let allow_event = match &event {
-                            WsEvent::FixMessage { recipient: Some(recipient), .. } => recipient == &username,
-                            WsEvent::Status { recipient: Some(recipient), .. } => recipient == &username,
-                            _ => true,
-                        };
-
-                        if !allow_event {
-                            continue;
-                        }
-
-                        if let WsEvent::FixMessage { tag, .. } = &event {
-                            if tag == "feed" {
-                                // Coalesce high-frequency feed updates and send player state
-                                // on a short trailing debounce window.
-                                player_state_dirty = true;
-                                if !player_state_flush_armed {
-                                    player_state_flush_armed = true;
-                                    player_state_flush_sleep.as_mut().reset(
-                                        tokio::time::Instant::now()
-                                            + std::time::Duration::from_millis(PLAYER_STATE_FEED_DEBOUNCE_MS),
-                                    );
-                                }
-                            }
-                        }
-
-                        let json = serde_json::to_string(&event).unwrap();
-                        if send_text_message(&mut sender, json.into(), ws_metrics.clone())
-                            .await
-                            .is_err()
+                        if handle_bus_event(
+                            bus_event,
+                            &username,
+                            &mut sender,
+                            ws_metrics.as_ref(),
+                            &mut player_state_dirty,
+                            &mut player_state_flush_armed,
+                            &mut player_state_flush_sleep,
+                        )
+                        .await
+                        .is_err()
                         {
                             break;
-                        }
-
-                        if let Some(metrics) = ws_metrics.as_ref() {
-                            let elapsed_us = published_at.elapsed().as_micros() as u64;
-                            if let Ok(mut samples) = metrics.websocket_fanout_to_browser_latency_us.lock() {
-                                samples.push(elapsed_us);
-                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("[{}] Browser lagged, dropped {n} events", market_name());
+                        if let Some(metrics) = ws_metrics.as_ref() {
+                            metrics
+                                .websocket_lagged_events
+                                .fetch_add(n as usize, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // ── targeted events → browser ────────────────────────────────
+            result = targeted_rx.recv() => {
+                match result {
+                    Ok(bus_event) => {
+                        if handle_bus_event(
+                            bus_event,
+                            &username,
+                            &mut sender,
+                            ws_metrics.as_ref(),
+                            &mut player_state_dirty,
+                            &mut player_state_flush_armed,
+                            &mut player_state_flush_sleep,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("[{}] Targeted browser stream lagged, dropped {n} events", market_name());
                         if let Some(metrics) = ws_metrics.as_ref() {
                             metrics
                                 .websocket_lagged_events
@@ -316,6 +321,68 @@ async fn handle_socket(
         connected: false,
         recipient: Some(username),
     });
+}
+
+async fn handle_bus_event(
+    bus_event: BusEvent,
+    username: &str,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    ws_metrics: Option<&Arc<types::MarketMetrics>>,
+    player_state_dirty: &mut bool,
+    player_state_flush_armed: &mut bool,
+    player_state_flush_sleep: &mut std::pin::Pin<Box<tokio::time::Sleep>>,
+) -> Result<(), ()> {
+    let BusEvent {
+        event,
+        published_at,
+    } = bus_event;
+    let allow_event = match &event {
+        WsEvent::FixMessage {
+            recipient: Some(recipient),
+            ..
+        } => recipient == username,
+        WsEvent::Status {
+            recipient: Some(recipient),
+            ..
+        } => recipient == username,
+        _ => true,
+    };
+
+    if !allow_event {
+        return Ok(());
+    }
+
+    if let WsEvent::FixMessage { tag, .. } = &event {
+        if tag == "feed" {
+            // Coalesce high-frequency feed updates and send player state
+            // on a short trailing debounce window.
+            *player_state_dirty = true;
+            if !*player_state_flush_armed {
+                *player_state_flush_armed = true;
+                player_state_flush_sleep.as_mut().reset(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(PLAYER_STATE_FEED_DEBOUNCE_MS),
+                );
+            }
+        }
+    }
+
+    let json = serde_json::to_string(&event).unwrap();
+    if send_text_message(sender, json.into(), ws_metrics.cloned())
+        .await
+        .is_err()
+    {
+        return Err(());
+    }
+
+    if let Some(metrics) = ws_metrics {
+        let elapsed_us = published_at.elapsed().as_micros() as u64;
+        if let Ok(mut samples) = metrics.websocket_fanout_to_browser_latency_us.lock() {
+            samples.push(elapsed_us);
+        }
+    }
+
+    Ok(())
 }
 
 /// Send player to the browser so it can display the current token balance, pending orders, and holdings.

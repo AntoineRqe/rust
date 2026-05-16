@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::state::EventBus;
+use serde::{Deserialize, Serialize};
 
 /// Information for an authenticated player.
 /// Token validation is now delegated to the Player Service (gRPC).
@@ -33,11 +33,7 @@ pub fn advertised_markets(markets: &[MarketInfo]) -> Vec<MarketInfo> {
 }
 
 /// Check if a user is an admin and publish an error message if they are not.
-pub fn require_admin(
-    bus: &EventBus,
-    username: &str,
-    is_admin: bool,
-) -> bool {
+pub fn require_admin(bus: &EventBus, username: &str, is_admin: bool) -> bool {
     if is_admin {
         return true;
     }

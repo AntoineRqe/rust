@@ -139,17 +139,17 @@ impl MarketEvent {
 #[derive(Clone, Copy, Debug)]
 pub struct AddOrder {
     pub order_id: u64,
-    pub side: u8,       // 1 = bid, 2 = ask
+    pub side: u8, // 1 = bid, 2 = ask
     pub price: FixedPointArithmetic,
     pub quantity: FixedPointArithmetic,
-    pub cl_ord_id: OrderId,  // The original client order ID from the browser
+    pub cl_ord_id: OrderId, // The original client order ID from the browser
 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct ModifyOrder {
     pub order_id: u64,
-    pub cl_ord_id: OrderId,  // The original client order ID from the browser
+    pub cl_ord_id: OrderId, // The original client order ID from the browser
     pub new_price: FixedPointArithmetic,
     pub new_quantity: FixedPointArithmetic,
 }
@@ -158,7 +158,7 @@ pub struct ModifyOrder {
 #[derive(Clone, Copy, Debug)]
 pub struct DeleteOrder {
     pub order_id: u64,
-    pub cl_ord_id: OrderId,  // The original client order ID from the browser
+    pub cl_ord_id: OrderId, // The original client order ID from the browser
 }
 
 #[repr(C, packed)]
@@ -238,7 +238,7 @@ impl AddOrder {
             },
             price: order_event.price,
             quantity: order_event.quantity,
-            cl_ord_id: order_event.cl_ord_id,  // Include the original clOrdId
+            cl_ord_id: order_event.cl_ord_id, // Include the original clOrdId
         }
     }
 }
@@ -309,11 +309,12 @@ impl DeleteOrder {
             .map(|id| stable_u64_from_fixed_20(&id.0))
             .unwrap_or_else(|| stable_u64_from_fixed_20(&order_event.cl_ord_id.0));
 
-        let cl_ord_id = order_event
-            .orig_cl_ord_id
-            .unwrap_or(order_event.cl_ord_id);
+        let cl_ord_id = order_event.orig_cl_ord_id.unwrap_or(order_event.cl_ord_id);
 
-        Self { order_id, cl_ord_id }
+        Self {
+            order_id,
+            cl_ord_id,
+        }
     }
 }
 

@@ -327,9 +327,7 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
                 self.fan_out_execution_report(event, result);
 
                 if let Some(metrics) = &self.metrics {
-                    metrics
-                        .order_book_events
-                        .fetch_add(1, Ordering::Relaxed);
+                    metrics.order_book_events.fetch_add(1, Ordering::Relaxed);
                     let elapsed_ms = received_at.elapsed().as_millis() as u64;
                     if let Ok(mut samples) = metrics.order_book_event_to_fanout_latency_ms.lock() {
                         samples.push(elapsed_ms);

@@ -37,15 +37,15 @@
 //! ```
 
 use players::pb::players::v1::{
-    player_service_client::PlayerServiceClient, AuthRequest, GetPlayerStateRequest,
-    UpdatePendingOrdersRequest, ResetTokensRequest, ApplyFixExecutionReportRequest,
-    RecordVisitRequest, UpdateVisitorsRequest, ResetMarketStateRequest, ResetAllTokensRequest,
+    ApplyFixExecutionReportRequest, AuthRequest, GetPlayerStateRequest, RecordVisitRequest,
+    ResetAllTokensRequest, ResetMarketStateRequest, ResetTokensRequest, UpdatePendingOrdersRequest,
+    UpdateVisitorsRequest, player_service_client::PlayerServiceClient,
 };
-use players::players::{PendingOrder, HoldingSummary};
+use players::players::{HoldingSummary, PendingOrder};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::sync::Arc;
 use tonic::transport::{Channel, Endpoint};
 use tracing::error;
 
@@ -60,7 +60,7 @@ pub struct AuthenticationResult {
 
 /// Wrapper around the gRPC PlayerServiceClient with connection pooling.
 /// This allows the backend to communicate with the standalone player-server microservice.
-/// 
+///
 /// Features:
 /// - Connection reuse via shared Channel
 /// - Configurable timeouts and keepalive
@@ -73,7 +73,7 @@ pub struct PlayerClient {
 
 impl PlayerClient {
     /// Create a new PlayerClient with optimized connection settings.
-    /// 
+    ///
     /// Configures:
     /// - Connection timeout: 5 seconds
     /// - Request timeout: 60 seconds
@@ -94,9 +94,12 @@ impl PlayerClient {
         // So HTTP/2 multiplexing carry multiple gRPC calls on the same underlying TCP calls.
         let channel = endpoint.connect().await?;
         let client = PlayerServiceClient::new(channel);
-        
+
         tracing::info!("PlayerClient connected to {}", addr);
-        Ok(Self { client, metrics: None })
+        Ok(Self {
+            client,
+            metrics: None,
+        })
     }
 
     /// Create a new PlayerClient from an existing Channel.
@@ -114,9 +117,13 @@ impl PlayerClient {
 
     fn record_player_api_call(&self, start: Instant, ok: bool) {
         if let Some(metrics) = &self.metrics {
-            metrics.player_api_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics
+                .player_api_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if !ok {
-                metrics.player_api_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .player_api_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let elapsed_ms = start.elapsed().as_millis() as u64;
             if let Ok(mut samples) = metrics.player_api_latency_ms.lock() {
@@ -215,7 +222,10 @@ impl PlayerClient {
     }
 
     /// Get holdings for a player.
-    pub async fn get_holdings_summary(&mut self, username: &str) -> HashMap<String, HoldingSummary> {
+    pub async fn get_holdings_summary(
+        &mut self,
+        username: &str,
+    ) -> HashMap<String, HoldingSummary> {
         match self.get_player_state(username).await {
             Some(state) => state.holdings,
             None => HashMap::new(),
@@ -345,11 +355,15 @@ impl PlayerClient {
     /// Update visitor counts in the player service (for persistence across restarts).
     pub async fn update_visitors(&mut self, active: i32, total: i32) -> Result<(), String> {
         let started = Instant::now();
-        match self.client.update_visitors(UpdateVisitorsRequest {
-            active_count: active,
-            total_count: total,
-            token: String::new(), // No token required for internal backend calls
-        }).await {
+        match self
+            .client
+            .update_visitors(UpdateVisitorsRequest {
+                active_count: active,
+                total_count: total,
+                token: String::new(), // No token required for internal backend calls
+            })
+            .await
+        {
             Ok(_) => {
                 self.record_player_api_call(started, true);
                 Ok(())
@@ -365,9 +379,13 @@ impl PlayerClient {
     /// Reset market state (admin command).
     pub async fn reset_market_state(&mut self) -> (usize, usize) {
         let started = Instant::now();
-        match self.client.reset_market_state(ResetMarketStateRequest {
-            token: String::new(), // Token validation happens in the backend
-        }).await {
+        match self
+            .client
+            .reset_market_state(ResetMarketStateRequest {
+                token: String::new(), // Token validation happens in the backend
+            })
+            .await
+        {
             Ok(response) => {
                 self.record_player_api_call(started, true);
                 let resp = response.into_inner();
@@ -375,7 +393,11 @@ impl PlayerClient {
             }
             Err(e) => {
                 self.record_player_api_call(started, false);
-                tracing::error!("[{}] reset_market_state RPC failed: {}", utils::market_name(), e);
+                tracing::error!(
+                    "[{}] reset_market_state RPC failed: {}",
+                    utils::market_name(),
+                    e
+                );
                 (0, 0)
             }
         }
@@ -384,9 +406,13 @@ impl PlayerClient {
     /// Reset all tokens (admin command).
     pub async fn reset_all_tokens(&mut self) -> usize {
         let started = Instant::now();
-        match self.client.reset_all_tokens(ResetAllTokensRequest {
-            token: String::new(), // Token validation happens in the backend
-        }).await {
+        match self
+            .client
+            .reset_all_tokens(ResetAllTokensRequest {
+                token: String::new(), // Token validation happens in the backend
+            })
+            .await
+        {
             Ok(response) => {
                 self.record_player_api_call(started, true);
                 let resp = response.into_inner();
@@ -394,7 +420,11 @@ impl PlayerClient {
             }
             Err(e) => {
                 self.record_player_api_call(started, false);
-                tracing::error!("[{}] reset_all_tokens RPC failed: {}", utils::market_name(), e);
+                tracing::error!(
+                    "[{}] reset_all_tokens RPC failed: {}",
+                    utils::market_name(),
+                    e
+                );
                 0
             }
         }
@@ -402,10 +432,14 @@ impl PlayerClient {
 
     /// Apply a FIX execution report to update player portfolio.
     /// This is called from the FIX session reader when an execution report is received.
-    pub async fn apply_fix_execution_report(&mut self, username: &str, fix_body: &str) -> Result<(), String> {
+    pub async fn apply_fix_execution_report(
+        &mut self,
+        username: &str,
+        fix_body: &str,
+    ) -> Result<(), String> {
         const MAX_RETRIES: usize = 3;
         let mut attempt = 0;
-        
+
         loop {
             attempt += 1;
             tracing::debug!(
@@ -416,19 +450,23 @@ impl PlayerClient {
                 MAX_RETRIES,
                 fix_body
             );
-            
+
             let request = ApplyFixExecutionReportRequest {
                 username: username.to_string(),
                 fix_body: fix_body.to_string(),
             };
-            
+
             let started = Instant::now();
             match self.client.apply_fix_execution_report(request).await {
                 Ok(response) => {
                     let result = response.into_inner();
                     self.record_player_api_call(started, result.success);
                     if result.success {
-                        tracing::info!("[{}] FIX execution report applied for '{}'", utils::market_name(), username);
+                        tracing::info!(
+                            "[{}] FIX execution report applied for '{}'",
+                            utils::market_name(),
+                            username
+                        );
                         return Ok(());
                     } else {
                         let msg = format!(
@@ -438,8 +476,15 @@ impl PlayerClient {
                             fix_body.len(),
                             fix_body.chars().take(150).collect::<String>()
                         );
-                        tracing::error!("[{}] apply_fix_execution_report failed: {}", utils::market_name(), msg);
-                        return Err(format!("FIX execution report failed: {}", result.error_message));
+                        tracing::error!(
+                            "[{}] apply_fix_execution_report failed: {}",
+                            utils::market_name(),
+                            msg
+                        );
+                        return Err(format!(
+                            "FIX execution report failed: {}",
+                            result.error_message
+                        ));
                     }
                 }
                 Err(e) => {
@@ -453,9 +498,12 @@ impl PlayerClient {
                         attempt,
                         MAX_RETRIES
                     );
-                    
+
                     // Retry on timeout/cancelled errors
-                    if attempt < MAX_RETRIES && (e.to_string().contains("Timeout") || e.to_string().contains("Cancelled")) {
+                    if attempt < MAX_RETRIES
+                        && (e.to_string().contains("Timeout")
+                            || e.to_string().contains("Cancelled"))
+                    {
                         let backoff_ms = 100 * (2_u64.pow((attempt - 1) as u32));
                         tracing::warn!(
                             "[{}] FIX execution report timeout, retrying in {}ms (attempt {}/{})",
@@ -467,8 +515,12 @@ impl PlayerClient {
                         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         continue;
                     }
-                    
-                    tracing::error!("[{}] apply_fix_execution_report error: {}", utils::market_name(), msg);
+
+                    tracing::error!(
+                        "[{}] apply_fix_execution_report error: {}",
+                        utils::market_name(),
+                        msg
+                    );
                     return Err(format!("gRPC call failed: {}", e));
                 }
             }

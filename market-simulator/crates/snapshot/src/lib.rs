@@ -1,3 +1,3 @@
-pub mod types;
-pub mod engine;
 pub mod encode;
+pub mod engine;
+pub mod types;

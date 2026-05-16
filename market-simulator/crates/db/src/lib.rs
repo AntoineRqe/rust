@@ -7,8 +7,8 @@ use std::future::Future;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, atomic::AtomicBool};
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 use types::macros::{EntityId, OrderId, SymbolId};
 use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trade};
 use url::Url;
@@ -175,7 +175,7 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     } else {
         database_url.to_string()
     };
-    
+
     tracing::info!(
         "[{}] Connecting to database at {}",
         market_name(),

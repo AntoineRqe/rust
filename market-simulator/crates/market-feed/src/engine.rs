@@ -1,52 +1,61 @@
-use spsc::spsc_lock_free::{Consumer, Producer};
-use types::{
-    OrderEvent,
-    OrderResult,
-};
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use crate::types::{
-    AddOrder,
-    DeleteOrder,
-    ModifyOrder,
-    MarketDataHeader,
-    MessageType,
-    MarketEvent,
-    Trade,
+    AddOrder, DeleteOrder, MarketDataHeader, MarketEvent, MessageType, ModifyOrder, Trade,
 };
+use spsc::spsc_lock_free::{Consumer, Producer};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use types::{OrderEvent, OrderResult};
 
+use types::multicast::SourceSocket;
 use utils::market_name;
-use types::multicast::{SourceSocket};
 
-pub fn kill_market_feed_engine<const N: usize>(ob_to_md_tx: &Producer<(OrderEvent, OrderResult), N>) {
+pub fn kill_market_feed_engine<const N: usize>(
+    ob_to_md_tx: &Producer<(OrderEvent, OrderResult), N>,
+) {
     ob_to_md_tx
         .push((OrderEvent::default(), OrderResult::default()))
         .unwrap();
 }
 
-
 pub struct MarketDataFeedEngine<'a, const N: usize> {
     fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
     shutdown: Arc<AtomicBool>,
-    seq_num: u64, // Sequence number for market data feed events
+    seq_num: u64,         // Sequence number for market data feed events
     source: SourceSocket, // Multicast configuration and socket management
 }
 
-impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
-    pub fn new(fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
-               shutdown: Arc<AtomicBool>,
-               ip: String,
-               port: u16) -> Result<Self, std::io::Error> {
-
-        Ok(Self { fifo_in, shutdown, seq_num: 0, source: SourceSocket::new(ip, port, market_name())? })
+impl<'a, const N: usize> MarketDataFeedEngine<'a, N> {
+    pub fn new(
+        fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
+        shutdown: Arc<AtomicBool>,
+        ip: String,
+        port: u16,
+    ) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            fifo_in,
+            shutdown,
+            seq_num: 0,
+            source: SourceSocket::new(ip, port, market_name())?,
+        })
     }
 
-    fn build_add_order_event(&self, order_event: &OrderEvent, order_result: &OrderResult) -> AddOrder {
+    fn build_add_order_event(
+        &self,
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> AddOrder {
         let mut add_order = AddOrder::from_order_event(order_event);
         add_order.order_id = order_result.internal_order_id;
         add_order
     }
 
-    fn build_modify_order_event(&self, order_event: &OrderEvent, order_result: &OrderResult) -> ModifyOrder {
+    fn build_modify_order_event(
+        &self,
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> ModifyOrder {
         let mut modify_order = ModifyOrder::from_order_event(order_event);
         modify_order.order_id = order_result.internal_order_id;
         modify_order
@@ -63,13 +72,21 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         add_order
     }
 
-    fn build_delete_order_event(&self, order_event: &OrderEvent, order_result: &OrderResult) -> DeleteOrder {
+    fn build_delete_order_event(
+        &self,
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> DeleteOrder {
         let mut delete_order = DeleteOrder::from_order_event(order_event);
         delete_order.order_id = order_result.internal_order_id;
         delete_order
     }
 
-    fn build_trade_events(&self, order_event: &OrderEvent, order_result: &OrderResult) -> Vec<Trade> {
+    fn build_trade_events(
+        &self,
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> Vec<Trade> {
         order_result
             .trades
             .iter()
@@ -87,14 +104,21 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         header.length = 24 + payload_len;
         header.seq_num = self.seq_num;
         self.seq_num += 1;
-        header.timestamp_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+        header.timestamp_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
         header.msg_type = msg_type as u8;
         header.symbol = order_event.symbol;
 
         header
     }
 
-    fn build_market_data_feed_events(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<Vec<MarketEvent>> {
+    fn build_market_data_feed_events(
+        &mut self,
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> Option<Vec<MarketEvent>> {
         if order_event.order_type == types::OrderType::CancelOrder {
             if order_result.status != types::OrderStatus::Cancelled {
                 return None; // Cancel was rejected, no market data event
@@ -108,7 +132,9 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
             return None;
         }
 
-        if order_result.status == types::OrderStatus::PartiallyFilled && order_result.trades.len() == 0 {
+        if order_result.status == types::OrderStatus::PartiallyFilled
+            && order_result.trades.len() == 0
+        {
             let modify_order = self.build_modify_order_event(order_event, order_result);
             let header = self.build_header(order_event, MessageType::ModifyOrder, 68);
             return Some(vec![MarketEvent::Modify(header, modify_order)]);
@@ -130,7 +156,8 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         if order_event.order_type == types::OrderType::LimitOrder
             && remaining_qty > types::FixedPointArithmetic::ZERO
         {
-            let add_order = self.build_add_order_event_with_quantity(order_event, remaining_qty, order_result);
+            let add_order =
+                self.build_add_order_event_with_quantity(order_event, remaining_qty, order_result);
             let header = self.build_header(order_event, MessageType::AddOrder, 69);
             events.push(MarketEvent::Add(header, add_order));
         }
@@ -144,7 +171,11 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         Some(events)
     }
 
-    pub fn build_market_data_feed_from_order(&mut self, order_event: &OrderEvent, order_result: &OrderResult) -> Option<MarketEvent> {
+    pub fn build_market_data_feed_from_order(
+        &mut self,
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> Option<MarketEvent> {
         if let Some(events) = self.build_market_data_feed_events(order_event, order_result) {
             events.into_iter().next().or_else(|| {
                 let add_order = self.build_add_order_event(order_event, order_result);
@@ -156,16 +187,29 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
         }
     }
 
-
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             if let Some((order_event, order_result)) = self.fifo_in.pop() {
-                if let Some(market_data_feed_events) = self.build_market_data_feed_events(&order_event, &order_result) {
+                if let Some(market_data_feed_events) =
+                    self.build_market_data_feed_events(&order_event, &order_result)
+                {
                     for market_data_feed_event in market_data_feed_events {
                         let bytes = market_data_feed_event.to_bytes();
-                        tracing::info!("[{}] Broadcasting market data feed event: header={}, event={}", market_name(), market_data_feed_event, market_data_feed_event);
-                        if let Err(e) = self.source.socket.send_to(&bytes, &self.source.source.address) {
-                            tracing::error!("[{}] Failed to send market data feed event: {e:#}", market_name());
+                        tracing::info!(
+                            "[{}] Broadcasting market data feed event: header={}, event={}",
+                            market_name(),
+                            market_data_feed_event,
+                            market_data_feed_event
+                        );
+                        if let Err(e) = self
+                            .source
+                            .socket
+                            .send_to(&bytes, &self.source.source.address)
+                        {
+                            tracing::error!(
+                                "[{}] Failed to send market data feed event: {e:#}",
+                                market_name()
+                            );
                         }
                     }
                 }
@@ -183,18 +227,15 @@ impl <'a, const N: usize> MarketDataFeedEngine<'a, N> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use types::macros::{
-        EntityId, OrderId, SymbolId
-    };
+    use types::macros::{EntityId, OrderId, SymbolId};
 
     use super::*;
-    use std::net::{Ipv4Addr};
+    use std::net::Ipv4Addr;
     use std::sync::atomic::AtomicU16;
-    use std::{thread};
     use std::sync::{Mutex, OnceLock};
+    use std::thread;
 
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18097);
     static UDP_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
@@ -219,7 +260,10 @@ mod tests {
         .unwrap()
     }
 
-    fn retrieve_market_data_feed_events(port: u16, multicast_ip: &str) -> Result<(MarketDataHeader, MarketEvent), Box<dyn std::error::Error>> {
+    fn retrieve_market_data_feed_events(
+        port: u16,
+        multicast_ip: &str,
+    ) -> Result<(MarketDataHeader, MarketEvent), Box<dyn std::error::Error>> {
         let socket = SourceSocket::create_multicast_receiver_socket(port)?;
         socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
 
@@ -234,32 +278,33 @@ mod tests {
         let market_data_feed_event: (MarketDataHeader, MarketEvent) = loop {
             let (_, _) = socket.recv_from(&mut buf)?;
 
-            let header = MarketDataHeader::from_bytes(&buf[0..24]).ok_or("Failed to deserialize MarketDataHeader")?;
+            let header = MarketDataHeader::from_bytes(&buf[0..24])
+                .ok_or("Failed to deserialize MarketDataHeader")?;
 
             let header_size = 24;
             let body_bytes = &buf[header_size..];
 
             let event = match header.msg_type {
                 x if x == MessageType::AddOrder as u8 => {
-                    let add_order = AddOrder::from_bytes(body_bytes)
-                        .ok_or("Failed to deserialize AddOrder")?;
+                    let add_order =
+                        AddOrder::from_bytes(body_bytes).ok_or("Failed to deserialize AddOrder")?;
                     MarketEvent::Add(header, add_order)
-                },
+                }
                 x if x == MessageType::ModifyOrder as u8 => {
                     let modify_order = ModifyOrder::from_bytes(body_bytes)
                         .ok_or("Failed to deserialize ModifyOrder")?;
                     MarketEvent::Modify(header, modify_order)
-                },
+                }
                 x if x == MessageType::DeleteOrder as u8 => {
                     let delete_order = DeleteOrder::from_bytes(body_bytes)
                         .ok_or("Failed to deserialize DeleteOrder")?;
                     MarketEvent::Delete(header, delete_order)
-                },
+                }
                 x if x == MessageType::Trade as u8 => {
-                    let trade = Trade::from_bytes(body_bytes)
-                        .ok_or("Failed to deserialize Trade")?;
+                    let trade =
+                        Trade::from_bytes(body_bytes).ok_or("Failed to deserialize Trade")?;
                     MarketEvent::Trade(header, trade)
-                },
+                }
                 _ => {
                     return Err(format!("Unsupported message type: {}", header.msg_type).into());
                 }
@@ -271,7 +316,10 @@ mod tests {
         Ok(market_data_feed_event)
     }
 
-    fn run_engine_once_and_receive(order_event: OrderEvent, order_result: OrderResult) -> (MarketDataHeader, MarketEvent) {
+    fn run_engine_once_and_receive(
+        order_event: OrderEvent,
+        order_result: OrderResult,
+    ) -> (MarketDataHeader, MarketEvent) {
         let _udp_test_guard = udp_test_mutex().lock().unwrap();
         let mut rb_in = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 16>::new();
 
@@ -293,10 +341,11 @@ mod tests {
             let engine_handle = s.spawn(move || {
                 if let Err(e) = engine.run() {
                     panic!("Market data feed engine error: {e:#}");
-                } 
+                }
             });
 
-            let recv_handle = s.spawn(move || retrieve_market_data_feed_events(port, &multicast_ip).unwrap());
+            let recv_handle =
+                s.spawn(move || retrieve_market_data_feed_events(port, &multicast_ip).unwrap());
 
             std::thread::sleep(std::time::Duration::from_millis(100));
             producer_in.push((order_event, order_result)).unwrap();
@@ -326,7 +375,14 @@ mod tests {
         let timestamp_ns = header.timestamp_ns;
         let symbol = header.symbol;
 
-        assert_eq!(length, 24 + payload_len, "Header length mismatch: expected {} + 24 = {}, got {}", payload_len, 24 + payload_len, length);
+        assert_eq!(
+            length,
+            24 + payload_len,
+            "Header length mismatch: expected {} + 24 = {}, got {}",
+            payload_len,
+            24 + payload_len,
+            length
+        );
         assert_eq!(header_msg_type, msg_type as u8);
         assert_eq!(version, 1);
         assert_eq!(seq_num, expected_seq_num);
@@ -366,7 +422,9 @@ mod tests {
             ..OrderResult::default()
         };
 
-        let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
+        let event = engine
+            .build_market_data_feed_from_order(&order_event, &order_result)
+            .unwrap();
         match event {
             MarketEvent::Modify(header, modify_order) => {
                 assert_header_fields(&header, &order_event, MessageType::ModifyOrder, 68, 0);
@@ -404,7 +462,9 @@ mod tests {
             ..OrderResult::default()
         };
 
-        let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
+        let event = engine
+            .build_market_data_feed_from_order(&order_event, &order_result)
+            .unwrap();
 
         match event {
             MarketEvent::Delete(header, delete_order) => {
@@ -451,7 +511,9 @@ mod tests {
             ..Default::default()
         };
 
-        let event = engine.build_market_data_feed_from_order(&order_event, &order_result).unwrap();
+        let event = engine
+            .build_market_data_feed_from_order(&order_event, &order_result)
+            .unwrap();
         match event {
             MarketEvent::Trade(header, trade) => {
                 assert_header_fields(&header, &order_event, MessageType::Trade, 89, 0);
@@ -503,7 +565,7 @@ mod tests {
                 assert_eq!(side, 1);
                 assert_eq!(price, order_event.price);
                 assert_eq!(quantity, order_event.quantity);
-            },
+            }
             _ => panic!("Expected AddOrder event"),
         }
     }

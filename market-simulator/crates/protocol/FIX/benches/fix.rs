@@ -1,7 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use std::time::Duration;
-use fix::parser::{FixParser};
+use criterion::{Criterion, criterion_group, criterion_main};
+use fix::parser::FixParser;
 use std::sync::Mutex;
+use std::time::Duration;
 
 // Global storage for results, populated during benchmarks
 lazy_static::lazy_static! {
@@ -25,8 +25,12 @@ fn print_summary(results: &[BenchResult]) {
     println!("{}", "─".repeat(105));
 
     for size in sizes {
-        let scalar = results.iter().find(|r| r.name == format!("FIX Scalar {}", size));
-        let simd   = results.iter().find(|r| r.name == format!("FIX SIMDS {}", size));
+        let scalar = results
+            .iter()
+            .find(|r| r.name == format!("FIX Scalar {}", size));
+        let simd = results
+            .iter()
+            .find(|r| r.name == format!("FIX SIMDS {}", size));
 
         match (scalar, simd) {
             (Some(s), Some(v)) => {
@@ -100,13 +104,11 @@ pub const FIX_128K: [u8; 131072] = build_fix_message::<131072>();
 
 /// Benchmark for the FIX message parser, measuring the latency of parsing a simple FIX message containing three fields (8, 9, and 35). The benchmark uses a single producer thread to push timestamps into a ring buffer and a single consumer thread to pop timestamps and record the latency in a histogram. The producer and consumer threads are pinned to specific CPU cores to minimize interference and ensure accurate latency measurements.
 fn benchmark_fix_scalar(data: &[u8]) {
-    
-        let mut parser = FixParser::new(data);
+    let mut parser = FixParser::new(data);
 
-        while let Some(field) = parser.next_field_scalar() {
-            std::hint::black_box(field);
-        }
-
+    while let Some(field) = parser.next_field_scalar() {
+        std::hint::black_box(field);
+    }
 }
 
 /// Benchmark for the FIX message parser, measuring the latency of parsing a simple FIX message containing three fields (8, 9, and 35). The benchmark uses a single producer thread to push timestamps into a ring buffer and a single consumer thread to pop timestamps and record the latency in a histogram. The producer and consumer threads are pinned to specific CPU cores to minimize interference and ensure accurate latency measurements.
@@ -118,26 +120,24 @@ fn benchmark_fix_simd(data: &[u8]) {
 }
 
 fn bench_fix_scalar(c: &mut Criterion) {
-
     let sizes: &[(&str, &dyn Fn())] = &[
-    ("FIX Scalar 1k",   &|| benchmark_fix_scalar(&FIX_1K)),
-    ("FIX SIMDS 1k",    &|| benchmark_fix_simd(&FIX_1K)),
-    ("FIX Scalar 4k",   &|| benchmark_fix_scalar(&FIX_4K)),
-    ("FIX SIMDS 4k",    &|| benchmark_fix_simd(&FIX_4K)),
-    ("FIX Scalar 16k",  &|| benchmark_fix_scalar(&FIX_16K)),
-    ("FIX SIMDS 16k",   &|| benchmark_fix_simd(&FIX_16K)),
-    ("FIX Scalar 32k",  &|| benchmark_fix_scalar(&FIX_32K)),
-    ("FIX SIMDS 32k",   &|| benchmark_fix_simd(&FIX_32K)),
-    ("FIX Scalar 64k",  &|| benchmark_fix_scalar(&FIX_64K)),
-    ("FIX SIMDS 64k",   &|| benchmark_fix_simd(&FIX_64K)),
-    ("FIX Scalar 128k", &|| benchmark_fix_scalar(&FIX_128K)),
-    ("FIX SIMDS 128k",  &|| benchmark_fix_simd(&FIX_128K)),
-];
+        ("FIX Scalar 1k", &|| benchmark_fix_scalar(&FIX_1K)),
+        ("FIX SIMDS 1k", &|| benchmark_fix_simd(&FIX_1K)),
+        ("FIX Scalar 4k", &|| benchmark_fix_scalar(&FIX_4K)),
+        ("FIX SIMDS 4k", &|| benchmark_fix_simd(&FIX_4K)),
+        ("FIX Scalar 16k", &|| benchmark_fix_scalar(&FIX_16K)),
+        ("FIX SIMDS 16k", &|| benchmark_fix_simd(&FIX_16K)),
+        ("FIX Scalar 32k", &|| benchmark_fix_scalar(&FIX_32K)),
+        ("FIX SIMDS 32k", &|| benchmark_fix_simd(&FIX_32K)),
+        ("FIX Scalar 64k", &|| benchmark_fix_scalar(&FIX_64K)),
+        ("FIX SIMDS 64k", &|| benchmark_fix_simd(&FIX_64K)),
+        ("FIX Scalar 128k", &|| benchmark_fix_scalar(&FIX_128K)),
+        ("FIX SIMDS 128k", &|| benchmark_fix_simd(&FIX_128K)),
+    ];
 
     for (name, func) in sizes {
-        let mut histogram =
-            hdrhistogram::Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
-                .expect("Failed to create histogram");
+        let mut histogram = hdrhistogram::Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
+            .expect("Failed to create histogram");
         histogram.auto(true);
 
         c.bench_function(name, |b| {

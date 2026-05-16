@@ -1,7 +1,7 @@
+use crate::arithmetic::FixedPointArithmetic;
+use crate::macros::OrderId;
 use std::ops::Index;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::arithmetic::FixedPointArithmetic;
-use crate::macros::{OrderId};
 
 /// Represents a trade that occurs when an order is matched in the order book.
 /// Arguments:
@@ -50,7 +50,13 @@ impl std::fmt::Display for Trade {
             \norder_qty: {}
             \nleaves_qty: {}
             \ntimestamp: {}",
-            self.price.raw(), self.quantity, self.id, self.cl_ord_id, self.order_qty, self.leaves_qty, self.timestamp
+            self.price.raw(),
+            self.quantity,
+            self.id,
+            self.cl_ord_id,
+            self.order_qty,
+            self.leaves_qty,
+            self.timestamp
         )
     }
 }
@@ -59,7 +65,7 @@ impl std::fmt::Display for Trade {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trades<const N: usize> {
     pub trades: [Trade; N], // Fixed-size array for trades, adjust size as needed
-    count: usize, // Number of valid trades in the array
+    count: usize,           // Number of valid trades in the array
 }
 
 impl<const N: usize> Default for Trades<N> {
@@ -87,7 +93,6 @@ impl<const N: usize> Trades<N> {
         Self::default()
     }
 
-
     pub fn add_trade(&mut self, trade: Trade) -> Result<(), &'static str> {
         if self.count < self.trades.len() {
             self.trades[self.count] = trade;
@@ -107,7 +112,9 @@ impl<const N: usize> Trades<N> {
     }
 
     pub fn quantity_sum(&self) -> FixedPointArithmetic {
-        self.iter().fold(FixedPointArithmetic::ZERO, |acc, trade| acc + trade.quantity)
+        self.iter().fold(FixedPointArithmetic::ZERO, |acc, trade| {
+            acc + trade.quantity
+        })
     }
 
     pub fn avg_price(&self) -> FixedPointArithmetic {
@@ -120,7 +127,9 @@ impl<const N: usize> Trades<N> {
             return FixedPointArithmetic::ZERO;
         }
 
-        let total_value = self.iter().fold(FixedPointArithmetic::ZERO, |acc, trade| acc + (trade.price * trade.quantity));
+        let total_value = self.iter().fold(FixedPointArithmetic::ZERO, |acc, trade| {
+            acc + (trade.price * trade.quantity)
+        });
         total_value / total_quantity
     }
 }

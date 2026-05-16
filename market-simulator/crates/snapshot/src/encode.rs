@@ -1,10 +1,9 @@
-
 use crate::types::Snapshot;
-use types::OrderEvent;
 use types::FixedPointArithmetic;
-use types::macros::{EntityId, OrderId, SymbolId};
-use types::Side;
+use types::OrderEvent;
 use types::OrderType;
+use types::Side;
+use types::macros::{EntityId, OrderId, SymbolId};
 
 // Encoding format for snapshots
 //
@@ -69,12 +68,10 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
     snapshot.id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64;
     offset += 4;
 
-
     let bids_len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
     offset += 4;
 
     for _ in 0..bids_len {
-
         let price = FixedPointArithmetic::from_fix_bytes(&bytes[offset..offset + 20]).unwrap();
         offset += 20;
         let quantity = FixedPointArithmetic::from_fix_bytes(&bytes[offset..offset + 20]).unwrap();
@@ -104,7 +101,7 @@ pub fn decode_snapshot(bytes: &[u8]) -> Snapshot {
         offset += 20;
         let quantity = FixedPointArithmetic::from_fix_bytes(&bytes[offset..offset + 20]).unwrap();
         offset += 20;
-        
+
         let _ = snapshot.order_book.add_ask(OrderEvent {
             price,
             quantity,
@@ -129,8 +126,8 @@ mod tests {
 
     use super::*;
     use crate::types::OrderBookSnapshot;
-    use types::{OrderEvent, FixedPointArithmetic, Side, OrderType};
     use types::macros::{EntityId, OrderId, SymbolId};
+    use types::{FixedPointArithmetic, OrderEvent, OrderType, Side};
 
     #[test]
     fn test_encode_snapshot() {
@@ -179,9 +176,21 @@ mod tests {
         assert_eq!(decoded.id, snapshot.id);
         assert_eq!(decoded.order_book.bids_len, snapshot.order_book.bids_len);
         assert_eq!(decoded.order_book.asks_len, snapshot.order_book.asks_len);
-        assert_eq!(decoded.order_book.bids[0].price, snapshot.order_book.bids[0].price);
-        assert_eq!(decoded.order_book.bids[0].quantity, snapshot.order_book.bids[0].quantity);
-        assert_eq!(decoded.order_book.asks[0].price, snapshot.order_book.asks[0].price);
-        assert_eq!(decoded.order_book.asks[0].quantity, snapshot.order_book.asks[0].quantity);
+        assert_eq!(
+            decoded.order_book.bids[0].price,
+            snapshot.order_book.bids[0].price
+        );
+        assert_eq!(
+            decoded.order_book.bids[0].quantity,
+            snapshot.order_book.bids[0].quantity
+        );
+        assert_eq!(
+            decoded.order_book.asks[0].price,
+            snapshot.order_book.asks[0].price
+        );
+        assert_eq!(
+            decoded.order_book.asks[0].quantity,
+            snapshot.order_book.asks[0].quantity
+        );
     }
 }

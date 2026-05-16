@@ -1,14 +1,14 @@
+pub mod arithmetic;
+pub mod consts;
 pub mod macros;
+pub mod metrics;
 pub mod multicast;
 pub mod order;
-pub mod arithmetic;
 pub mod trade;
-pub mod consts;
-pub mod metrics;
 
-pub use macros::{EntityId, OrderId, SymbolId};
-pub use order::*;
-pub use trade::{Trade, Trades};
 pub use arithmetic::FixedPointArithmetic;
 pub use consts::*;
+pub use macros::{EntityId, OrderId, SymbolId};
 pub use metrics::MarketMetrics;
+pub use order::*;
+pub use trade::{Trade, Trades};

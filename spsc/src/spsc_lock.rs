@@ -1,5 +1,5 @@
-use std::sync::Mutex;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 pub struct SpscLock<T, const N: usize> {
     buffer: Mutex<VecDeque<T>>,
@@ -32,17 +32,16 @@ impl<T, const N: usize> SpscLock<T, N> {
 mod tests {
     use super::*;
 
-        #[test]
+    #[test]
     fn spsc_threads() {
-        use std::thread;
         use std::sync::Arc;
+        use std::thread;
 
         let rb = Arc::new(SpscLock::<usize, 1024>::new());
         let rb_producer = Arc::clone(&rb);
         let rb_consumer = Arc::clone(&rb);
 
         thread::scope(|s| {
-
             let prod = s.spawn(move || {
                 for i in 0..1_000_000 {
                     loop {

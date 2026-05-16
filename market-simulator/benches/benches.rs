@@ -1,23 +1,23 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use crossbeam::channel;
-use order_book::engine::OrderBookEngine;
-use market_feed::engine::{kill_market_feed_engine, MarketDataFeedEngine};
-use std::net::UdpSocket;
-use std::sync::atomic::AtomicBool;
-use std::{thread};
-use std::time::Instant;
 use hdrhistogram::Histogram;
+use market_feed::engine::{MarketDataFeedEngine, kill_market_feed_engine};
+use order_book::engine::OrderBookEngine;
+use std::net::UdpSocket;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::thread;
+use std::time::Instant;
 
 use core_affinity::CoreId;
-use std::time::Duration;
-use std::sync::Mutex;
-use execution_report::{ExecutionReportEngine};
-use spsc::spsc_lock_free::RingBuffer;
-use types::{OrderEvent, OrderResult, Trades};
-use types::macros::{EntityId, OrderId, SymbolId};
+use execution_report::ExecutionReportEngine;
 use fix::engine::{FixEngine, FixRawMsg, kill_fix_inbound_engine, kill_fix_outbound_engine};
+use spsc::spsc_lock_free::RingBuffer;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use types::macros::{EntityId, OrderId, SymbolId};
+use types::{OrderEvent, OrderResult, Trades};
 
 const PRODUCER_CORE_OFFSET: usize = 0; // Offset for producer core
 const CONSUMER_CORE_OFFSET: usize = 2; // Offset for consumer core
@@ -69,7 +69,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
     if cores.len() < 2 {
         panic!("Need at least 2 cores available.");
     }
-         
+
     let start = Instant::now();
 
     let mut rb_rx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new(); // Size of the ring buffer
@@ -77,7 +77,6 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
     thread::scope(|s| {
-        
         let (er_inbound_tx, er_rx) = rb_rx.split();
         let (er_tx, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
@@ -100,34 +99,33 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
             core_affinity::set_for_current(producer_core);
 
             let mut order_event = types::OrderEvent {
-                        order_type: types::OrderType::LimitOrder,
-                        cl_ord_id: OrderId::from_ascii("CLORD12345"),
-                        orig_cl_ord_id: None,
-                        side: types::Side::Buy,
-                        price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
-                        quantity: types::FixedPointArithmetic(1_000_000),
-                        sender_id: EntityId::from_ascii("SENDER"),
-                        target_id: EntityId::from_ascii("TARGET"),
-                        symbol: SymbolId::from_ascii("TEST"),
-                        ..Default::default() // Current timestamp in milliseconds since epoch
-                    };
+                order_type: types::OrderType::LimitOrder,
+                cl_ord_id: OrderId::from_ascii("CLORD12345"),
+                orig_cl_ord_id: None,
+                side: types::Side::Buy,
+                price: types::FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
+                quantity: types::FixedPointArithmetic(1_000_000),
+                sender_id: EntityId::from_ascii("SENDER"),
+                target_id: EntityId::from_ascii("TARGET"),
+                symbol: SymbolId::from_ascii("TEST"),
+                ..Default::default() // Current timestamp in milliseconds since epoch
+            };
 
             let order_result = types::OrderResult {
-                    internal_order_id: 0,
-                    trades: Trades::<4>::default(),
-                    status: types::OrderStatus::New,
-                    ..Default::default() // Current timestamp in milliseconds since epoch
+                internal_order_id: 0,
+                trades: Trades::<4>::default(),
+                status: types::OrderStatus::New,
+                ..Default::default() // Current timestamp in milliseconds since epoch
             };
-        
-            for i in 0..iters {
 
+            for i in 0..iters {
                 if i > 0 {
                     // Wait for consumer to be ready before sending next message
                     while !ready_prod.load(std::sync::atomic::Ordering::Acquire) {
                         std::hint::spin_loop();
                     }
                 }
-    
+
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
 
                 let send_ts = Instant::now();
@@ -160,7 +158,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
                     break;
                 }
                 std::hint::spin_loop();
-            };
+            }
 
             let latency = send_ts.elapsed().as_nanos() as u64;
 
@@ -168,17 +166,20 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
-        
 
         // Send a dummy message to unblock the engine if it's waiting
         shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
 
-        er_inbound_tx_clone.push((OrderEvent {
-            ..Default::default()
-        },
-        OrderResult {
-            ..Default::default()
-        })).unwrap();
+        er_inbound_tx_clone
+            .push((
+                OrderEvent {
+                    ..Default::default()
+                },
+                OrderResult {
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
 
         handle.join().unwrap();
     });
@@ -198,7 +199,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
     if cores.len() < 2 {
         panic!("Need at least 2 cores available.");
     }
-         
+
     let start = Instant::now();
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new(); // Size of the ring buffer
@@ -206,7 +207,6 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new(); // Use Instant for homogeneous timing
 
     thread::scope(|s| {
-        
         let (er_inbound_tx, er_rx) = rb_rx.split();
         let (er_tx, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
@@ -218,15 +218,15 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
         let order_book = order_book::book::OrderBook::new("TEST".into());
 
-            let mut engine = OrderBookEngine::new(
-                er_rx,
-                Some(er_tx),
+        let mut engine = OrderBookEngine::new(
+            er_rx,
+            Some(er_tx),
             None,
             None,
             control_rx.1,
             order_book,
             None,
-            Arc::clone(&shutdown)
+            Arc::clone(&shutdown),
         );
 
         let handle = s.spawn(move || {
@@ -235,7 +235,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         });
 
         let ready_prod = Arc::clone(&ready);
-        
+
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
 
@@ -251,16 +251,15 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
                 symbol: SymbolId::from_ascii("TEST"),
                 ..Default::default() // Current timestamp in milliseconds since epoch
             };
-        
-            for i in 0..iters {
 
+            for i in 0..iters {
                 if i > 0 {
                     // Wait for consumer to be ready before sending next message
                     while !ready_prod.load(std::sync::atomic::Ordering::Acquire) {
                         std::hint::spin_loop();
                     }
                 }
-    
+
                 ready_prod.store(false, std::sync::atomic::Ordering::Release);
 
                 let send_ts = Instant::now();
@@ -299,7 +298,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
                     break;
                 }
                 std::hint::spin_loop();
-            };
+            }
 
             let latency = send_ts.elapsed().as_nanos() as u64;
 
@@ -308,14 +307,15 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
 
-
         // Send a dummy message to unblock the engine if it's waiting
         shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
-        
-        er_inbound_tx_clone.push(OrderEvent {
-            sender_id: EntityId::from_ascii(""),
-            ..Default::default()
-        }).unwrap();
+
+        er_inbound_tx_clone
+            .push(OrderEvent {
+                sender_id: EntityId::from_ascii(""),
+                ..Default::default()
+            })
+            .unwrap();
 
         handle.join().unwrap();
     });
@@ -456,19 +456,18 @@ fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> 
 
     let cores = get_cores();
     let iters = (iters / 10).max(100); // Reduce iterations for FIX benchmark, ensure at least 100
-    
+
     if cores.len() < 2 {
         panic!("Need at least 2 cores available.");
     }
-         
+
     let start = Instant::now();
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
     let mut rb_tx = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
- 
+
     thread::scope(|s| {
-        
         let (fix_inbound_tx, fix_inbound_rx) = rb_rx.split();
         let (_, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
@@ -496,7 +495,7 @@ fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> 
         });
 
         let ready_prod = Arc::clone(&ready);
-        
+
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
 
@@ -544,13 +543,12 @@ fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> 
             ready.store(true, std::sync::atomic::Ordering::Release);
         }
 
-
         let dummy_msg = FixRawMsg {
             len: 0,
             data: [0u8; RB_SIZE],
             resp_queue: None,
         };
-    
+
         shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
         net_to_fix_tx_clone.send(dummy_msg).unwrap(); // Send a dummy message to unblock the engine if it's waiting
 
@@ -613,7 +611,9 @@ fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) ->
         });
 
         let outbound_handle = s.spawn(move || {
-            core_affinity::set_for_current(core_affinity::CoreId { id: (engine_core.id + 1) % get_cores().len() });
+            core_affinity::set_for_current(core_affinity::CoreId {
+                id: (engine_core.id + 1) % get_cores().len(),
+            });
             outbound_engine.run();
         });
 
@@ -661,7 +661,9 @@ fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) ->
                     std::hint::spin_loop();
                 }
 
-                while let Err(_) = er_to_fix_tx.push((EntityId::from_ascii("SENDER"), response_msg.clone())) {
+                while let Err(_) =
+                    er_to_fix_tx.push((EntityId::from_ascii("SENDER"), response_msg.clone()))
+                {
                     std::hint::spin_loop();
                 }
             }
@@ -714,17 +716,16 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
     let net_to_fix_rx = Arc::new(net_to_fix_rx);
     let net_to_fix_tx = Arc::new(net_to_fix_tx);
     let net_to_fix_tx_clone = Arc::clone(&net_to_fix_tx);
-    let mut fix_to_ob    = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut ob_to_er     = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
+    let mut fix_to_ob = RingBuffer::<OrderEvent, RB_SIZE>::new();
+    let mut ob_to_er = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
 
     // outbound: execution report → fix engine → network
-    let mut er_to_fix     = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
+    let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
     let (response_tx, mut response_rx) = mpsc::channel::<FixRawMsg<RB_SIZE>>(1024); // Channel for receiving responses from the FIX engine, if needed for future tests
 
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
     thread::scope(|s| {
-    
         let shutdown = Arc::clone(&shutdown);
         let (fix_tx, ob_rx) = fix_to_ob.split();
         let (ob_tx, er_rx) = ob_to_er.split();
@@ -734,7 +735,8 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
 
         // execution report engine thread
-        let mut execution_report_engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+        let mut execution_report_engine =
+            ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
         execution_report_engine.set_metrics(Arc::new(types::MarketMetrics::new()));
         let er_handle = s.spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId { id: 4 });
@@ -745,13 +747,13 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(
             ob_rx,
-             Some(ob_tx),
-             None,
-             None,
-             control_rx.1,
-             order_book,
-             None,
-              Arc::clone(&shutdown)
+            Some(ob_tx),
+            None,
+            None,
+            control_rx.1,
+            order_book,
+            None,
+            Arc::clone(&shutdown),
         );
 
         let ob_handle = s.spawn(move || {
@@ -760,7 +762,12 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         });
 
         // fix engine thread
-        let fix_engine = FixEngine ::new(Arc::clone(&net_to_fix_rx), fix_tx, fix_resp_rx, Arc::clone(&shutdown));
+        let fix_engine = FixEngine::new(
+            Arc::clone(&net_to_fix_rx),
+            fix_tx,
+            fix_resp_rx,
+            Arc::clone(&shutdown),
+        );
         let (mut inbound_engine, mut outbound_engine) = fix_engine.split();
 
         let inbound_fix_handle = s.spawn(move || {
@@ -774,7 +781,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         });
 
         let ready_prod = Arc::clone(&ready);
-        
+
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
 
@@ -817,11 +824,11 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 
         for _ in 0..iters {
             let send_ts = ts_rx.pop().unwrap();
-            
+
             let _ = response_rx
                 .blocking_recv()
                 .expect("Expected FIX response in overall benchmark");
-    
+
             let latency = send_ts.elapsed().as_nanos() as u64;
             histogram.record(latency).unwrap();
 
@@ -830,7 +837,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
 
         // Stop all engines
         shutdown.store(true, std::sync::atomic::Ordering::Relaxed); // Signal the engine to shut down gracefully
-        
+
         std::thread::sleep(std::time::Duration::from_millis(100)); // Give engines a moment to shut down gracefully before forcefully killing the FIX inbound engine thread, which may be blocked on receiving from the channel
         kill_fix_inbound_engine(&net_to_fix_tx);
 
@@ -854,9 +861,8 @@ fn benchmark_latency(c: &mut Criterion) {
     ];
 
     for (name, func) in functions {
-        let mut histogram =
-            hdrhistogram::Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
-                .expect("Failed to create histogram");
+        let mut histogram = hdrhistogram::Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
+            .expect("Failed to create histogram");
         histogram.auto(true);
 
         c.bench_function(name, |b| {
@@ -899,12 +905,7 @@ fn print_summary(results: &[BenchResult]) {
     let base_p50 = base.p50.as_nanos() as f64;
 
     // Dynamic width based on longest name
-    let name_width = results
-        .iter()
-        .map(|r| r.name.len())
-        .max()
-        .unwrap()
-        .max(20);
+    let name_width = results.iter().map(|r| r.name.len()).max().unwrap().max(20);
 
     println!();
     println!("SPSC Queue Latency Summary");
@@ -928,11 +929,7 @@ fn print_summary(results: &[BenchResult]) {
         let p99 = r.p99.as_nanos() as f64;
         let p999 = r.p999.as_nanos() as f64;
 
-        let ratio = if base_p50 > 0.0 {
-            p50 / base_p50
-        } else {
-            1.0
-        };
+        let ratio = if base_p50 > 0.0 { p50 / base_p50 } else { 1.0 };
 
         println!(
             "{:<name_width$} │ {:>10} │ {:>10} │ {:>10} │ {:>9.2}x",

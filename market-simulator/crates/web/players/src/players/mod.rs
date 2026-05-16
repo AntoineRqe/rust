@@ -4,10 +4,10 @@ pub mod token;
 
 pub use auth::{AuthError, hash_password, verify_or_upgrade_password};
 pub use portfolio::{HoldingSummary, PortfolioLot, delete_all_portfolio_lots};
-pub use token::{generate_token, extract_id_suffix};
+pub use token::{extract_id_suffix, generate_token};
 
 use serde::{Deserialize, Serialize};
-use sqlx::{query, query_scalar, PgPool, Row};
+use sqlx::{PgPool, Row, query, query_scalar};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -166,7 +166,7 @@ impl PlayerStore {
         }
     }
 
-     #[cfg(test)]
+    #[cfg(test)]
     fn from_storage_data(storage: StorageData) -> Self {
         PlayerStore {
             inner: Arc::new(Mutex::new(StoreInner {
@@ -426,7 +426,9 @@ impl PlayerStore {
                             persisted = true;
                             break;
                         }
-                        Err(e) if e.to_string().contains("deadlock") && attempt < MAX_RETRIES - 1 => {
+                        Err(e)
+                            if e.to_string().contains("deadlock") && attempt < MAX_RETRIES - 1 =>
+                        {
                             let backoff_ms = 100 * (2_u64.pow(attempt));
                             tracing::warn!(
                                 "[{}] Deadlock persisting player data (attempt {}), retrying in {}ms: {e}",
@@ -747,7 +749,8 @@ mod tests {
         });
 
         // Status 0 (New): Deduct tokens for BUY order
-        let buyer_new = "35=8 │ 39=0 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 44=100 │ 38=5 │ 151=5 │ 17=E-BUY-0";
+        let buyer_new =
+            "35=8 │ 39=0 │ 11=BOBBUY1 │ 54=1 │ 55=AAPL │ 44=100 │ 38=5 │ 151=5 │ 17=E-BUY-0";
         assert!(store.apply_fix_execution_report(buyer_new).is_ok());
 
         // Status 2 (Filled): Execute the fill (tokens already deducted)
@@ -764,10 +767,18 @@ mod tests {
         let bob = store.get_player("bob").expect("bob exists");
 
         // Alice: started with 10000, filled 5 @ 100 (SELL) = +500 → 10500
-        assert!((alice.tokens - 10500.0).abs() < 1e-9, "alice tokens: {}", alice.tokens);
-        
+        assert!(
+            (alice.tokens - 10500.0).abs() < 1e-9,
+            "alice tokens: {}",
+            alice.tokens
+        );
+
         // Bob: started with 10000, deducted 5*100=500 on status=0 → 9500
-        assert!((bob.tokens - 9500.0).abs() < 1e-9, "bob tokens: {}", bob.tokens);
+        assert!(
+            (bob.tokens - 9500.0).abs() < 1e-9,
+            "bob tokens: {}",
+            bob.tokens
+        );
 
         let owners = store.get_order_owners();
         assert!(!owners.contains_key("ALICESELL1"));

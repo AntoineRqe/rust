@@ -9,7 +9,7 @@ pub mod tags {
     pub const MSG_SEQ_NUM: u32 = 34;
     pub const SENDING_TIME: u32 = 52;
     pub const ORDER_ID: u32 = 37; // Unique order ID assigned by the exchange, for the sell side to track orders
-    pub const CL_ORD_ID: u32 = 11;  // Client order ID, unique per order, for the buy side to track their orders
+    pub const CL_ORD_ID: u32 = 11; // Client order ID, unique per order, for the buy side to track their orders
     pub const ORIG_CL_ORD_ID: u32 = 41; // Original client order ID, used in cancel/replace requests to reference the original order
     pub const EXEC_ID: u32 = 17;
     pub const EXEC_TYPE: u32 = 150;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::pb::players::v1::*;
-use crate::players::{PlayerStore, generate_token, extract_id_suffix};
+use crate::players::{PlayerStore, extract_id_suffix, generate_token};
 use utils::market_name;
 
 pub struct PlayerServiceImpl {
@@ -47,7 +47,10 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
             }));
         }
 
-        match self.store.authenticate_or_register(&req.username, &req.password) {
+        match self
+            .store
+            .authenticate_or_register(&req.username, &req.password)
+        {
             Ok(username) => {
                 // Get player record to extract id_suffix from password hash
                 let id_suffix = if let Some(player) = self.store.get_player(&username) {
@@ -55,7 +58,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                 } else {
                     String::new()
                 };
-                
+
                 // Generate a signed JWT bearer token for this session
                 // Note: is_admin is always false for regular players. Admin flag is determined
                 // by username == "admin" check in the backend login handler.
@@ -70,10 +73,10 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                             is_admin: false,
                             error_code: AuthErrorCode::PasswordHashFailed as i32,
                             error_message: format!("Failed to generate token: {}", e),
-                        }))
+                        }));
                     }
                 };
-                
+
                 Ok(Response::new(AuthResponse {
                     success: true,
                     token,
@@ -91,10 +94,18 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                 username: req.username,
                 is_admin: false,
                 error_code: match e {
-                    crate::players::AuthError::UsernameRequired => AuthErrorCode::UsernameRequired as i32,
-                    crate::players::AuthError::PasswordRequired => AuthErrorCode::PasswordRequired as i32,
-                    crate::players::AuthError::UserExistsWrongPassword { .. } => AuthErrorCode::UserExistsWrongPassword as i32,
-                    crate::players::AuthError::PasswordHashFailed => AuthErrorCode::PasswordHashFailed as i32,
+                    crate::players::AuthError::UsernameRequired => {
+                        AuthErrorCode::UsernameRequired as i32
+                    }
+                    crate::players::AuthError::PasswordRequired => {
+                        AuthErrorCode::PasswordRequired as i32
+                    }
+                    crate::players::AuthError::UserExistsWrongPassword { .. } => {
+                        AuthErrorCode::UserExistsWrongPassword as i32
+                    }
+                    crate::players::AuthError::PasswordHashFailed => {
+                        AuthErrorCode::PasswordHashFailed as i32
+                    }
                 },
                 error_message: e.message(),
             })),
@@ -183,24 +194,24 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         request: Request<AddTradeRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
         let req = request.into_inner();
-        
+
         // Side "1" = buy, "2" = sell
         let is_buy = req.side == "1";
         let is_sell = req.side == "2";
-        
+
         if !is_buy && !is_sell {
             return Ok(Response::new(UpdateResult {
                 success: false,
                 error_message: "Invalid side: must be '1' (buy) or '2' (sell)".to_string(),
             }));
         }
-        
+
         // Get the pool for database operations
         let pool = {
             let inner = self.store.inner.lock().unwrap();
             inner.pool.clone()
         };
-        
+
         if let Some(pool) = pool {
             if is_buy {
                 // For buy trades, insert a new portfolio lot
@@ -210,7 +221,9 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                     &req.symbol.to_uppercase(),
                     req.quantity,
                     req.price,
-                ).await {
+                )
+                .await
+                {
                     return Ok(Response::new(UpdateResult {
                         success: false,
                         error_message: format!("Failed to add buy trade: {}", e),
@@ -223,7 +236,9 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                     &req.username,
                     &req.symbol.to_uppercase(),
                     req.quantity,
-                ).await {
+                )
+                .await
+                {
                     return Ok(Response::new(UpdateResult {
                         success: false,
                         error_message: format!("Failed to consume portfolio for sell: {}", e),
@@ -231,7 +246,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                 }
             }
         }
-        
+
         // Update player's token balance: increase for sell, decrease for buy
         let notional = req.quantity * req.price;
         {
@@ -251,17 +266,21 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
                 } else {
                     player.tokens += notional;
                 }
-                
+
                 // Remove the order from pending_orders if it exists
-                if let Some(pos) = player.pending_orders.iter().position(|o| o.cl_ord_id == req.cl_ord_id) {
+                if let Some(pos) = player
+                    .pending_orders
+                    .iter()
+                    .position(|o| o.cl_ord_id == req.cl_ord_id)
+                {
                     player.pending_orders.remove(pos);
                 }
             }
             drop(inner);
         }
-        
+
         self.store.flush();
-        
+
         Ok(Response::new(UpdateResult {
             success: true,
             error_message: String::new(),
@@ -277,7 +296,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
             Ok(()) => (true, String::new()),
             Err(e) => (false, e),
         };
-        
+
         Ok(Response::new(UpdateResult {
             success,
             error_message,
@@ -290,7 +309,7 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
     ) -> Result<Response<RecordVisitResponse>, Status> {
         // Increment the all-time visitor count and return the new total
         let total = self.store.record_visit();
-        
+
         Ok(Response::new(RecordVisitResponse {
             total_visitor_count: total as i64,
         }))
@@ -314,17 +333,14 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         request: Request<ResetSeqRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
         let req = request.into_inner();
-        
+
         // Reset FIX message sequence number for the player
         // Currently, sequence tracking is per-player in the backend's FIX session reader
         // This is a no-op in the player service, but we return success
         // The backend will handle actual sequence reset in its FIX session
-        
-        tracing::debug!(
-            "[Players] ResetSeq requested for user: {}",
-            req.username
-        );
-        
+
+        tracing::debug!("[Players] ResetSeq requested for user: {}", req.username);
+
         Ok(Response::new(UpdateResult {
             success: true,
             error_message: String::new(),
@@ -336,13 +352,13 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         _request: Request<ResetMarketStateRequest>,
     ) -> Result<Response<ResetMarketStateResponse>, Status> {
         let (players_touched, orders_removed) = self.store.reset_market_state();
-        
+
         tracing::info!(
             "[Players] Market reset: {} players touched, {} orders removed",
             players_touched,
             orders_removed
         );
-        
+
         Ok(Response::new(ResetMarketStateResponse {
             players_touched: players_touched as i32,
             orders_removed: orders_removed as i32,
@@ -354,12 +370,12 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         _request: Request<ResetAllTokensRequest>,
     ) -> Result<Response<ResetAllTokensResponse>, Status> {
         let players_reset = self.store.reset_all_tokens();
-        
+
         tracing::info!(
             "[Players] Reset all tokens: {} players updated",
             players_reset
         );
-        
+
         Ok(Response::new(ResetAllTokensResponse {
             players_reset: players_reset as i32,
         }))
@@ -370,10 +386,10 @@ impl player_service_server::PlayerService for PlayerServiceImpl {
         request: Request<UpdateVisitorsRequest>,
     ) -> Result<Response<UpdateResult>, Status> {
         let req = request.into_inner();
-        
+
         // Update the total visitor count (active_count is managed by the backend)
         self.store.update_visitor_count(req.total_count);
-        
+
         Ok(Response::new(UpdateResult {
             success: true,
             error_message: String::new(),

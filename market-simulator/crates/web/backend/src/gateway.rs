@@ -1,16 +1,15 @@
 use serde::Deserialize;
-use std::time::Duration;
 use std::net::SocketAddr;
+use std::time::Duration;
 
-use axum::{
-    Router,
-    routing::{get, post},
-    extract::State,
-    response::{Html, IntoResponse},
-    http::{HeaderMap, StatusCode, header},
-    Json,
-};
 use crate::auth::MarketInfo;
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse},
+    routing::{get, post},
+};
 
 #[derive(Clone)]
 struct LoginGatewayState {
@@ -18,11 +17,7 @@ struct LoginGatewayState {
 }
 
 fn client_market_url(market: &MarketInfo, headers: &HeaderMap) -> String {
-    let configured = market
-        .public_url
-        .as_ref()
-        .map(|s| s.trim())
-        .unwrap_or("");
+    let configured = market.public_url.as_ref().map(|s| s.trim()).unwrap_or("");
     if !configured.is_empty() {
         return configured.to_string();
     }
@@ -65,7 +60,10 @@ pub fn run_login_gateway(markets: Vec<MarketInfo>, ip: &str, port: u16) {
 
 async fn gateway_login_page_handler() -> impl IntoResponse {
     (
-        [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")],
+        [(
+            header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )],
         Html(frontend::LOGIN_HTML),
     )
 }
@@ -93,8 +91,8 @@ async fn gateway_app_handler(
         .map(|market| market.name.as_str())
         .unwrap_or("unknown");
     let login_gateway_url = gateway_public_base_url(&headers);
-    let markets_json = serde_json::to_string(&markets_for_client)
-        .unwrap_or_else(|_| "[]".to_string());
+    let markets_json =
+        serde_json::to_string(&markets_for_client).unwrap_or_else(|_| "[]".to_string());
 
     let html = frontend::APP_HTML
         .replace("{{MARKET_NAME}}", "gateway")
@@ -103,7 +101,10 @@ async fn gateway_app_handler(
         .replace("{{MARKETS_JSON}}", &markets_json);
 
     (
-        [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")],
+        [(
+            header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )],
         Html(html),
     )
         .into_response()
@@ -204,12 +205,14 @@ async fn gateway_login_handler(
 
         if status.is_success() {
             // Extract token from market response
-            let token = payload.get("token")
+            let token = payload
+                .get("token")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            
-            let is_admin = payload.get("is_admin")
+
+            let is_admin = payload
+                .get("is_admin")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
@@ -222,7 +225,7 @@ async fn gateway_login_handler(
                 url: market_url,
                 is_admin,
             });
-            
+
             tracing::info!(
                 "[gateway] User '{}' successfully logged into market '{}'",
                 body.username,
@@ -280,7 +283,11 @@ async fn gateway_login_handler(
 ///
 /// When served over plain HTTP (local dev), the original port-based URL is
 /// preserved so that no reverse-proxy is needed.
-fn adapt_market_url_for_client(internal_url: &str, market_name: &str, headers: &HeaderMap) -> String {
+fn adapt_market_url_for_client(
+    internal_url: &str,
+    market_name: &str,
+    headers: &HeaderMap,
+) -> String {
     let req_host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
@@ -295,10 +302,7 @@ fn adapt_market_url_for_client(internal_url: &str, market_name: &str, headers: &
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_else(|| {
-            if host_lower == "localhost"
-                || host_lower == "127.0.0.1"
-                || host_lower == "::1"
-            {
+            if host_lower == "localhost" || host_lower == "127.0.0.1" || host_lower == "::1" {
                 "http".to_string()
             } else {
                 // In production behind TLS terminators, some proxy chains may
@@ -321,12 +325,12 @@ fn adapt_market_url_for_client(internal_url: &str, market_name: &str, headers: &
         Ok(uri) => uri,
         Err(_) => return internal_url.to_string(),
     };
-    let internal_port = internal_uri.port_u16().unwrap_or_else(|| {
-        match internal_uri.scheme() {
+    let internal_port = internal_uri
+        .port_u16()
+        .unwrap_or_else(|| match internal_uri.scheme() {
             Some(scheme) if scheme.as_str() == "https" => 443,
             _ => 80,
-        }
-    });
+        });
     format!("http://{}:{}", clean_host, internal_port)
 }
 
@@ -369,10 +373,7 @@ fn gateway_public_base_url(headers: &HeaderMap) -> String {
         .map(|p| p.to_ascii_lowercase())
         .filter(|p| p == "http" || p == "https")
         .unwrap_or_else(|| {
-            if host_lower == "localhost"
-                || host_lower == "127.0.0.1"
-                || host_lower == "::1"
-            {
+            if host_lower == "localhost" || host_lower == "127.0.0.1" || host_lower == "::1" {
                 "http".to_string()
             } else {
                 "https".to_string()

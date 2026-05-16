@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{query, PgPool, Row};
+use sqlx::{PgPool, Row, query};
 use std::collections::HashMap;
 use utils::market_name;
 
-use super::{PlayerStore, block_on_storage, parse_fix_fields, parse_f64};
+use super::{PlayerStore, block_on_storage, parse_f64, parse_fix_fields};
 
 /// Summary of a player's holdings in a symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +69,13 @@ impl PlayerStore {
                     return None;
                 }
                 let avg_price = total_cost.get(&symbol).copied().unwrap_or(0.0) / quantity;
-                Some((symbol, HoldingSummary { quantity, avg_price }))
+                Some((
+                    symbol,
+                    HoldingSummary {
+                        quantity,
+                        avg_price,
+                    },
+                ))
             })
             .collect();
 
@@ -85,11 +91,7 @@ impl PlayerStore {
 
     /// Invalidate the holdings cache for a player (call after any trade).
     pub fn invalidate_holdings_cache(&self, username: &str) {
-        self.inner
-            .lock()
-            .unwrap()
-            .holdings_cache
-            .remove(username);
+        self.inner.lock().unwrap().holdings_cache.remove(username);
     }
 
     /// Apply a FIX execution report to player state (tokens, pending orders).
@@ -98,11 +100,11 @@ impl PlayerStore {
         let fields = parse_fix_fields(fix_body);
 
         let msg_type = fields.get("35").map(String::as_str).unwrap_or("");
-        
+
         // Treat Cancel/Replace Reject (type 9) as a rejection of the cancel operation
         // The original order still exists and should remain in pending
         let is_cancel_reject = msg_type == "9";
-        
+
         // Only accept Execution Reports (type 8) and Cancel Rejects (type 9)
         if msg_type != "8" && msg_type != "9" {
             let err = format!("Invalid message type: expected 8 or 9, got '{}'", msg_type);
@@ -112,19 +114,23 @@ impl PlayerStore {
 
         let ord_status = fields.get("39").map(String::as_str).unwrap_or("");
         let cl_ord_id = fields
-            .get("41")  // Field 41 now contains clOrdId from market data
-            .or_else(|| fields.get("11"))  // Fallback to field 11 for backwards compatibility
+            .get("41") // Field 41 now contains clOrdId from market data
+            .or_else(|| fields.get("11")) // Fallback to field 11 for backwards compatibility
             .cloned()
             .unwrap_or_default();
 
-            if cl_ord_id.is_empty() {
-                let err = format!(
-                    "Missing ClOrdID: field 41 and field 11 both empty. Available fields: {}",
-                    fields.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
-                );
-                tracing::warn!("apply_fix_execution_report validation failed: {}", err);
-                return Err(err);
-            }
+        if cl_ord_id.is_empty() {
+            let err = format!(
+                "Missing ClOrdID: field 41 and field 11 both empty. Available fields: {}",
+                fields
+                    .keys()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            tracing::warn!("apply_fix_execution_report validation failed: {}", err);
+            return Err(err);
+        }
 
         let mut inner = self.inner.lock().unwrap();
 
@@ -182,7 +188,11 @@ impl PlayerStore {
                     inner.order_owners.remove(&cl_ord_id);
                     // Also remove from pending_orders for admin users
                     if let Some(player) = inner.players.get_mut(uname) {
-                        if let Some(pos) = player.pending_orders.iter().position(|o| o.cl_ord_id == cl_ord_id) {
+                        if let Some(pos) = player
+                            .pending_orders
+                            .iter()
+                            .position(|o| o.cl_ord_id == cl_ord_id)
+                        {
                             player.pending_orders.remove(pos);
                         }
                     }
@@ -192,7 +202,11 @@ impl PlayerStore {
                     inner.order_owners.remove(&cl_ord_id);
                     // Also remove from pending_orders for admin users
                     if let Some(player) = inner.players.get_mut(uname) {
-                        if let Some(pos) = player.pending_orders.iter().position(|o| o.cl_ord_id == cl_ord_id) {
+                        if let Some(pos) = player
+                            .pending_orders
+                            .iter()
+                            .position(|o| o.cl_ord_id == cl_ord_id)
+                        {
                             player.pending_orders.remove(pos);
                         }
                     }
@@ -235,7 +249,7 @@ impl PlayerStore {
 
         if let Some(owner_username) = owner {
             if let Some(player) = inner.players.get_mut(&owner_username) {
-                // Token management: deduct on new BUY (status=0), refund on cancel (status=4), 
+                // Token management: deduct on new BUY (status=0), refund on cancel (status=4),
                 // credit on SELL execution (status=1,2). Never deduct on fill—already deducted at status=0.
                 // Admin user has unlimited tokens (no deduction/refund).
                 let is_admin = owner_username == "admin";
@@ -244,7 +258,12 @@ impl PlayerStore {
                         // Status 0 (New): Deduct tokens for BUY orders to reserve them
                         if side == "1" && !is_admin {
                             let qty = parse_f64(fields.get("38").map(String::as_str));
-                            let price = parse_f64(fields.get("44").map(String::as_str).or_else(|| fields.get("6").map(String::as_str)));
+                            let price = parse_f64(
+                                fields
+                                    .get("44")
+                                    .map(String::as_str)
+                                    .or_else(|| fields.get("6").map(String::as_str)),
+                            );
                             if qty > 0.0 && price > 0.0 {
                                 let notional = qty * price;
                                 player.tokens -= notional;
@@ -356,15 +375,25 @@ impl PlayerStore {
                 tokio::spawn(async move {
                     if lot_side == "1" {
                         // Buy: insert a new lot.
-                        if let Err(e) = insert_portfolio_lot(&pool, &uname, &lot_symbol, lot_qty, lot_px).await {
-                            tracing::error!("[{}] Failed to insert portfolio lot for {uname}: {e}", market_name());
+                        if let Err(e) =
+                            insert_portfolio_lot(&pool, &uname, &lot_symbol, lot_qty, lot_px).await
+                        {
+                            tracing::error!(
+                                "[{}] Failed to insert portfolio lot for {uname}: {e}",
+                                market_name()
+                            );
                         } else {
                             store_inner.lock().unwrap().holdings_cache.remove(&uname);
                         }
                     } else if lot_side == "2" {
                         // Sell: FIFO consume from existing lots.
-                        if let Err(e) = consume_portfolio_lots_fifo(&pool, &uname, &lot_symbol, lot_qty).await {
-                            tracing::error!("[{}] Failed to consume portfolio lots for {uname}: {e}", market_name());
+                        if let Err(e) =
+                            consume_portfolio_lots_fifo(&pool, &uname, &lot_symbol, lot_qty).await
+                        {
+                            tracing::error!(
+                                "[{}] Failed to consume portfolio lots for {uname}: {e}",
+                                market_name()
+                            );
                         } else {
                             store_inner.lock().unwrap().holdings_cache.remove(&uname);
                         }
@@ -373,8 +402,8 @@ impl PlayerStore {
             }
         }
 
-    // Return Ok if we found and processed the order (even if no state changed).
-    Ok(())
+        // Return Ok if we found and processed the order (even if no state changed).
+        Ok(())
     }
 
     /// Apply the passive side of a trade reconstructed from the multicast
@@ -456,10 +485,20 @@ impl PlayerStore {
             if let Some(pool) = pool {
                 let store_inner = std::sync::Arc::clone(&self.inner);
                 tokio::spawn(async move {
-                    if let Err(e) = consume_portfolio_lots_fifo(&pool, &owner_username, &lot_symbol, lot_qty).await {
-                        tracing::error!("[{}] Failed to consume passive-side portfolio lots for {owner_username}: {e}", market_name());
+                    if let Err(e) =
+                        consume_portfolio_lots_fifo(&pool, &owner_username, &lot_symbol, lot_qty)
+                            .await
+                    {
+                        tracing::error!(
+                            "[{}] Failed to consume passive-side portfolio lots for {owner_username}: {e}",
+                            market_name()
+                        );
                     } else {
-                        store_inner.lock().unwrap().holdings_cache.remove(&owner_username);
+                        store_inner
+                            .lock()
+                            .unwrap()
+                            .holdings_cache
+                            .remove(&owner_username);
                     }
                 });
             }

@@ -1,4 +1,4 @@
-use fix::parser::{FixParser};
+use fix::parser::FixParser;
 
 const ITERATIONS: usize = 1_000_000;
 

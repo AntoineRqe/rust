@@ -1,7 +1,5 @@
 use crate::fix_session::FIXSessionManager;
-use crate::login::{
-    api_login_handler,
-};
+use crate::login::api_login_handler;
 use crate::metrics::{create_metrics_registry, metrics_handler};
 use crate::order_book::{OrderBookState, stable_order_id_from_cl_ord_id};
 use crate::player_client::PlayerClient;
@@ -9,9 +7,8 @@ use crate::state::EventBus;
 use crate::state::TradeView;
 use crate::ws::ws_handler;
 use axum::{
-    Router,
+    Extension, Router,
     routing::{get, post},
-    Extension,
 };
 use db;
 use fix::engine::FixRawMsg;
@@ -132,13 +129,15 @@ async fn serve(
     // - Reuses connections across all requests
     // - Handles reconnection on failure
     let player_client = Arc::new(tokio::sync::Mutex::new(
-        PlayerClient::connect(&player_service_addr).await.map_err(|err| {
-            let detail = format_error_chain(err.as_ref());
-            Box::new(std::io::Error::other(format!(
-                "failed to connect to player service at '{}': {}",
-                player_service_addr, detail
-            ))) as Box<dyn std::error::Error>
-        })?,
+        PlayerClient::connect(&player_service_addr)
+            .await
+            .map_err(|err| {
+                let detail = format_error_chain(err.as_ref());
+                Box::new(std::io::Error::other(format!(
+                    "failed to connect to player service at '{}': {}",
+                    player_service_addr, detail
+                ))) as Box<dyn std::error::Error>
+            })?,
     ));
     {
         let mut client = player_client.lock().await;

@@ -1,6 +1,8 @@
 /// Parse an ASCII byte slice representing a positive integer into a `u64`.
 #[inline(always)]
-pub fn bytes_to_number<T: From<u8> + std::ops::Add<Output = T> + std::ops::Mul<Output = T>>(bytes: &[u8]) -> Option<T> {
+pub fn bytes_to_number<T: From<u8> + std::ops::Add<Output = T> + std::ops::Mul<Output = T>>(
+    bytes: &[u8],
+) -> Option<T> {
     let mut result: T = 0.into();
     for &b in bytes {
         match b {
@@ -45,13 +47,17 @@ impl NumBytes {
 
 impl std::ops::Deref for NumBytes {
     type Target = [u8];
-    fn deref(&self) -> &[u8] { self.as_bytes() }
+    fn deref(&self) -> &[u8] {
+        self.as_bytes()
+    }
 }
 
 /// Parse an integer into array of ASCII bytes. Returns the number of bytes written.
 #[inline(always)]
 pub fn number_to_bytes<T>(number: T) -> NumBytes
-where T: Into<u64> {
+where
+    T: Into<u64>,
+{
     let mut buf = [0u8; 20];
     let mut i = 0;
     let mut number = number.into();
@@ -68,7 +74,7 @@ where T: Into<u64> {
     }
 
     // Reverse the buffer to get the correct order of digits
-    // e.g. if number is 123, we write '3', then '2', then '1' into the buffer, so we need to reverse it to get "123".  
+    // e.g. if number is 123, we write '3', then '2', then '1' into the buffer, so we need to reverse it to get "123".
     buf[..i].reverse();
     NumBytes { buf, len: i }
 }

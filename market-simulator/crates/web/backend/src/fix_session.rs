@@ -153,73 +153,73 @@ impl FIXSessionManager {
                     tokio::select! {
                         maybe_msg = response_rx.recv() => match maybe_msg {
                             Some(msg) => {
-                            let raw_msg = msg.data[..msg.len as usize].to_vec();
-                            let body = pretty_fix(&raw_msg);
-                            let exec_start_time = std::time::Instant::now();
+                                let raw_msg = msg.data[..msg.len as usize].to_vec();
+                                let body = pretty_fix(&raw_msg);
+                                let exec_start_time = std::time::Instant::now();
 
-                            // Apply execution report via gRPC to player service
-                            let mut client = player_client.lock().await;
-                            if let Err(e) =
-                                client.apply_fix_execution_report(&username, &body).await
-                            {
-                                tracing::error!(
-                                    "[{}] FIX execution report failed for username='{username}' | error='{e}' | full_fix_msg='{body}'",
-                                    market_name()
-                                );
-                                // Also log at debug level with structured format for easier parsing
-                                tracing::debug!(
-                                    "[{}] execution_report_error: username='{}', error='{}', msg_len={}, first_100_chars='{}'",
-                                    market_name(),
-                                    username,
-                                    e,
-                                    body.len(),
-                                    body.chars().take(100).collect::<String>()
-                                );
-                            }
-                            drop(client); // Release lock before publishing
-
-                            // Update backend order book from ExecutionReport
-                            if let Some(exec_data) = parse_execution_report(&body) {
-                                update_backend_order_book_from_exec_report(&exec_data, &order_book);
-
-                                // Mark symbol dirty; snapshots are coalesced and flushed on tick.
-                                debouncer.mark_dirty(&exec_data.symbol);
-                            }
-
-                            // Track execution latency
-                            let exec_elapsed_ms = exec_start_time.elapsed().as_millis() as u64;
-                            if let Ok(mut samples) = metrics.execution_latency_ms.lock() {
-                                samples.push(exec_elapsed_ms);
-                            }
-
-                            // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
-                            if is_trade_execution(&body) {
-                                metrics
-                                    .trades
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                                if let Some(trade_view) = extract_trade_view(&body) {
-                                    {
-                                        let mut queue = trades_queue.lock().unwrap();
-                                        queue.push_back(trade_view.clone());
-                                        while queue.len() > 200 {
-                                            queue.pop_front();
-                                        }
-                                    }
-                                    bus.publish(WsEvent::Trades {
-                                        trades: vec![trade_view],
-                                    });
+                                // Apply execution report via gRPC to player service
+                                let mut client = player_client.lock().await;
+                                if let Err(e) =
+                                    client.apply_fix_execution_report(&username, &body).await
+                                {
+                                    tracing::error!(
+                                        "[{}] FIX execution report failed for username='{username}' | error='{e}' | full_fix_msg='{body}'",
+                                        market_name()
+                                    );
+                                    // Also log at debug level with structured format for easier parsing
+                                    tracing::debug!(
+                                        "[{}] execution_report_error: username='{}', error='{}', msg_len={}, first_100_chars='{}'",
+                                        market_name(),
+                                        username,
+                                        e,
+                                        body.len(),
+                                        body.chars().take(100).collect::<String>()
+                                    );
                                 }
-                            }
+                                drop(client); // Release lock before publishing
 
-                            // Broadcast so connected browser clients can display it.
-                            bus.publish(WsEvent::FixMessage {
-                                label: classify_fix_msg(&raw_msg),
-                                body,
-                                tag: "feed".into(),
-                                recipient: Some(username.clone()),
-                            });
-                            }
+                                // Update backend order book from ExecutionReport
+                                if let Some(exec_data) = parse_execution_report(&body) {
+                                    update_backend_order_book_from_exec_report(&exec_data, &order_book);
+
+                                    // Mark symbol dirty; snapshots are coalesced and flushed on tick.
+                                    debouncer.mark_dirty(&exec_data.symbol);
+                                }
+
+                                // Track execution latency
+                                let exec_elapsed_ms = exec_start_time.elapsed().as_millis() as u64;
+                                if let Ok(mut samples) = metrics.execution_latency_ms.lock() {
+                                    samples.push(exec_elapsed_ms);
+                                }
+
+                                // Track trades: execution reports with ExecType=F (Trade) indicate executed orders
+                                if is_trade_execution(&body) {
+                                    metrics
+                                        .trades
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                    if let Some(trade_view) = extract_trade_view(&body) {
+                                        {
+                                            let mut queue = trades_queue.lock().unwrap();
+                                            queue.push_back(trade_view.clone());
+                                            while queue.len() > 200 {
+                                                queue.pop_front();
+                                            }
+                                        }
+                                        bus.publish(WsEvent::Trades {
+                                            trades: vec![trade_view],
+                                        });
+                                    }
+                                }
+
+                                // Broadcast so connected browser clients can display it.
+                                bus.publish(WsEvent::FixMessage {
+                                    label: classify_fix_msg(&raw_msg),
+                                    body,
+                                    tag: "feed".into(),
+                                    recipient: Some(username.clone()),
+                                });
+                            },
                             None => {
                                 tracing::info!(
                                     "[{}] FIX session channel closed for '{username}'",

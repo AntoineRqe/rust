@@ -3,7 +3,7 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use rand_core::OsRng;
 use utils::market_name;
 
-use super::{PlayerStore, Player, INITIAL_TOKENS};
+use super::{INITIAL_TOKENS, Player, PlayerStore};
 
 /// Authentication error types.
 #[derive(Debug, Clone)]

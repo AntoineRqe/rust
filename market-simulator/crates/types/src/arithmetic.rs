@@ -5,7 +5,6 @@ use std::iter::Sum;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FixedPointArithmetic(pub i64);
 
-
 impl FixedPointArithmetic {
     pub const ZERO: FixedPointArithmetic = FixedPointArithmetic(0);
     pub const SCALE: i64 = 100_000_000; // 10^8
@@ -94,7 +93,7 @@ impl FixedPointArithmetic {
     pub fn from_f64(number: f64) -> Self {
         FixedPointArithmetic((number * Self::SCALE as f64).round() as i64)
     }
-    
+
     pub fn from_option_f64(value: Option<f64>) -> FixedPointArithmetic {
         value
             .map(FixedPointArithmetic::from_f64)
@@ -145,7 +144,9 @@ impl std::ops::Mul for FixedPointArithmetic {
 
     fn mul(self, other: Self) -> Self {
         // (a * b) / SCALE to maintain the fixed-point representation
-        FixedPointArithmetic::from_raw(((self.0 as i128 * other.0 as i128) / Self::SCALE as i128) as i64)
+        FixedPointArithmetic::from_raw(
+            ((self.0 as i128 * other.0 as i128) / Self::SCALE as i128) as i64,
+        )
     }
 }
 
@@ -154,7 +155,9 @@ impl std::ops::Div for FixedPointArithmetic {
 
     fn div(self, other: Self) -> Self {
         // (a * SCALE) / b to maintain the fixed-point representation
-        FixedPointArithmetic::from_raw(((self.0 as i128 * Self::SCALE as i128) / other.0 as i128) as i64)
+        FixedPointArithmetic::from_raw(
+            ((self.0 as i128 * Self::SCALE as i128) / other.0 as i128) as i64,
+        )
     }
 }
 

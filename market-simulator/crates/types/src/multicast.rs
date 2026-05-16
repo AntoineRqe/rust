@@ -1,5 +1,5 @@
-use socket2::{Socket, Domain, Type, Protocol};
-use std::net::{UdpSocket, Ipv4Addr};
+use socket2::{Domain, Protocol, Socket, Type};
+use std::net::{Ipv4Addr, UdpSocket};
 
 /// Multicast endpoint description used by the market-feed and snapshot engines.
 #[derive(Clone)]
@@ -31,7 +31,6 @@ pub struct SourceSocket {
 }
 
 impl SourceSocket {
-
     pub fn new(ip: String, port: u16, market: &str) -> std::io::Result<Self> {
         let source = MulticastSource::new(ip, port, market);
         let socket = Self::create_multicast_sender_socket()?;
@@ -59,9 +58,11 @@ impl SourceSocket {
     }
 
     /// Creates a non-blocking UDP socket bound to the specified port, suitable for receiving multicast data in an async context.
-    pub async fn create_multicast_receiver_socket_async(port: u16) -> std::io::Result<tokio::net::UdpSocket> {
-        use socket2::{Socket, Domain, Type, Protocol};
-        use std::net::{SocketAddrV4, Ipv4Addr};
+    pub async fn create_multicast_receiver_socket_async(
+        port: u16,
+    ) -> std::io::Result<tokio::net::UdpSocket> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::{Ipv4Addr, SocketAddrV4};
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;

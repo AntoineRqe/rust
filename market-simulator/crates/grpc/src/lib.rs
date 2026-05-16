@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::Server};
 
 // Include the generated protobuf/gRPC bindings.
 pub mod proto {
@@ -12,8 +12,9 @@ pub mod proto {
 }
 
 use proto::{
+    DumpOrderBookRequest, DumpOrderBookResponse, GetLastTradesRequest, GetLastTradesResponse,
+    PendingOrder, ResetRequest, ResetResponse, Trade,
     market_control_server::{MarketControl, MarketControlServer},
-    DumpOrderBookRequest, DumpOrderBookResponse, GetLastTradesRequest, GetLastTradesResponse, PendingOrder, ResetRequest, ResetResponse, Trade,
 };
 
 /// gRPC service that exposes market-control operations.

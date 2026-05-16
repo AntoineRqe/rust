@@ -19,7 +19,7 @@ macro_rules! define_id {
                 let s = std::str::from_utf8(&self.0).unwrap_or("<invalid utf-8>");
                 write!(f, "{}", s.trim_matches(char::from(0)))
             }
-        }   
+        }
 
         impl std::ops::Add for $name {
             type Output = Self;
@@ -40,14 +40,16 @@ macro_rules! define_id {
         }
 
         impl $name {
-
             pub fn new() -> Self {
                 $name([0u8; $size])
             }
 
             pub const fn from_str_const(s: &str) -> Self {
                 let bytes = s.as_bytes();
-                assert!(bytes.len() <= $size, "id string must fit in configured id size");
+                assert!(
+                    bytes.len() <= $size,
+                    "id string must fit in configured id size"
+                );
                 let mut arr = [0u8; $size];
                 let mut i = 0;
                 while i < bytes.len() {
@@ -81,7 +83,7 @@ macro_rules! define_id {
                 arr.copy_from_slice(bytes);
                 Some($name(arr))
             }
-    
+
             pub fn to_numeric(&self) -> u64 {
                 let mut num = 0u64;
                 let width = std::cmp::min($size, 8);

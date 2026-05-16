@@ -380,7 +380,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
 
         // Slow path — use park_timeout for efficient waiting instead of busy spinning
         let deadline = Instant::now() + timeout;
-        
+
         loop {
             let head = self.head.0.load(Ordering::Acquire);
             let tail = self.tail.0.load(Ordering::Relaxed);

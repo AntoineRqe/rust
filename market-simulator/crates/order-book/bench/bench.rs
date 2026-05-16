@@ -556,7 +556,8 @@ fn run_throughput(iters: u64) -> Duration {
 
 fn benchmark_order_book(c: &mut Criterion) {
     // ── Creation Latency ──
-    let mut create_histogram = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).expect("histogram");
+    let mut create_histogram =
+        Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).expect("histogram");
     create_histogram.auto(true);
 
     c.bench_function("Order Book / latency / create", |b| {
@@ -570,7 +571,8 @@ fn benchmark_order_book(c: &mut Criterion) {
     });
 
     // ── Deletion Latency ──
-    let mut delete_histogram = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).expect("histogram");
+    let mut delete_histogram =
+        Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).expect("histogram");
     delete_histogram.auto(true);
 
     c.bench_function("Order Book / latency / delete", |b| {
@@ -584,7 +586,8 @@ fn benchmark_order_book(c: &mut Criterion) {
     });
 
     // ── Deletion with Populated Book ──
-    let mut delete_depth_histogram = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).expect("histogram");
+    let mut delete_depth_histogram =
+        Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).expect("histogram");
     delete_depth_histogram.auto(true);
 
     c.bench_function("Order Book / latency / delete_with_depth", |b| {
@@ -654,7 +657,8 @@ fn benchmark_order_book(c: &mut Criterion) {
     let delete_depth_p999_str = format!("{}", delete_depth_p999.as_nanos());
     let tput_str = format!("{:.3} M msg/s", msgs_per_sec as f64 / 1_000_000.0);
 
-    let val_w = create_p50_str.len()
+    let val_w = create_p50_str
+        .len()
         .max(create_p99_str.len())
         .max(create_p999_str.len())
         .max(delete_p50_str.len())
@@ -693,8 +697,14 @@ fn benchmark_order_book(c: &mut Criterion) {
             &format!("  p50   {create_p50_str:>val_w$} ns")
         )
     );
-    println!("{}", row("", &format!("  p99   {create_p99_str:>val_w$} ns")));
-    println!("{}", row("", &format!("  p999  {create_p999_str:>val_w$} ns")));
+    println!(
+        "{}",
+        row("", &format!("  p99   {create_p99_str:>val_w$} ns"))
+    );
+    println!(
+        "{}",
+        row("", &format!("  p999  {create_p999_str:>val_w$} ns"))
+    );
     println!("{div2}");
     println!(
         "{}",
@@ -703,8 +713,14 @@ fn benchmark_order_book(c: &mut Criterion) {
             &format!("  p50   {delete_p50_str:>val_w$} ns")
         )
     );
-    println!("{}", row("", &format!("  p99   {delete_p99_str:>val_w$} ns")));
-    println!("{}", row("", &format!("  p999  {delete_p999_str:>val_w$} ns")));
+    println!(
+        "{}",
+        row("", &format!("  p99   {delete_p99_str:>val_w$} ns"))
+    );
+    println!(
+        "{}",
+        row("", &format!("  p999  {delete_p999_str:>val_w$} ns"))
+    );
     println!("{div2}");
     println!(
         "{}",
@@ -713,8 +729,14 @@ fn benchmark_order_book(c: &mut Criterion) {
             &format!("  p50   {delete_depth_p50_str:>val_w$} ns")
         )
     );
-    println!("{}", row("", &format!("  p99   {delete_depth_p99_str:>val_w$} ns")));
-    println!("{}", row("", &format!("  p999  {delete_depth_p999_str:>val_w$} ns")));
+    println!(
+        "{}",
+        row("", &format!("  p99   {delete_depth_p99_str:>val_w$} ns"))
+    );
+    println!(
+        "{}",
+        row("", &format!("  p999  {delete_depth_p999_str:>val_w$} ns"))
+    );
     println!("{div2}");
     println!("{}", row("  Throughput", &format!("  {tput_str}")));
     println!("{bot}");
