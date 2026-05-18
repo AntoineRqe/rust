@@ -2030,15 +2030,22 @@ function handlePlayerState(msg) {
     }
   });
 
-  const primaryMarket = markets[normalizeMarketName(primaryMarketName)];
-  mergeClientOpenOrdersFromBook(primaryMarketName, (primaryMarket && primaryMarket.activeSymbol) || DEFAULT_SYMBOL);
-  
-  // Also sync secondary markets with the updated openOrders
+  // Reconcile from order-book snapshots for all symbols/markets so stale pending
+  // entries cannot linger until a symbol tab is manually selected.
   Object.keys(markets).forEach(marketName => {
-    if (normalizeMarketName(marketName) !== normalizeMarketName(primaryMarketName)) {
-      const market = markets[marketName];
-      mergeClientOpenOrdersFromBook(marketName, (market && market.activeSymbol) || DEFAULT_SYMBOL);
+    const normalizedMarket = normalizeMarketName(marketName);
+    const symbols = getOrderSymbolsForMarket(normalizedMarket);
+    if (symbols.length === 0) {
+      const market = markets[normalizedMarket];
+      mergeClientOpenOrdersFromBook(
+        normalizedMarket,
+        (market && market.activeSymbol) || DEFAULT_SYMBOL
+      );
+      return;
     }
+    symbols.forEach(symbol => {
+      mergeClientOpenOrdersFromBook(normalizedMarket, symbol);
+    });
   });
   
   renderOrders(null, true);
