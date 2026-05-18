@@ -701,6 +701,17 @@ function getOrderSymbolsForMarket(marketName) {
   return getConfiguredSymbolsForMarket(marketName);
 }
 
+function resolveOrderMarketFromSymbol(symbol) {
+  const normalizedSymbol = normalizeMarketName(symbol);
+  if (!normalizedSymbol) return '';
+  const configs = resolveSplitMarketConfigs();
+  const matchingMarkets = configs
+    .map(config => normalizeMarketName(config.name))
+    .filter(marketName => getOrderSymbolsForMarket(marketName).includes(normalizedSymbol));
+  if (matchingMarkets.length === 1) return matchingMarkets[0];
+  return '';
+}
+
 function renderSymbolTabs() {
   const host = ge('symbol-tabs');
   if (!host) return;
@@ -1791,6 +1802,7 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
     const order = openOrders[clOrdId];
     if (!order) return;
     if (normalizeMarketName(order.market) !== mn) return;
+    if (normalizeMarketName(order.symbol) !== activeSymbol) return;
     
     // Remove any order not in the latest snapshot
     // (Source of truth: if it's not in the backend book, it's gone)
@@ -1947,10 +1959,14 @@ function handlePlayerState(msg) {
     
     // Preserve the market from the existing order if present
     const existingOrder = openOrders[o.cl_ord_id];
-    const market = (existingOrder && normalizeMarketName(existingOrder.market)) || primaryMarketName;
+    const symbol = normalizeMarketName(o.symbol || '');
+    const market =
+      (existingOrder && normalizeMarketName(existingOrder.market)) ||
+      resolveOrderMarketFromSymbol(symbol) ||
+      primaryMarketName;
     
     nextOpenOrders[o.cl_ord_id] = {
-      symbol: o.symbol || '',
+      symbol: symbol,
       qty: Number(o.qty || 0),
       price: Number(o.price || 0),
       side: String(o.side || '1'),
@@ -2520,12 +2536,6 @@ function renderOrders(marketName, immediate = false) {
     immediate = marketName;
     marketName = null;
   }
-  const selectedMarketName = normalizeMarketName(marketName || getSelectedOrderMarketName());
-  const selectedSymbol = getActiveMarketSymbol(selectedMarketName);
-
-  // Only render orders panel for the currently selected market.
-  if (marketName && normalizeMarketName(marketName) !== selectedMarketName) return;
-  
   if (!immediate) {
     clearTimeout(openOrdersRenderTimer);
     openOrdersRenderTimer = setTimeout(() => renderOrders(null, true), UI_RENDER_DELAY_MS);
@@ -2537,8 +2547,6 @@ function renderOrders(marketName, immediate = false) {
   const orderIds = Object.keys(openOrders).filter(id => {
     const order = openOrders[id];
     if (order?.source !== 'local') return true;
-    if (normalizeMarketName(order.market) !== selectedMarketName) return false;
-    if (normalizeMarketName(order.symbol) !== selectedSymbol) return false;
     const firstSeen = openOrderFirstSeen[id] || nowMs;
     return (nowMs - firstSeen) >= PENDING_VISIBILITY_DELAY_MS;
   });
@@ -2548,9 +2556,7 @@ function renderOrders(marketName, immediate = false) {
   const hiddenIds = Object.keys(openOrders).filter(id => {
     if (orderIds.includes(id)) return false;
     const order = openOrders[id];
-    return order?.source === 'local' &&
-      normalizeMarketName(order.market) === selectedMarketName &&
-      normalizeMarketName(order.symbol) === selectedSymbol;
+    return order?.source === 'local';
   });
   if (hiddenIds.length > 0) {
     const maxAge = Math.max(...hiddenIds.map(id => nowMs - (openOrderFirstSeen[id] || nowMs)));
@@ -2593,10 +2599,9 @@ function cancelOrder(clordId, symbol, qty, marketName) {
   console.log(`[CANCEL ORDER] User clicked cancel for ${clordId}`);
   clearPendingTimeout(clordId);
   send({ action: 'cancel', clord_id: clordId, symbol, qty }, normalizeMarketName(marketName || getPrimaryMarketName()));
-  console.log(`[CANCEL ORDER] Deleting ${clordId} from openOrders (before send)`);
-  delete openOrders[clordId];
-  delete openOrderFirstSeen[clordId];
-  refreshTokenBalanceDisplay();
+  // Keep the order visible until we receive a terminal FIX state (cancelled/filled/rejected).
+  // This avoids UI flicker when cancel is rejected by the server.
+  console.log(`[CANCEL ORDER] Waiting for server confirmation for ${clordId}`);
   renderOrders(null, true);
   
   // Request updated player state to refresh token balance
@@ -2846,11 +2851,52 @@ function cleanupOrderStateForMarket(market, clordId) {
 
 
 function updateBookFromFix(body, tag, marketName) {
-  // Frontend source of truth is backend OrderBook snapshots.
-  // FIX execution reports / market-data messages are log-only.
-  if (tag !== 'md') return;
   const mn = normalizeMarketName(marketName || getPrimaryMarketName());
-  console.log(`[MD @ ${mn}]`, body, parseFix(body));
+  const market = markets[mn];
+  if (!market || !body) return;
+
+  const fields = parseFix(body);
+  const msgType = String(fields['35'] || '').trim();
+  const ordStatus = String(fields['39'] || '').trim();
+  const clOrdId = String(fields['11'] || '').trim();
+  const origClOrdId = String(fields['41'] || '').trim();
+  const side = String(fields['54'] || '').trim();
+  const price = sf(fields['44']);
+  const leavesQty = sf(fields['151']);
+
+  if (tag === 'md') {
+    console.log(`[MD @ ${mn}]`, body, fields);
+    return;
+  }
+
+  // Track terminal statuses from execution reports to prevent stale player_state
+  // snapshots from re-inserting already-cancelled/rejected/filled orders.
+  if (msgType === '8') {
+    const terminal = ['2', '3', '4', '8', 'C'].includes(ordStatus);
+    if (terminal) {
+      if (clOrdId) orderTerminalStatus[clOrdId] = ordStatus;
+      if (origClOrdId) orderTerminalStatus[origClOrdId] = ordStatus;
+
+      const terminalId = origClOrdId || clOrdId;
+      if (terminalId) {
+        cleanupOrderStateForMarket(market, terminalId);
+        removeOrderFromMarketBook(market, terminalId);
+      }
+
+      // Cancel request ClOrdID can differ from original order ID; clear both.
+      if (origClOrdId && clOrdId && origClOrdId !== clOrdId) {
+        cleanupOrderStateForMarket(market, clOrdId);
+        removeOrderFromMarketBook(market, clOrdId);
+      }
+      renderOrders(null, true);
+      return;
+    }
+
+    const liveId = origClOrdId || clOrdId;
+    if (liveId && Number.isFinite(leavesQty) && leavesQty >= 0) {
+      applyOrderLeavesForMarket(market, liveId, side, price, leavesQty);
+    }
+  }
 }
 
 // ── render order book ─────────────────────────────────────────────────────────
