@@ -375,6 +375,21 @@ pub async fn create_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(&mut *tx)
     .await?;
 
+    query(
+        r#"
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            key TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            request_hash TEXT,
+            response JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
     Ok(())
 }
@@ -395,6 +410,10 @@ pub async fn reset_database(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
 
     query("TRUNCATE TABLE pending_orders RESTART IDENTITY")
+        .execute(&mut *tx)
+        .await?;
+
+    query("TRUNCATE TABLE idempotency_keys")
         .execute(&mut *tx)
         .await?;
 
@@ -1052,9 +1071,43 @@ mod tests {
 
         let orders = collect_all_orders(&pool).await?;
         let trades = collect_all_trades(&pool).await?;
+        let idempotency_table: Option<String> =
+            query_scalar("SELECT to_regclass('idempotency_keys')::text")
+                .fetch_one(&pool)
+                .await?;
+        let idempotency_columns: Vec<(String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_name = 'idempotency_keys'
+            ORDER BY ordinal_position
+            "#,
+        )
+        .fetch_all(&pool)
+        .await?;
 
         assert!(orders.is_empty());
         assert!(trades.is_empty());
+        assert_eq!(idempotency_table.as_deref(), Some("idempotency_keys"));
+        assert_eq!(
+            idempotency_columns,
+            vec![
+                ("key".to_string(), "NO".to_string(), "text".to_string()),
+                ("status".to_string(), "NO".to_string(), "text".to_string()),
+                ("request_hash".to_string(), "YES".to_string(), "text".to_string()),
+                ("response".to_string(), "YES".to_string(), "jsonb".to_string()),
+                (
+                    "created_at".to_string(),
+                    "NO".to_string(),
+                    "timestamp with time zone".to_string()
+                ),
+                (
+                    "updated_at".to_string(),
+                    "NO".to_string(),
+                    "timestamp with time zone".to_string()
+                ),
+            ]
+        );
 
         reset_database(&pool).await?;
 
