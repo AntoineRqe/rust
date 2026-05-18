@@ -303,7 +303,7 @@
   <div class="frow"><label>Market</label>
     <select id="o-market"></select>
   </div>
-  <div class="frow"><label>Symbol</label>     <input id="o-sym"   value="AAPL"></div>
+  <div class="frow"><label>Symbol</label>     <select id="o-sym"></select></div>
   <div class="frow"><label>Quantity</label>
     <div class="spin-wrap">
       <input id="o-qty" type="number" step="1" min="1" max="200" value="100">
@@ -442,6 +442,7 @@ if (tokenFromQuery) {
 
 const LOGIN_GATEWAY_URL = '{{LOGIN_GATEWAY_URL}}';
 const CURRENT_MARKET_NAME = '{{CURRENT_MARKET_NAME}}';
+const DEFAULT_SYMBOL = '{{DEFAULT_SYMBOL}}';
 const KNOWN_MARKETS = {{MARKETS_JSON}};
 const AUTH_TOKEN = sessionStorage.getItem('auth_token');
 const MARKET_TOKENS_RAW = (() => {
@@ -622,7 +623,38 @@ function populateOrderMarketOptions() {
   if (preferred) {
     sel.value = normalizeMarketName(preferred.name);
   }
+  populateOrderSymbolOptions();
   updateTargetMarketControls();
+}
+
+function getOrderMarketConfig(marketName) {
+  const normalized = normalizeMarketName(marketName);
+  return resolveSplitMarketConfigs().find(market => normalizeMarketName(market.name) === normalized) || null;
+}
+
+function getOrderSymbolsForMarket(marketName) {
+  const market = getOrderMarketConfig(marketName);
+  const symbols = Array.isArray(market && market.stocks) ? market.stocks : [];
+  return symbols
+    .map(symbol => String(symbol || '').trim().toUpperCase())
+    .filter((symbol, idx, arr) => symbol && arr.indexOf(symbol) === idx);
+}
+
+function populateOrderSymbolOptions() {
+  const sel = ge('o-sym');
+  if (!sel) return;
+
+  const marketName = getSelectedOrderMarketName();
+  const symbols = getOrderSymbolsForMarket(marketName);
+  const fallbackSymbol = String(DEFAULT_SYMBOL || '').trim().toUpperCase();
+  const options = symbols.length > 0 ? symbols : (fallbackSymbol ? [fallbackSymbol] : []);
+
+  sel.innerHTML = options.map(symbol => `<option value="${esc(symbol)}">${esc(symbol)}</option>`).join('');
+
+  const preferred = options[0] || '';
+  if (preferred) {
+    sel.value = preferred;
+  }
 }
 
 function updateTargetMarketControls() {
@@ -1008,8 +1040,12 @@ setAdminControlsEnabled(currentIsAdmin);
 resolveSplitMarketConfigs().forEach(market => addMarket(normalizeMarketName(market.name)));
 populateOrderMarketOptions();
 if (ge('o-market')) {
-  ge('o-market').addEventListener('change', updateTargetMarketControls);
+  ge('o-market').addEventListener('change', () => {
+    populateOrderSymbolOptions();
+    updateTargetMarketControls();
+  });
 }
+populateOrderSymbolOptions();
 ['o-sym', 'o-qty', 'o-price'].forEach(id => {
   const input = ge(id);
   if (!input) return;
@@ -1523,7 +1559,7 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
       if (!(qty > 0) || !(price >= 0)) return;
 
       openOrders[openOrderKey] = {
-        symbol: symbol || 'AAPL',
+        symbol: symbol || DEFAULT_SYMBOL,
         qty,
         price,
         side,
@@ -1767,13 +1803,13 @@ function handlePlayerState(msg) {
   });
 
   const primaryMarket = markets[normalizeMarketName(primaryMarketName)];
-  mergeClientOpenOrdersFromBook(primaryMarketName, (primaryMarket && primaryMarket.book.symbol) || 'AAPL');
+  mergeClientOpenOrdersFromBook(primaryMarketName, (primaryMarket && primaryMarket.book.symbol) || DEFAULT_SYMBOL);
   
   // Also sync secondary markets with the updated openOrders
   Object.keys(markets).forEach(marketName => {
     if (normalizeMarketName(marketName) !== normalizeMarketName(primaryMarketName)) {
       const market = markets[marketName];
-      mergeClientOpenOrdersFromBook(marketName, (market && market.book.symbol) || 'AAPL');
+      mergeClientOpenOrdersFromBook(marketName, (market && market.book.symbol) || DEFAULT_SYMBOL);
     }
   });
   

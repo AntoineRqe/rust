@@ -86,6 +86,8 @@ pub struct GatewayMarketConfig {
     pub name: String,
     pub url: String,
     #[serde(default)]
+    pub stocks: Vec<String>,
+    #[serde(default)]
     pub public_url: Option<String>,
 }
 

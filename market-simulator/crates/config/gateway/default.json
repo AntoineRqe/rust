@@ -6,11 +6,13 @@
   "markets": [
     {
       "name": "NASDAQ",
-      "url": "http://127.0.0.1:9870"
+      "url": "http://127.0.0.1:9870",
+      "stocks": ["AAPL"]
     },
     {
       "name": "NYSE",
-      "url": "http://127.0.0.1:9885"
+      "url": "http://127.0.0.1:9885",
+      "stocks": ["AAPL", "GE", "BA", "CAT", "KO"]
     }
   ]
 }

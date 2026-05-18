@@ -24,6 +24,15 @@ fn client_market_url(market: &MarketInfo, headers: &HeaderMap) -> String {
     adapt_market_url_for_client(&market.url, &market.name, headers)
 }
 
+fn default_symbol(markets: &[MarketInfo]) -> String {
+    markets
+        .iter()
+        .flat_map(|market| market.stocks.iter())
+        .map(|symbol| symbol.trim().to_uppercase())
+        .find(|symbol| !symbol.is_empty())
+        .unwrap_or_default()
+}
+
 /// Run the login gateway server on the specified IP and port.
 /// The gateway serves the login page and proxies login requests to configured markets.
 /// Browsers connect directly to market servers (no WebSocket proxy).
@@ -82,6 +91,7 @@ async fn gateway_app_handler(
         .map(|market| MarketInfo {
             name: market.name.clone(),
             url: client_market_url(market, &headers),
+            stocks: market.stocks.clone(),
             public_url: None,
         })
         .collect();
@@ -90,6 +100,7 @@ async fn gateway_app_handler(
         .first()
         .map(|market| market.name.as_str())
         .unwrap_or("unknown");
+    let current_default_symbol = default_symbol(&advertised);
     let login_gateway_url = gateway_public_base_url(&headers);
     let markets_json =
         serde_json::to_string(&markets_for_client).unwrap_or_else(|_| "[]".to_string());
@@ -98,6 +109,7 @@ async fn gateway_app_handler(
         .replace("{{MARKET_NAME}}", "gateway")
         .replace("{{LOGIN_GATEWAY_URL}}", &login_gateway_url)
         .replace("{{CURRENT_MARKET_NAME}}", current_market_name)
+        .replace("{{DEFAULT_SYMBOL}}", &current_default_symbol)
         .replace("{{MARKETS_JSON}}", &markets_json);
 
     (
