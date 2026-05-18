@@ -1,7 +1,7 @@
 use dotenvy::dotenv;
-use spsc::Consumer;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction, query};
+use std::collections::HashMap;
 use std::env;
 use std::future::Future;
 use std::sync::OnceLock;
@@ -13,6 +13,7 @@ use types::macros::{EntityId, OrderId, SymbolId};
 use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trade};
 use url::Url;
 use utils::market_name;
+use crossbeam_channel;
 
 #[derive(Debug, Clone)]
 pub struct IdempotencyRecord {
@@ -28,9 +29,9 @@ pub enum IdempotencyClaim {
 }
 
 /// Database engine that consumes order events and results from the matching engine
-pub struct DatabaseEngine<'a, const N: usize> {
-    /// Consumer for order events and results coming from the matching engine
-    fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
+pub struct DatabaseEngine {
+    /// Receiver for order events and results coming from the matching engine
+    fifo_in: crossbeam_channel::Receiver<(OrderEvent, OrderResult)>,
     /// Atomic flag to signal shutdown
     shutdown: Arc<AtomicBool>,
     /// Shared database connection pool (need to be shared with gRPC control service)
@@ -39,9 +40,9 @@ pub struct DatabaseEngine<'a, const N: usize> {
     metrics: Option<Arc<types::MarketMetrics>>,
 }
 
-impl<'a, const N: usize> DatabaseEngine<'a, N> {
+impl DatabaseEngine {
     pub fn new(
-        fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
+        fifo_in: crossbeam_channel::Receiver<(OrderEvent, OrderResult)>,
         database_url: &str,
         shutdown: Arc<AtomicBool>,
     ) -> Result<Self, sqlx::Error> {
@@ -64,17 +65,25 @@ impl<'a, const N: usize> DatabaseEngine<'a, N> {
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
-            if let Some(exec_report) = self.fifo_in.pop() {
-                let received_at = Instant::now();
-                if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
-                    tracing::error!("[{}] Error persisting order update: {}", market_name(), e);
-                } else if let Some(metrics) = &self.metrics {
-                    metrics.order_db_writes.fetch_add(1, Ordering::Relaxed);
-                    let elapsed_ms = received_at.elapsed().as_millis() as u64;
-                    if let Ok(mut samples) = metrics.order_db_write_latency_ms.lock() {
-                        samples.push(elapsed_ms);
+        while !self.shutdown.load(Ordering::Relaxed) {
+            match self.fifo_in.try_recv() {
+                Ok(exec_report) => {
+                    let received_at = Instant::now();
+                    if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
+                        tracing::error!("[{}] Error persisting order update: {}", market_name(), e);
+                    } else if let Some(metrics) = &self.metrics {
+                        metrics.order_db_writes.fetch_add(1, Ordering::Relaxed);
+                        let elapsed_ms = received_at.elapsed().as_millis() as u64;
+                        if let Ok(mut samples) = metrics.order_db_write_latency_ms.lock() {
+                            samples.push(elapsed_ms);
+                        }
                     }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    break;
                 }
             }
         }
@@ -124,9 +133,9 @@ impl<'a, const N: usize> DatabaseEngine<'a, N> {
         block_on_db(collect_all_order_results(&self.pool))
     }
 
-    /// Retrieves all pending orders from the database, ordered by insertion time.
-    /// Returns a vector of `OrderEvent` structs representing all pending orders in the database.
-    pub fn get_all_pending_orders(&self) -> Result<Vec<OrderEvent>, sqlx::Error> {
+    /// Retrieves all pending orders from the database, grouped by symbol.
+    /// Returns a HashMap where keys are SymbolIds and values are vectors of OrderEvents.
+    pub fn get_all_pending_orders(&self) -> Result<HashMap<SymbolId, Vec<OrderEvent>>, sqlx::Error> {
         block_on_db(collect_all_pending_orders(&self.pool))
     }
 
@@ -602,8 +611,8 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
         .collect())
 }
 
-/// Retrieves all pending orders from the database, ordered by insertion time.
-pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>, sqlx::Error> {
+/// Retrieves all pending orders from the database, grouped by symbol.
+pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<HashMap<SymbolId, Vec<OrderEvent>>, sqlx::Error> {
     let rows = query(
         r#"
         SELECT
@@ -625,9 +634,10 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| OrderEvent {
+    let mut result: HashMap<SymbolId, Vec<OrderEvent>> = HashMap::new();
+    
+    for row in rows {
+        let order_event = OrderEvent {
             price: FixedPointArithmetic::from_option_f64(row.get("price")),
             quantity: FixedPointArithmetic::from_option_f64(row.get("quantity")),
             side: parse_side(row.get("side")),
@@ -641,8 +651,12 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<Vec<OrderEvent>
             target_id: entity_id_from_option(row.get("target_id")),
             timestamp_ms: i64_to_timestamp_ms(row.get::<Option<i64>, _>("event_timestamp_ms")),
             ..Default::default()
-        })
-        .collect())
+        };
+        
+        result.entry(order_event.symbol).or_default().push(order_event);
+    }
+    
+    Ok(result)
 }
 
 ///
@@ -1368,9 +1382,10 @@ mod tests {
 
         let pending_after_new = collect_all_pending_orders(&pool).await?;
         assert_eq!(pending_after_new.len(), 1);
-        assert_eq!(pending_after_new[0].cl_ord_id.to_string(), "pend001");
-        assert_eq!(pending_after_new[0].quantity.to_f64(), 100.0);
-        assert_eq!(pending_after_new[0].timestamp_ms, 1_700_000_000_000);
+        let test_symbol_orders = &pending_after_new[&SymbolId::from_ascii("TEST")];
+        assert_eq!(test_symbol_orders[0].cl_ord_id.to_string(), "pend001");
+        assert_eq!(test_symbol_orders[0].quantity.to_f64(), 100.0);
+        assert_eq!(test_symbol_orders[0].timestamp_ms, 1_700_000_000_000);
 
         let mut partial_trades = Trades::<4>::new();
         partial_trades
@@ -1396,8 +1411,9 @@ mod tests {
 
         let pending_after_partial = collect_all_pending_orders(&pool).await?;
         assert_eq!(pending_after_partial.len(), 1);
-        assert_eq!(pending_after_partial[0].cl_ord_id.to_string(), "pend001");
-        assert_eq!(pending_after_partial[0].quantity.to_f64(), 60.0);
+        let test_symbol_orders = &pending_after_partial[&SymbolId::from_ascii("TEST")];
+        assert_eq!(test_symbol_orders[0].cl_ord_id.to_string(), "pend001");
+        assert_eq!(test_symbol_orders[0].quantity.to_f64(), 60.0);
 
         let mut fill_trades = Trades::<4>::new();
         fill_trades
@@ -1565,8 +1581,9 @@ mod tests {
 
         let pending = collect_all_pending_orders(&pool).await?;
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].cl_ord_id.to_string(), "maker001");
-        assert_eq!(pending[0].quantity.to_f64(), 30.0);
+        let test_symbol_orders = &pending[&SymbolId::from_ascii("TEST")];
+        assert_eq!(test_symbol_orders[0].cl_ord_id.to_string(), "maker001");
+        assert_eq!(test_symbol_orders[0].quantity.to_f64(), 30.0);
 
         reset_database(&pool).await?;
         Ok(())

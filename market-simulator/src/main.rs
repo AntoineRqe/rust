@@ -7,11 +7,12 @@ use crossbeam::channel;
 use fix::engine::FixRawMsg;
 use memory;
 use order_book::OrderBookControl;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use types::consts::RB_SIZE;
-use types::macros::EntityId;
-use types::{OrderEvent, OrderResult, ExecutionReportMessage};
+use types::macros::{EntityId, SymbolId};
+use types::{ExecutionReportMessage, OrderEvent, OrderResult};
 use utils::market_name;
 
 pub mod startup;
@@ -95,10 +96,10 @@ impl QueueHandle {
             &format!("{market_name}_order_book_to_db"),
             true,
         );
-        let er_to_fix = memory::open_shared_queue::<RB_SIZE, (EntityId, ExecutionReportMessage<RB_SIZE>)>(
-            &format!("{market_name}_execution_report_to_fix"),
-            true,
-        );
+        let er_to_fix = memory::open_shared_queue::<
+            RB_SIZE,
+            (EntityId, ExecutionReportMessage<RB_SIZE>),
+        >(&format!("{market_name}_execution_report_to_fix"), true);
 
         Self {
             net_to_fix_tx: Some(Arc::new(net_to_fix_tx)),
@@ -131,51 +132,92 @@ fn start_market(
 
     let net_to_fix_tx = queues.net_to_fix_tx.as_ref().unwrap().clone();
     let supported_symbols = market_simulator.supported_symbols.clone();
-    let (fix_tx, ob_rx) = queues.fix_to_ob.take().unwrap().queue.split();
-    let (ob_er_tx, er_rx) = queues.ob_to_er.take().unwrap().queue.split();
-    let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
-    let (ob_db_tx, ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
+    if supported_symbols.is_empty() {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no supported symbols configured for market",
+        )));
+    }
 
-    // Order-book control channel (used by the gRPC reset service).
-    let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
+    let (fix_tx, aggregator_rx) = queues.fix_to_ob.take().unwrap().queue.split();
+    let (_ob_er_tx, _er_rx) = queues.ob_to_er.take().unwrap().queue.split();
+    let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
+    let (_ob_db_tx, _ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
+
+    // Create MPSC channels for per-symbol order book outputs (execution report and database)
+    let (mpsc_er_tx, mpsc_er_rx) = crossbeam_channel::unbounded::<(OrderEvent, OrderResult)>();
+    let mpsc_er_tx = Arc::new(mpsc_er_tx);
+    let (mpsc_db_tx, mpsc_db_rx) = crossbeam_channel::unbounded::<(OrderEvent, OrderResult)>();
+    let mpsc_db_tx = Arc::new(mpsc_db_tx);
+
     let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
     market_simulator.err_tx = Arc::new(err_tx);
     market_simulator.err_rx = err_rx.clone();
-
-    // Global shutdown flag is shared across all threads and can be set by the Ctrl-C handler to signal all threads to exit.
     market_simulator.shutdown = Some(Arc::clone(&global_shutdown));
 
-    // execution report engine thread
-    startup::start_execution_report_engine(
+    // DB engine thread - pass MPSC receiver directly
+    let mut db_data = startup::start_db_engine(
         &mut market_simulator,
-        er_rx,
-        er_tx,
-        Arc::clone(&metrics),
-        Arc::clone(&global_shutdown),
-        config.core_mapping.execution_report_core,
-    )?;
-
-    // DB engine thread
-    let db_data = startup::start_db_engine(
-        &mut market_simulator,
-        ob_db_rx,
+        mpsc_db_rx,
         database_url.clone(),
         Arc::clone(&metrics),
         Arc::clone(&global_shutdown),
         config.core_mapping.db_core,
     )?;
 
-    // Order book engine thread (must be started after the DB engine since it needs to import the initial order book state from the database before starting to process new orders/events).
-    startup::start_order_book_engine(
+    let mut aggregator_routes: HashMap<
+        SymbolId,
+        spsc::spsc_lock_free::Producer<'static, OrderEvent, RB_SIZE>,
+    > = HashMap::new();
+    let mut ob_control_txs = Vec::new();
+
+    for symbol in &supported_symbols {
+        let symbol_id = SymbolId::from_ascii(symbol);
+        let route_queue = memory::open_shared_queue::<RB_SIZE, OrderEvent>(
+            &format!("{}_{}_fix_to_order_book", config.name, symbol),
+            true,
+        );
+        let (route_tx, route_rx) = route_queue.queue.split();
+        aggregator_routes.insert(symbol_id, route_tx);
+
+        let (ob_control_tx, ob_control_rx) = crossbeam_channel::bounded::<OrderBookControl>(32);
+        ob_control_txs.push(ob_control_tx);
+
+        let symbol_pending_orders = db_data
+            .pending_orders
+            .remove(&symbol_id)
+            .unwrap_or_default();
+
+        startup::start_order_book_engine_for_symbol(
+            &mut market_simulator,
+            symbol.clone(),
+            route_rx,
+            Arc::clone(&mpsc_er_tx),
+            Arc::clone(&mpsc_db_tx),
+            ob_control_rx,
+            Arc::clone(&metrics),
+            Arc::clone(&global_shutdown),
+            symbol_pending_orders,
+            config.core_mapping.order_book_core,
+        )?;
+    }
+
+    startup::start_order_book_aggregator(
         &mut market_simulator,
-        ob_rx,
-        ob_er_tx,
-        ob_db_tx,
-        ob_control_rx,
+        aggregator_rx,
+        aggregator_routes,
+        Arc::clone(&global_shutdown),
+        config.core_mapping.market_data_proxy_core,
+    )?;
+
+    // execution report engine thread - pass MPSC receiver directly
+    startup::start_execution_report_engine(
+        &mut market_simulator,
+        mpsc_er_rx,
+        er_tx,
         Arc::clone(&metrics),
         Arc::clone(&global_shutdown),
-        db_data.pending_orders.clone(),
-        config.core_mapping.order_book_core,
+        config.core_mapping.execution_report_core,
     )?;
 
     // FIX engine thread
@@ -206,12 +248,12 @@ fn start_market(
         config.core_mapping.web_core,
     )?;
 
-    // Start the gRPC server in a separate thread, passing it the order book control channel and database pool.
+    // Start the gRPC server in a separate thread, passing it the order book control channels and database pool.
     startup::start_grpc_server(
         &mut market_simulator,
         config.grpc.ip.clone(),
         config.grpc.port,
-        ob_control_tx,
+        ob_control_txs,
         Arc::clone(&db_data.pool),
         Arc::clone(&global_shutdown),
         config.core_mapping.global_core,

@@ -7,24 +7,25 @@ use fix::{
         tags::{self},
     },
 };
-use spsc::spsc_lock_free::{Consumer, Producer};
+use spsc::spsc_lock_free::Producer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use types::FixedPointArithmetic;
 use utils::{field_str, market_name, number_to_bytes};
+use crossbeam_channel;
 
-pub struct ExecutionReportEngine<'a, const N: usize> {
-    fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
-    fifo_out: Producer<'a, (EntityId, ExecutionReportMessage<N>), N>,
+pub struct ExecutionReportEngine<const N: usize> {
+    fifo_in: crossbeam_channel::Receiver<(OrderEvent, OrderResult)>,
+    fifo_out: Producer<'static, (EntityId, ExecutionReportMessage<N>), N>,
     shutdown: Arc<AtomicBool>,
     metrics: Option<Arc<types::MarketMetrics>>,
 }
 
-impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
+impl<const N: usize> ExecutionReportEngine<N> {
     pub fn new(
-        fifo_in: Consumer<'a, (OrderEvent, OrderResult), N>,
-        fifo_out: Producer<'a, (EntityId, ExecutionReportMessage<N>), N>,
+        fifo_in: crossbeam_channel::Receiver<(OrderEvent, OrderResult)>,
+        fifo_out: Producer<'static, (EntityId, ExecutionReportMessage<N>), N>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -40,20 +41,28 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        while !self.shutdown.load(Ordering::Relaxed) || !self.fifo_in.is_empty() {
-            if let Some(exec_report) = self.fifo_in.pop() {
-                let received_at = Instant::now();
-                self.process_execution_report(&exec_report);
-                if let Some(metrics) = &self.metrics {
-                    metrics
-                        .execution_report_events
-                        .fetch_add(1, Ordering::Relaxed);
-                    let elapsed_ms = received_at.elapsed().as_millis() as u64;
-                    if let Ok(mut samples) =
-                        metrics.execution_report_event_to_fanout_latency_ms.lock()
-                    {
-                        samples.push(elapsed_ms);
+        while !self.shutdown.load(Ordering::Relaxed) {
+            match self.fifo_in.try_recv() {
+                Ok(exec_report) => {
+                    let received_at = Instant::now();
+                    self.process_execution_report(&exec_report);
+                    if let Some(metrics) = &self.metrics {
+                        metrics
+                            .execution_report_events
+                            .fetch_add(1, Ordering::Relaxed);
+                        let elapsed_ms = received_at.elapsed().as_millis() as u64;
+                        if let Ok(mut samples) =
+                            metrics.execution_report_event_to_fanout_latency_ms.lock()
+                        {
+                            samples.push(elapsed_ms);
+                        }
                     }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    break;
                 }
             }
         }

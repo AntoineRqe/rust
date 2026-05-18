@@ -26,10 +26,10 @@ pub enum OrderBookControl {
     Reset { ack: crossbeam_channel::Sender<()> },
 }
 
-pub struct OrderBookSubscriber<'a, const N: usize> {
-    pub execution_report: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
-    pub market_data: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
-    pub database_persistence: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
+pub struct OrderBookSubscriber {
+    pub execution_report: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
+    pub market_data: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
+    pub database_persistence: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
 }
 /// Order book engine that processes incoming order events, updates the order book state, generates execution reports, and produces incremental snapshots of the order book for consumption by other components.
 /// The engine runs in a loop, processing control messages and incoming orders, and updates the snapshot after each order is processed.
@@ -37,8 +37,8 @@ pub struct OrderBookSubscriber<'a, const N: usize> {
 pub struct OrderBookEngine<'a, const N: usize> {
     /// Consumer for receiving incoming order events from the input queue.
     fifo_in: Consumer<'a, OrderEvent, N>,
-    /// Array of optional producers for sending execution reports to multiple output queues. Each producer corresponds to a different consumer that may be interested in receiving execution reports.
-    subscribers: OrderBookSubscriber<'a, N>,
+    /// Array of optional senders for sending execution reports to multiple output channels. Each sender corresponds to a different component that may be interested in receiving execution reports.
+    subscribers: OrderBookSubscriber,
     /// Receiver for control messages to manage the order book engine, such as resetting the order book.
     control_rx: crossbeam_channel::Receiver<OrderBookControl>,
     /// The order book instance that maintains the state of buy and sell orders.
@@ -54,9 +54,9 @@ pub struct OrderBookEngine<'a, const N: usize> {
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
     pub fn new(
         fifo_in: Consumer<'a, OrderEvent, N>,
-        execution_report_producer: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
-        market_data_producer: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
-        database_persistence_producer: Option<Producer<'a, (OrderEvent, OrderResult), N>>,
+        execution_report_producer: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
+        market_data_producer: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
+        database_persistence_producer: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
         order_book: OrderBook,
         snapshot_ptr: Option<Arc<ArcSwap<Snapshot>>>,
@@ -277,27 +277,18 @@ impl<'a, const N: usize> OrderBookEngine<'a, N> {
     }
 
     fn fan_out_execution_report(&mut self, event: OrderEvent, result: OrderResult) {
-        let mut execution_report_input = (event, result);
+        let execution_report = (event, result);
 
-        if let Some(producer) = &mut self.subscribers.execution_report {
-            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
-                execution_report_input = (event_er, result_er);
-                std::hint::spin_loop(); // If the output queue is full, spin until there is space
-            }
+        if let Some(sender) = &self.subscribers.execution_report {
+            let _ = sender.send(execution_report);
         }
 
-        if let Some(producer) = &mut self.subscribers.market_data {
-            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
-                execution_report_input = (event_er, result_er);
-                std::hint::spin_loop(); // If the output queue is full, spin until there is space
-            }
+        if let Some(sender) = &self.subscribers.market_data {
+            let _ = sender.send(execution_report);
         }
 
-        if let Some(producer) = &mut self.subscribers.database_persistence {
-            while let Err((event_er, result_er)) = producer.push(execution_report_input) {
-                execution_report_input = (event_er, result_er);
-                std::hint::spin_loop(); // If the output queue is full, spin until there is space
-            }
+        if let Some(sender) = &self.subscribers.database_persistence {
+            let _ = sender.send(execution_report);
         }
     }
 

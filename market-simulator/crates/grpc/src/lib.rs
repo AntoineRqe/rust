@@ -20,16 +20,16 @@ use proto::{
 /// gRPC service that exposes market-control operations.
 #[derive(Clone)]
 pub struct MarketControlService {
-    /// Sends control messages to the order-book engine.
-    ob_control_tx: Sender<OrderBookControl>,
+    /// Sends control messages to each order-book engine.
+    ob_control_txs: Vec<Sender<OrderBookControl>>,
     /// Database pool used to reset the persisted state.
     db_pool: Arc<PgPool>,
 }
 
 impl MarketControlService {
-    pub fn new(ob_control_tx: Sender<OrderBookControl>, db_pool: Arc<PgPool>) -> Self {
+    pub fn new(ob_control_txs: Vec<Sender<OrderBookControl>>, db_pool: Arc<PgPool>) -> Self {
         Self {
-            ob_control_tx,
+            ob_control_txs,
             db_pool,
         }
     }
@@ -44,16 +44,26 @@ impl MarketControl for MarketControlService {
     ) -> Result<Response<ResetResponse>, Status> {
         tracing::info!("gRPC ResetMarket called");
 
-        // 1. Signal the order-book engine to reset and wait for an ack.
-        let ob_control_tx = self.ob_control_tx.clone();
+        // 1. Signal each order-book engine to reset and wait for all acks.
+        let ob_control_txs = self.ob_control_txs.clone();
         let reset_result = tokio::task::spawn_blocking(move || {
-            let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(0);
-            ob_control_tx
-                .send(OrderBookControl::Reset { ack: ack_tx })
-                .map_err(|e| format!("Failed to send reset to order book: {e}"))?;
-            ack_rx
-                .recv_timeout(Duration::from_secs(5))
-                .map_err(|_| "Order book reset timed out after 5 seconds".to_string())
+            let mut ack_receivers = Vec::with_capacity(ob_control_txs.len());
+
+            for ob_control_tx in ob_control_txs {
+                let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(0);
+                ob_control_tx
+                    .send(OrderBookControl::Reset { ack: ack_tx })
+                    .map_err(|e| format!("Failed to send reset to order book: {e}"))?;
+                ack_receivers.push(ack_rx);
+            }
+
+            for ack_rx in ack_receivers {
+                ack_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| "Order book reset timed out after 5 seconds".to_string())?;
+            }
+
+            Ok::<(), String>(())
         })
         .await;
 
@@ -103,7 +113,8 @@ impl MarketControl for MarketControlService {
         match db::collect_all_pending_orders(&self.db_pool).await {
             Ok(pending_orders) => {
                 let orders = pending_orders
-                    .into_iter()
+                    .into_values()
+                    .flat_map(|order_vec| order_vec.into_iter())
                     .map(|order| PendingOrder {
                         price: order.price.to_f64(),
                         quantity: order.quantity.to_f64(),

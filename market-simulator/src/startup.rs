@@ -5,18 +5,20 @@ use execution_report::ExecutionReportEngine;
 use types::ExecutionReportMessage;
 
 use fix::engine::FixRawMsg;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use types::EntityId;
 use types::consts::RB_SIZE;
+use types::macros::SymbolId;
 use types::{OrderEvent, OrderResult};
 
-use order_book::OrderBookControl;
+use order_book::{OrderBookAggregator, OrderBookControl};
 use utils::market_name;
 
 // ---------------- Execution Report Engine ----------------
 pub fn start_execution_report_engine(
     simulator: &mut crate::MarketSimulator,
-    er_rx: spsc::Consumer<'static, (OrderEvent, OrderResult), RB_SIZE>,
+    er_rx: crossbeam_channel::Receiver<(OrderEvent, OrderResult)>,
     er_tx: spsc::Producer<'static, (EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>,
     metrics: Arc<backend::server::Metrics>,
     shutdown: Arc<AtomicBool>,
@@ -49,13 +51,13 @@ pub fn start_execution_report_engine(
 
 // ---------------- Database Engine ----------------
 pub struct DbData {
-    pub pending_orders: Vec<OrderEvent>,
+    pub pending_orders: HashMap<SymbolId, Vec<OrderEvent>>,
     pub pool: Arc<sqlx::Pool<sqlx::Postgres>>,
 }
 
 pub fn start_db_engine(
     market_simulator: &mut crate::MarketSimulator,
-    ob_db_rx: spsc::Consumer<'static, (OrderEvent, OrderResult), RB_SIZE>,
+    ob_db_rx: crossbeam_channel::Receiver<(OrderEvent, OrderResult)>,
     database_url: String,
     metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
@@ -80,15 +82,17 @@ pub fn start_db_engine(
     }
 
     let mut db_data = DbData {
-        pending_orders: Vec::new(), // This will be populated after we start the DB engine thread and it loads the pending orders from the database.
+        pending_orders: HashMap::new(), // This will be populated after we start the DB engine thread and it loads the pending orders from the database.
         pool: db_engine.pool(),
     };
 
     db_data.pending_orders = match db_engine.get_all_pending_orders() {
         Ok(orders) => {
+            let total_count: usize = orders.values().map(|v| v.len()).sum();
             tracing::info!(
-                "[{}] Loaded {} pending orders from database",
+                "[{}] Loaded {} pending orders from database across {} symbols",
                 market_name(),
+                total_count,
                 orders.len()
             );
             orders
@@ -124,7 +128,7 @@ pub fn start_grpc_server(
     market_simulator: &mut crate::MarketSimulator,
     ip: String,
     port: u16,
-    ob_control_tx: crossbeam_channel::Sender<OrderBookControl>,
+    ob_control_txs: Vec<crossbeam_channel::Sender<OrderBookControl>>,
     db_pool: Arc<sqlx::Pool<sqlx::Postgres>>,
     global_shutdown: Arc<AtomicBool>,
     core_id: usize,
@@ -133,7 +137,7 @@ pub fn start_grpc_server(
     let grpc_ip = ip;
     let grpc_port = port;
     let grpc_shutdown = Arc::clone(&global_shutdown);
-    let grpc_service = grpc::MarketControlService::new(ob_control_tx, db_pool);
+    let grpc_service = grpc::MarketControlService::new(ob_control_txs, db_pool);
     let err_tx = Arc::clone(&market_simulator.err_tx);
     let _grpc_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
@@ -232,36 +236,25 @@ pub fn start_fix_engine(
 }
 
 // ---------------- Order Book ----------------
-pub fn start_order_book_engine(
+pub fn start_order_book_engine_for_symbol(
     market_simulator: &mut crate::MarketSimulator,
+    symbol: String,
     ob_rx: spsc::Consumer<'static, OrderEvent, RB_SIZE>,
-    ob_er_tx: spsc::Producer<'static, (OrderEvent, OrderResult), RB_SIZE>,
-    ob_db_tx: spsc::Producer<'static, (OrderEvent, OrderResult), RB_SIZE>,
+    ob_er_tx: Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>,
+    ob_db_tx: Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>,
     ob_control_rx: crossbeam::channel::Receiver<OrderBookControl>,
     metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
     pending_orders: Vec<OrderEvent>,
     order_book_core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let symbols = market_simulator.supported_symbols.clone();
-    if symbols.is_empty() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "no supported symbols configured for market",
-        )));
-    }
-
-    let symbol = symbols[0].clone();
     tracing::info!(
-        "[{}] Initializing market for symbol '{}'",
+        "[{}] Initializing order book for symbol '{}'",
         market_name(),
         symbol
     );
 
-    // Create shared order book instance.
     let order_book = order_book::book::OrderBook::new(&symbol);
-
-    // Book engine thread
     let mut order_book_engine = order_book::engine::OrderBookEngine::new(
         ob_rx,
         Some(ob_er_tx),
@@ -273,13 +266,9 @@ pub fn start_order_book_engine(
         Arc::clone(&global_shutdown),
     );
     order_book_engine.set_metrics(Arc::clone(&metrics));
-
-    // Import initial order book state from the database before starting the engine.
-    // This ensures that the engine starts with the correct state and can process new orders/events in the context of existing pending orders.
     order_book_engine.import_order_book(pending_orders);
 
     let err_tx = Arc::clone(&market_simulator.err_tx);
-
     let _ob_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId {
             id: order_book_core_id,
@@ -287,16 +276,37 @@ pub fn start_order_book_engine(
         match order_book_engine.run() {
             Ok(_) => (),
             Err(e) => {
-                tracing::error!("[{}] Order book engine error: {e:#}", utils::market_name());
+                tracing::error!(
+                    "[{}] Order book engine error: {e:#}",
+                    utils::market_name()
+                );
                 let _ = err_tx.send(format!("Order book engine error: {e:#}"));
             }
         }
     });
 
-    {
-        market_simulator.add_thread_handle(_ob_thread);
-    }
+    market_simulator.add_thread_handle(_ob_thread);
+    Ok(())
+}
 
+pub fn start_order_book_aggregator(
+    market_simulator: &mut crate::MarketSimulator,
+    ob_rx: spsc::Consumer<'static, OrderEvent, RB_SIZE>,
+    routes: HashMap<SymbolId, spsc::Producer<'static, OrderEvent, RB_SIZE>>,
+    global_shutdown: Arc<AtomicBool>,
+    core_id: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut aggregator = OrderBookAggregator::new(ob_rx, routes, Arc::clone(&global_shutdown));
+    let err_tx = Arc::clone(&market_simulator.err_tx);
+    let _agg_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+        if let Err(e) = aggregator.run() {
+            tracing::error!("[{}] Order book aggregator error: {e:#}", utils::market_name());
+            let _ = err_tx.send(format!("Order book aggregator error: {e:#}"));
+        }
+    });
+
+    market_simulator.add_thread_handle(_agg_thread);
     Ok(())
 }
 

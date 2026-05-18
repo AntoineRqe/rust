@@ -17,3 +17,4 @@ types = { path = "../types" }
 tracing.workspace = true
 serde_json.workspace = true
 url = "2"
+crossbeam-channel.workspace = true

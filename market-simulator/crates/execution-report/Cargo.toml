@@ -12,3 +12,4 @@ fix = { path = "../protocol/FIX" }
 utils = { path = "../utils" }
 types = { path = "../types" }
 tracing.workspace = true
+crossbeam-channel.workspace = true
