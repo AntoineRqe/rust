@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use crossbeam_channel::TrySendError;
 use fix::engine::FixRawMsg;
-use tokio::sync::mpsc;
 use sqlx::PgPool;
+use tokio::sync::mpsc;
 use types::consts::RB_SIZE;
-use types::{ExecutionReportMessage, ExecReportData};
+use types::{ExecReportData, ExecutionReportMessage};
 
 use crate::order_book::OrderBookState;
 use crate::player_client::PlayerClient;
@@ -220,7 +220,7 @@ impl FIXSessionManager {
                                     }
                                 }
 
-                                // Update backend order book using pre-parsed data (no FIX parsing!)
+                                // Update backend order book from per-message parsed exec_data.
                                 update_backend_order_book_from_exec_report(exec_data, &order_book);
 
                                 // Mark symbol dirty; snapshots are coalesced and flushed on tick.
@@ -240,6 +240,7 @@ impl FIXSessionManager {
 
                                     let trade_view = TradeView {
                                         id: exec_data.order_id,
+                                        symbol: exec_data.symbol.clone(),
                                         price: exec_data.price,
                                         quantity: exec_data.qty,
                                         cl_ord_id: exec_data.cl_ord_id.clone(),
@@ -424,8 +425,6 @@ pub fn classify_fix_msg(raw: &[u8]) -> String {
         t => format!("◀ MSG ({t})"),
     }
 }
-
-
 
 /// Update backend order book based on ExecutionReport status.
 fn update_backend_order_book_from_exec_report(

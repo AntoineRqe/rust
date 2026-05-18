@@ -9,7 +9,7 @@ pub mod trade;
 
 pub use arithmetic::FixedPointArithmetic;
 pub use consts::*;
-pub use execution_report::{ExecutionReportMessage, ExecReportData};
+pub use execution_report::{ExecReportData, ExecutionReportMessage};
 pub use macros::{EntityId, OrderId, SymbolId};
 pub use metrics::MarketMetrics;
 pub use order::*;

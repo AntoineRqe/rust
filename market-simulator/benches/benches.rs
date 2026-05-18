@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use types::macros::{EntityId, OrderId, SymbolId};
-use types::{OrderEvent, OrderResult, Trades, ExecutionReportMessage, ExecReportData};
+use types::{ExecReportData, ExecutionReportMessage, OrderEvent, OrderResult, Trades};
 
 const PRODUCER_CORE_OFFSET: usize = 0; // Offset for producer core
 const CONSUMER_CORE_OFFSET: usize = 2; // Offset for consumer core
@@ -72,9 +72,13 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
     let start = Instant::now();
 
-    let (er_inbound_tx, er_inbound_rx) = crossbeam::channel::unbounded::<(OrderEvent, OrderResult)>();
-    
-    let rb_tx = Box::leak(Box::new(RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new()));
+    let (er_inbound_tx, er_inbound_rx) =
+        crossbeam::channel::unbounded::<(OrderEvent, OrderResult)>();
+
+    let rb_tx = Box::leak(Box::new(RingBuffer::<
+        (EntityId, ExecutionReportMessage<RB_SIZE>),
+        RB_SIZE,
+    >::new()));
     let ts_rb = Box::leak(Box::new(RingBuffer::<Instant, RB_SIZE>::new()));
 
     thread::scope(|s| {
@@ -729,7 +733,10 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
     let (response_tx, mut response_rx) = mpsc::channel::<ExecutionReportMessage<RB_SIZE>>(1024); // Channel for receiving responses from the FIX engine, if needed for future tests
 
     let fix_to_ob = Box::leak(Box::new(RingBuffer::<OrderEvent, RB_SIZE>::new()));
-    let er_to_fix = Box::leak(Box::new(RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new()));
+    let er_to_fix = Box::leak(Box::new(RingBuffer::<
+        (EntityId, ExecutionReportMessage<RB_SIZE>),
+        RB_SIZE,
+    >::new()));
     let ts_rb = Box::leak(Box::new(RingBuffer::<Instant, RB_SIZE>::new()));
 
     thread::scope(|s| {

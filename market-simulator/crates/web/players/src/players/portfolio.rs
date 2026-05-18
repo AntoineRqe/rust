@@ -113,13 +113,27 @@ impl PlayerStore {
         }
 
         let ord_status = fields.get("39").map(String::as_str).unwrap_or("");
-        let cl_ord_id = fields
-            .get("41") // Field 41 now contains clOrdId from market data
-            .or_else(|| fields.get("11")) // Fallback to field 11 for backwards compatibility
-            .cloned()
+        let cl_ord_id_11 = fields
+            .get("11")
+            .map(|value| value.trim().to_string())
             .unwrap_or_default();
+        let orig_cl_ord_id_41 = fields
+            .get("41")
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        let mut cl_ord_ids: Vec<String> = Vec::with_capacity(2);
+        for id in [&cl_ord_id_11, &orig_cl_ord_id_41] {
+            if !id.is_empty() && !cl_ord_ids.iter().any(|existing| existing == id) {
+                cl_ord_ids.push(id.clone());
+            }
+        }
+        let cl_ord_id = if !cl_ord_id_11.is_empty() {
+            cl_ord_id_11.clone()
+        } else {
+            orig_cl_ord_id_41.clone()
+        };
 
-        if cl_ord_id.is_empty() {
+        if cl_ord_ids.is_empty() {
             let err = format!(
                 "Missing ClOrdID: field 41 and field 11 both empty. Available fields: {}",
                 fields
@@ -177,45 +191,10 @@ impl PlayerStore {
         }
 
         // Capture owner now — before it may be removed from order_owners below.
-        let owner = inner.order_owners.get(&cl_ord_id).cloned();
+        let owner = cl_ord_ids
+            .iter()
+            .find_map(|id| inner.order_owners.get(id).cloned());
         let found_order = owner.is_some();
-
-        // For admin user, handle orders specially
-        if let Some(ref uname) = owner {
-            if uname == "admin" {
-                // Remove order for successful fills, cancellations, rejections
-                if matches!(ord_status, "2" | "3" | "4" | "8" | "C") {
-                    inner.order_owners.remove(&cl_ord_id);
-                    // Also remove from pending_orders for admin users
-                    if let Some(player) = inner.players.get_mut(uname) {
-                        if let Some(pos) = player
-                            .pending_orders
-                            .iter()
-                            .position(|o| o.cl_ord_id == cl_ord_id)
-                        {
-                            player.pending_orders.remove(pos);
-                        }
-                    }
-                }
-                // Also remove order for cancel rejections (type 9) to free up reserved tokens
-                if is_cancel_reject {
-                    inner.order_owners.remove(&cl_ord_id);
-                    // Also remove from pending_orders for admin users
-                    if let Some(player) = inner.players.get_mut(uname) {
-                        if let Some(pos) = player
-                            .pending_orders
-                            .iter()
-                            .position(|o| o.cl_ord_id == cl_ord_id)
-                        {
-                            player.pending_orders.remove(pos);
-                        }
-                    }
-                }
-                drop(inner);
-                self.flush();
-                return Ok(());
-            }
-        }
 
         // If no owner found (order doesn't exist in our tracking), allow it anyway
         // This can happen with pre-existing orders or orders from other systems
@@ -284,7 +263,7 @@ impl PlayerStore {
                             if let Some(pos) = player
                                 .pending_orders
                                 .iter()
-                                .position(|o| o.cl_ord_id == cl_ord_id)
+                                .position(|o| cl_ord_ids.iter().any(|id| id == &o.cl_ord_id))
                             {
                                 let pending_order = &player.pending_orders[pos];
                                 if pending_order.side == "1" {
@@ -325,7 +304,7 @@ impl PlayerStore {
                 if let Some(pos) = player
                     .pending_orders
                     .iter()
-                    .position(|o| o.cl_ord_id == cl_ord_id)
+                    .position(|o| cl_ord_ids.iter().any(|id| id == &o.cl_ord_id))
                 {
                     match ord_status {
                         "2" | "3" | "4" | "8" | "C" => {
@@ -354,7 +333,9 @@ impl PlayerStore {
             }
 
             if matches!(ord_status, "2" | "3" | "4" | "8" | "C") {
-                inner.order_owners.remove(&cl_ord_id);
+                for id in &cl_ord_ids {
+                    inner.order_owners.remove(id);
+                }
                 changed = true;
             }
         }

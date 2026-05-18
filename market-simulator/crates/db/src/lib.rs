@@ -1,3 +1,4 @@
+use crossbeam_channel;
 use dotenvy::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction, query};
@@ -13,13 +14,18 @@ use types::macros::{EntityId, OrderId, SymbolId};
 use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderType, Side, Trade};
 use url::Url;
 use utils::market_name;
-use crossbeam_channel;
 
 #[derive(Debug, Clone)]
 pub struct IdempotencyRecord {
     pub status: String,
     pub request_hash: Option<String>,
     pub response: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeSnapshot {
+    pub trade: Trade,
+    pub symbol: String,
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +139,9 @@ impl DatabaseEngine {
 
     /// Retrieves all pending orders from the database, grouped by symbol.
     /// Returns a HashMap where keys are SymbolIds and values are vectors of OrderEvents.
-    pub fn get_all_pending_orders(&self) -> Result<HashMap<SymbolId, Vec<OrderEvent>>, sqlx::Error> {
+    pub fn get_all_pending_orders(
+        &self,
+    ) -> Result<HashMap<SymbolId, Vec<OrderEvent>>, sqlx::Error> {
         block_on_db(collect_all_pending_orders(&self.pool))
     }
 
@@ -580,6 +588,64 @@ pub async fn collect_last_n_trades(pool: &PgPool, limit: i64) -> Result<Vec<Trad
         .collect())
 }
 
+/// Retrieves the last N trades from the database with symbol, ordered by insertion time (most recent last).
+pub async fn collect_last_n_trade_snapshots(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<TradeSnapshot>, sqlx::Error> {
+    let rows = query(
+        r#"
+        SELECT
+            trade_id,
+            exec_id,
+            symbol,
+            buy_cl_ord_id,
+            sell_cl_ord_id,
+            qty,
+            price,
+            order_qty,
+            leaves_qty
+        FROM public.trades
+        ORDER BY id DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TradeSnapshot {
+            trade: Trade {
+                price: FixedPointArithmetic::from_option_f64(row.get("price")),
+                quantity: FixedPointArithmetic::from_option_f64(row.get("qty")),
+                id: row
+                    .get::<Option<i64>, _>("trade_id")
+                    .map(|value| value as u64)
+                    .or_else(|| trade_id_from_option(row.get("exec_id")))
+                    .unwrap_or_default(),
+                cl_ord_id: row
+                    .get::<Option<String>, _>("sell_cl_ord_id")
+                    .map(|value| OrderId::from_ascii(&value))
+                    .or_else(|| {
+                        row.get::<Option<String>, _>("buy_cl_ord_id")
+                            .map(|value| OrderId::from_ascii(&value))
+                    })
+                    .unwrap_or_default(),
+                order_qty: FixedPointArithmetic::from_option_f64(row.get("order_qty")),
+                leaves_qty: FixedPointArithmetic::from_option_f64(row.get("leaves_qty")),
+                ..Default::default()
+            },
+            symbol: row
+                .get::<Option<String>, _>("symbol")
+                .unwrap_or_default()
+                .trim()
+                .to_uppercase(),
+        })
+        .collect())
+}
+
 /// Retrieves all order results from the database, ordered by insertion time.
 pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>, sqlx::Error> {
     let rows = query(
@@ -610,7 +676,9 @@ pub async fn collect_all_order_results(pool: &PgPool) -> Result<Vec<OrderResult>
 }
 
 /// Retrieves all pending orders from the database, grouped by symbol.
-pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<HashMap<SymbolId, Vec<OrderEvent>>, sqlx::Error> {
+pub async fn collect_all_pending_orders(
+    pool: &PgPool,
+) -> Result<HashMap<SymbolId, Vec<OrderEvent>>, sqlx::Error> {
     let rows = query(
         r#"
         SELECT
@@ -633,7 +701,7 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<HashMap<SymbolI
     .await?;
 
     let mut result: HashMap<SymbolId, Vec<OrderEvent>> = HashMap::new();
-    
+
     for row in rows {
         let order_event = OrderEvent {
             price: FixedPointArithmetic::from_option_f64(row.get("price")),
@@ -650,10 +718,13 @@ pub async fn collect_all_pending_orders(pool: &PgPool) -> Result<HashMap<SymbolI
             timestamp_ms: i64_to_timestamp_ms(row.get::<Option<i64>, _>("event_timestamp_ms")),
             ..Default::default()
         };
-        
-        result.entry(order_event.symbol).or_default().push(order_event);
+
+        result
+            .entry(order_event.symbol)
+            .or_default()
+            .push(order_event);
     }
-    
+
     Ok(result)
 }
 
@@ -1178,8 +1249,16 @@ mod tests {
             vec![
                 ("key".to_string(), "NO".to_string(), "text".to_string()),
                 ("status".to_string(), "NO".to_string(), "text".to_string()),
-                ("request_hash".to_string(), "YES".to_string(), "text".to_string()),
-                ("response".to_string(), "YES".to_string(), "jsonb".to_string()),
+                (
+                    "request_hash".to_string(),
+                    "YES".to_string(),
+                    "text".to_string()
+                ),
+                (
+                    "response".to_string(),
+                    "YES".to_string(),
+                    "jsonb".to_string()
+                ),
                 (
                     "created_at".to_string(),
                     "NO".to_string(),

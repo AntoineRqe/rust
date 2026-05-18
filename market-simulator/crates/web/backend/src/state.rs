@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeView {
     pub id: u64,
+    pub symbol: String,
     pub price: f64,
     pub quantity: f64,
     pub cl_ord_id: String,

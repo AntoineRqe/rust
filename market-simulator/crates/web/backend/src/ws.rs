@@ -12,9 +12,9 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
-use sha2::{Digest, Sha256};
 use players::players::PendingOrder;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -607,13 +607,7 @@ async fn handle_browser_message(
 
             let idempotency_key = order_idempotency_key(&sender_id, &clord_id);
             let request_hash = order_request_hash(
-                &sender_id,
-                &clord_id,
-                &symbol,
-                &side,
-                qty,
-                price,
-                &target_id,
+                &sender_id, &clord_id, &symbol, &side, qty, price, &target_id,
             );
 
             match db::claim_idempotency_key(
@@ -652,7 +646,8 @@ async fn handle_browser_message(
                                             );
                                             state.bus.publish(WsEvent::FixMessage {
                                                 label: "ERROR".into(),
-                                                body: "Stored idempotent response is invalid.".into(),
+                                                body: "Stored idempotent response is invalid."
+                                                    .into(),
                                                 tag: "err".into(),
                                                 recipient: Some(username.to_string()),
                                             });
@@ -817,9 +812,7 @@ async fn handle_browser_message(
                                     label: format!("REJECTED ✕ [{}]", clord_id),
                                     body: format!(
                                         "Insufficient equity inventory for SELL {}: required {:.0}, available {:.0}.",
-                                        normalized_symbol,
-                                        qty,
-                                        available_qty
+                                        normalized_symbol, qty, available_qty
                                     ),
                                     tag: "err".into(),
                                     recipient: Some(username.to_string()),

@@ -36,11 +36,7 @@ impl<const N: usize> std::fmt::Debug for ExecutionReportMessage<N> {
 }
 
 impl<const N: usize> ExecutionReportMessage<N> {
-    pub fn new(
-        fix_len: u16,
-        fix_data: [u8; N],
-        exec_report_data: ExecReportData,
-    ) -> Self {
+    pub fn new(fix_len: u16, fix_data: [u8; N], exec_report_data: ExecReportData) -> Self {
         Self {
             fix_len,
             fix_data,
@@ -48,4 +44,3 @@ impl<const N: usize> ExecutionReportMessage<N> {
         }
     }
 }
-

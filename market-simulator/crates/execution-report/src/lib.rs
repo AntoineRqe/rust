@@ -1,19 +1,17 @@
-use types::{OrderEvent, OrderResult, macros::EntityId, ExecReportData, ExecutionReportMessage};
 use fix::engine::FixRawMsg;
+use types::{macros::EntityId, ExecReportData, ExecutionReportMessage, OrderEvent, OrderResult};
 
-use fix::{
-    tags::{
-        exec_type_code_set, msg_types, ord_status_code_set, side_code_set,
-        tags::{self},
-    },
+use crossbeam_channel;
+use fix::tags::{
+    exec_type_code_set, msg_types, ord_status_code_set, side_code_set,
+    tags::{self},
 };
 use spsc::spsc_lock_free::Producer;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use types::FixedPointArithmetic;
 use utils::{field_str, market_name, number_to_bytes};
-use crossbeam_channel;
 
 pub struct ExecutionReportEngine<const N: usize> {
     fifo_in: crossbeam_channel::Receiver<(OrderEvent, OrderResult)>,
@@ -81,7 +79,8 @@ impl<const N: usize> ExecutionReportEngine<N> {
             qty: 0.0,
             leaves_qty: 0.0,
         };
-        let kill_msg = ExecutionReportMessage::new(kill_report.len, kill_report.data, kill_exec_data);
+        let kill_msg =
+            ExecutionReportMessage::new(kill_report.len, kill_report.data, kill_exec_data);
 
         while let Err((_, _msg)) = self.fifo_out.push((kill_entity_id, kill_msg.clone())) {
             std::hint::spin_loop();
@@ -505,53 +504,94 @@ impl<const N: usize> ExecutionReportEngine<N> {
         report
     }
 
-    /// Converts OrderEvent and OrderResult to ExecReportData for downstream processing.
-    fn to_exec_report_data(order_event: &OrderEvent, order_result: &OrderResult) -> ExecReportData {
-        // Convert side enum to FIX side code (1=Buy, 2=Sell)
-        let side = match order_event.side {
+    fn side_to_fix(side: types::Side) -> u8 {
+        match side {
             types::Side::Buy => 1u8,
             types::Side::Sell => 2u8,
-        };
+        }
+    }
 
-        // Convert status enum to FIX ord_status code
-        let ord_status = match order_result.status {
-            types::OrderStatus::New => 0u8,
-            types::OrderStatus::PartiallyFilled => 1u8,
-            types::OrderStatus::Filled => 2u8,
-            types::OrderStatus::Cancelled => 4u8,
-            types::OrderStatus::CancelRejected => 0u8, // Reject leaves as New
-            types::OrderStatus::Unmatched => 3u8,      // DoneForDay
-        };
+    fn exec_data_for_new(order_event: &OrderEvent) -> ExecReportData {
+        let cl_ord_id = order_event.cl_ord_id.to_string();
+        ExecReportData {
+            order_id: Self::stable_order_id_from_cl_ord_id(&cl_ord_id),
+            cl_ord_id,
+            symbol: order_event.symbol.to_string(),
+            side: Self::side_to_fix(order_event.side),
+            ord_status: 0u8,
+            price: order_event.price.to_f64(),
+            qty: order_event.quantity.to_f64(),
+            leaves_qty: order_event.quantity.to_f64(),
+        }
+    }
 
-        // Extract effective ClOrdId (same logic as fix_session)
-        let effective_cl_ord_id = order_event
+    fn exec_data_for_trade_report(
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> ExecReportData {
+        let cl_ord_id = order_event.cl_ord_id.to_string();
+        let traded_qty = order_result.trades.quantity_sum();
+        let leaves_qty = (order_event.quantity - traded_qty).to_f64().max(0.0);
+
+        ExecReportData {
+            order_id: Self::stable_order_id_from_cl_ord_id(&cl_ord_id),
+            cl_ord_id,
+            symbol: order_event.symbol.to_string(),
+            side: Self::side_to_fix(order_event.side),
+            ord_status: if leaves_qty > 0.0 { 1u8 } else { 2u8 },
+            price: order_event.price.to_f64(),
+            qty: order_event.quantity.to_f64(),
+            leaves_qty,
+        }
+    }
+
+    fn exec_data_for_maker_trade(
+        order_event: &OrderEvent,
+        trade: &types::Trade,
+        side: types::Side,
+    ) -> ExecReportData {
+        let cl_ord_id = trade.cl_ord_id.to_string();
+        ExecReportData {
+            order_id: Self::stable_order_id_from_cl_ord_id(&cl_ord_id),
+            cl_ord_id,
+            symbol: order_event.symbol.to_string(),
+            side: Self::side_to_fix(side),
+            ord_status: if trade.leaves_qty > FixedPointArithmetic::ZERO {
+                1u8
+            } else {
+                2u8
+            },
+            price: trade.price.to_f64(),
+            qty: trade.order_qty.to_f64(),
+            leaves_qty: trade.leaves_qty.to_f64(),
+        }
+    }
+
+    fn exec_data_for_cancel(
+        order_event: &OrderEvent,
+        order_result: &OrderResult,
+    ) -> ExecReportData {
+        let cl_ord_id = order_event
             .orig_cl_ord_id
             .as_ref()
             .map(|id| id.to_string())
             .unwrap_or_else(|| order_event.cl_ord_id.to_string());
 
-        // Calculate stable order_id from cl_ord_id (same hash as fix_session)
-        let order_id = Self::stable_order_id_from_cl_ord_id(&effective_cl_ord_id);
-
-        // Calculate cumulative fills from trades
-        let cumulative_fills: f64 = order_result
-            .trades
-            .iter()
-            .map(|t| t.quantity.to_f64())
-            .sum();
-
-        let qty = order_event.quantity.to_f64();
-        let leaves_qty = qty - cumulative_fills;
+        let ord_status = match order_result.status {
+            types::OrderStatus::Cancelled => 4u8,
+            types::OrderStatus::CancelRejected => 0u8,
+            _ => 0u8,
+        };
 
         ExecReportData {
-            order_id,
-            cl_ord_id: effective_cl_ord_id,
+            order_id: Self::stable_order_id_from_cl_ord_id(&cl_ord_id),
+            cl_ord_id,
             symbol: order_event.symbol.to_string(),
-            side,
+            side: Self::side_to_fix(order_event.side),
             ord_status,
             price: order_event.price.to_f64(),
-            qty,
-            leaves_qty,
+            qty: order_event.quantity.to_f64(),
+            leaves_qty: order_event.quantity.to_f64(),
         }
     }
 
@@ -571,7 +611,7 @@ impl<const N: usize> ExecutionReportEngine<N> {
     }
 
     fn process_execution_report(&self, exec_report: &(OrderEvent, OrderResult)) {
-        let mut reports: Vec<FixRawMsg<N>> = vec![];
+        let mut reports: Vec<(FixRawMsg<N>, ExecReportData)> = vec![];
 
         match exec_report.1.status {
             types::OrderStatus::Unmatched => {
@@ -579,13 +619,22 @@ impl<const N: usize> ExecutionReportEngine<N> {
                 return;
             }
             types::OrderStatus::Cancelled | types::OrderStatus::CancelRejected => {
-                reports.push(self.build_cancel_report(exec_report));
+                reports.push((
+                    self.build_cancel_report(exec_report),
+                    Self::exec_data_for_cancel(&exec_report.0, &exec_report.1),
+                ));
             }
             _ => {
-                reports.push(self.build_new_execution_report(exec_report));
+                reports.push((
+                    self.build_new_execution_report(exec_report),
+                    Self::exec_data_for_new(&exec_report.0),
+                ));
 
                 if exec_report.1.trades.len() > 0 {
-                    reports.push(self.build_execution_report(exec_report));
+                    reports.push((
+                        self.build_execution_report(exec_report),
+                        Self::exec_data_for_trade_report(&exec_report.0, &exec_report.1),
+                    ));
 
                     let maker_side = match exec_report.0.side {
                         types::Side::Buy => types::Side::Sell,
@@ -594,10 +643,13 @@ impl<const N: usize> ExecutionReportEngine<N> {
 
                     for trade in exec_report.1.trades.iter() {
                         if trade.cl_ord_id != exec_report.0.cl_ord_id {
-                            reports.push(self.build_execution_report_for_trade(
-                                &exec_report.0,
-                                trade,
-                                maker_side,
+                            reports.push((
+                                self.build_execution_report_for_trade(
+                                    &exec_report.0,
+                                    trade,
+                                    maker_side,
+                                ),
+                                Self::exec_data_for_maker_trade(&exec_report.0, trade, maker_side),
                             ));
                         }
                     }
@@ -606,10 +658,8 @@ impl<const N: usize> ExecutionReportEngine<N> {
         }
 
         let key = exec_report.0.sender_id;
-        let exec_report_data = Self::to_exec_report_data(&exec_report.0, &exec_report.1);
-
-        for report in reports.into_iter() {
-            let msg = ExecutionReportMessage::new(report.len, report.data, exec_report_data.clone());
+        for (report, exec_report_data) in reports.into_iter() {
+            let msg = ExecutionReportMessage::new(report.len, report.data, exec_report_data);
             loop {
                 if let Err((_, _msg)) = self.fifo_out.push((key, msg.clone())) {
                     std::hint::spin_loop();
@@ -788,9 +838,10 @@ mod tests {
     #[test]
     fn test_execution_report_engine() {
         let (fifo_in_tx, fifo_in_rx) = crossbeam_channel::unbounded::<(OrderEvent, OrderResult)>();
-        let rb_out = Box::leak(Box::new(
-            spsc::spsc_lock_free::RingBuffer::<(EntityId, ExecutionReportMessage<1024>), 1024>::new(),
-        ));
+        let rb_out = Box::leak(Box::new(spsc::spsc_lock_free::RingBuffer::<
+            (EntityId, ExecutionReportMessage<1024>),
+            1024,
+        >::new()));
         let (fifo_out_tx, fifo_out_rx) = rb_out.split();
 
         let shutdown_signal = Arc::new(AtomicBool::new(false));

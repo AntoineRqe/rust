@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use types::{
-    FixedPointArithmetic, OrderEvent, Side, ExecutionReportMessage,
+    ExecutionReportMessage, FixedPointArithmetic, OrderEvent, Side,
     macros::{EntityId, OrderId},
 };
 use utils::market_name;

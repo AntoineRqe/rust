@@ -12,6 +12,7 @@ use axum::{
 };
 use db;
 use fix::engine::FixRawMsg;
+use sqlx::PgPool;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::net::SocketAddr;
@@ -21,7 +22,6 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
-use sqlx::PgPool;
 use types::consts::RB_SIZE;
 use utils::market_name;
 
@@ -168,15 +168,16 @@ async fn serve(
             market_database_url, detail
         ))) as Box<dyn std::error::Error>
     })?;
-    match db::collect_last_n_trades(&market_db_pool, 10).await {
+    match db::collect_last_n_trade_snapshots(&market_db_pool, 10).await {
         Ok(trades) => {
             let mut queue = trades_queue.lock().unwrap();
             for trade in trades {
                 queue.push_back(TradeView {
-                    id: trade.id,
-                    price: trade.price.to_f64(),
-                    quantity: trade.quantity.to_f64(),
-                    cl_ord_id: trade.cl_ord_id.to_string(),
+                    id: trade.trade.id,
+                    symbol: trade.symbol,
+                    price: trade.trade.price.to_f64(),
+                    quantity: trade.trade.quantity.to_f64(),
+                    cl_ord_id: trade.trade.cl_ord_id.to_string(),
                 });
             }
             tracing::info!(

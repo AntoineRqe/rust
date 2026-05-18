@@ -1,5 +1,5 @@
-pub mod book;
 pub mod aggregator;
+pub mod book;
 pub mod engine;
 pub mod snapshot;
 

@@ -1633,29 +1633,42 @@ function applyTradesSnapshot(msg, marketName) {
     console.warn('[applyTradesSnapshot] Market not found:', mn);
     return;
   }
-  const symbol = normalizeMarketName(msg.symbol || market.activeSymbol || DEFAULT_SYMBOL);
-  const bookState = getMarketBookForSymbol(mn, symbol);
-  if (!bookState) return;
-  
-  if (msg.trades.length > 0) {
-    // Convert API trades to book trade format [price, qty, side, ts]
-    // The API returns {id, price, quantity, cl_ord_id}
-    bookState.trades = msg.trades.map(t => [
+  if (msg.trades.length === 0) {
+    console.log('[applyTradesSnapshot] Empty trades snapshot, skipping');
+    return;
+  }
+
+  // Group incoming trades by symbol so each symbol book keeps its own chart/trade history.
+  const groupedBySymbol = {};
+  msg.trades.forEach(t => {
+    const symbol = normalizeMarketName(
+      (t && t.symbol) ||
+      msg.symbol ||
+      market.activeSymbol ||
+      DEFAULT_SYMBOL
+    );
+    if (!symbol) return;
+    if (!groupedBySymbol[symbol]) groupedBySymbol[symbol] = [];
+    groupedBySymbol[symbol].push([
       Number(t.price) || 0,
       Number(t.quantity) || 0,
-      'B',  // Default to buy side (we don't have the actual side in the snapshot)
-      new Date().toTimeString().slice(0, 8),  // Timestamp
-      '—',  // Owner (unknown from snapshot)
-      false  // resolved flag
+      'B',  // side is not present in snapshot payload
+      new Date().toTimeString().slice(0, 8),
+      '—',
+      false
     ]);
-    console.log('[applyTradesSnapshot] Updated market ' + mn + ' book.trades with ' + bookState.trades.length + ' trades');
-  } else {
-    console.log('[applyTradesSnapshot] Empty trades snapshot, skipping');
-  }
-  
-  // Re-render the market book with the new trades
-  if (symbol === getActiveMarketSymbol(mn)) {
-    market.book = bookState;
+  });
+
+  Object.keys(groupedBySymbol).forEach(symbol => {
+    const bookState = getMarketBookForSymbol(mn, symbol);
+    if (!bookState) return;
+    bookState.trades = groupedBySymbol[symbol];
+  });
+
+  const activeSymbol = getActiveMarketSymbol(mn);
+  const activeBook = getMarketBookForSymbol(mn, activeSymbol);
+  if (activeBook) {
+    market.book = activeBook;
     renderMarketBook(mn);
   }
 }
@@ -2942,15 +2955,6 @@ function renderBook(immediate = false) {
     </div>`;
   }).join('');
 
-  if (chartPts.length < 2 && (lastTradeCount === 0 || book.trades.length === 0)) {
-    const refPrice = referencePriceFromBook(book);
-    if (Number.isFinite(refPrice) && refPrice > 0) {
-      const ts = new Date().toTimeString().slice(0, 8);
-      chartPts = [{ price: refPrice, ts }, { price: refPrice, ts }];
-      drawChart();
-    }
-  }
-
   // update price chart
   if (book.trades.length !== lastTradeCount) {
     const newCount = book.trades.length - lastTradeCount;
@@ -2978,7 +2982,7 @@ function renderLevels(id, levels, cls, maxQ) {
       <div class="bar" style="width:${pct}%"></div>
       <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
-      <span class="lv-px">${px.toFixed(4)}</span></div>`;
+      <span class="lv-px">${fmt(px)}</span></div>`;
   }).join('');
 }
 
@@ -3023,7 +3027,7 @@ function renderMarketBook(marketName) {
       <div class="bar" style="width:${pct}%"></div>
       <span class="lv-maker">${esc(maker.maker)}${makerBadge}</span>
       <span class="lv-qty"><span class="lv-qty-num">${fmtQty(qty)}</span></span>
-      <span class="lv-px">${px.toFixed(4)}</span></div>`;
+      <span class="lv-px">${fmt(px)}</span></div>`;
   });
   
   // Spread
@@ -3076,35 +3080,9 @@ function renderMarketBook(marketName) {
   </div>`;
 }
 
-function referencePriceFromBook(bookState) {
-  const b = bookState || {};
-  const last = Number(b.last);
-  if (Number.isFinite(last) && last > 0) return last;
-
-  const bids = Array.isArray(b.bids) ? b.bids : [];
-  const asks = Array.isArray(b.asks) ? b.asks : [];
-  const bestBid = bids.length ? Number(bids.reduce((max, row) => Number(row.price) > Number(max.price) ? row : max).price) : NaN;
-  const bestAsk = asks.length ? Number(asks.reduce((min, row) => Number(row.price) < Number(min.price) ? row : min).price) : NaN;
-
-  if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > 0 && bestAsk > 0) {
-    return (bestBid + bestAsk) / 2;
-  }
-  if (Number.isFinite(bestBid) && bestBid > 0) return bestBid;
-  if (Number.isFinite(bestAsk) && bestAsk > 0) return bestAsk;
-
-  return null;
-}
-
 function renderMarketMiniChartSvg(bookState) {
   const trades = (bookState && Array.isArray(bookState.trades)) ? bookState.trades : [];
   let points = [...trades].reverse().map(t => Number(t[0])).filter(v => Number.isFinite(v));
-
-  if (points.length < 2) {
-    const refPrice = referencePriceFromBook(bookState);
-    if (Number.isFinite(refPrice) && refPrice > 0) {
-      points = [refPrice, refPrice];
-    }
-  }
 
   const width = 260;
   const height = 58;

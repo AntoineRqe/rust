@@ -276,10 +276,7 @@ pub fn start_order_book_engine_for_symbol(
         match order_book_engine.run() {
             Ok(_) => (),
             Err(e) => {
-                tracing::error!(
-                    "[{}] Order book engine error: {e:#}",
-                    utils::market_name()
-                );
+                tracing::error!("[{}] Order book engine error: {e:#}", utils::market_name());
                 let _ = err_tx.send(format!("Order book engine error: {e:#}"));
             }
         }
@@ -301,7 +298,10 @@ pub fn start_order_book_aggregator(
     let _agg_thread = std::thread::spawn(move || {
         core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
         if let Err(e) = aggregator.run() {
-            tracing::error!("[{}] Order book aggregator error: {e:#}", utils::market_name());
+            tracing::error!(
+                "[{}] Order book aggregator error: {e:#}",
+                utils::market_name()
+            );
             let _ = err_tx.send(format!("Order book aggregator error: {e:#}"));
         }
     });

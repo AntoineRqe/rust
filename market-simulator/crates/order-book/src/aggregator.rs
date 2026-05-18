@@ -6,8 +6,8 @@ use std::sync::{
 use std::time::Duration;
 
 use spsc::spsc_lock_free::{Consumer, Producer};
-use types::macros::SymbolId;
 use types::OrderEvent;
+use types::macros::SymbolId;
 use utils::market_name;
 
 pub struct OrderBookAggregator<'a, const N: usize> {
