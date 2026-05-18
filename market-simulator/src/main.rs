@@ -76,7 +76,6 @@ struct QueueHandle {
     net_to_fix_tx: Option<Arc<channel::Sender<FixRawMsg<RB_SIZE>>>>,
     net_to_fix_rx: Option<Arc<channel::Receiver<FixRawMsg<RB_SIZE>>>>,
     fix_to_ob: Option<memory::SharedQueue<RB_SIZE, OrderEvent>>,
-    ob_to_er: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     ob_to_db: Option<memory::SharedQueue<RB_SIZE, (OrderEvent, OrderResult)>>,
     er_to_fix: Option<memory::SharedQueue<RB_SIZE, (EntityId, ExecutionReportMessage<RB_SIZE>)>>,
 }
@@ -88,10 +87,7 @@ impl QueueHandle {
             &format!("{market_name}_fix_to_order_book"),
             true,
         );
-        let ob_to_er = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(
-            &format!("{market_name}_order_book_to_execution_report"),
-            true,
-        );
+
         let ob_to_db = memory::open_shared_queue::<RB_SIZE, (OrderEvent, OrderResult)>(
             &format!("{market_name}_order_book_to_db"),
             true,
@@ -105,7 +101,6 @@ impl QueueHandle {
             net_to_fix_tx: Some(Arc::new(net_to_fix_tx)),
             net_to_fix_rx: Some(Arc::new(net_to_fix_rx)),
             fix_to_ob: Some(fix_to_ob),
-            ob_to_er: Some(ob_to_er),
             ob_to_db: Some(ob_to_db),
             er_to_fix: Some(er_to_fix),
         }
@@ -140,7 +135,6 @@ fn start_market(
     }
 
     let (fix_tx, aggregator_rx) = queues.fix_to_ob.take().unwrap().queue.split();
-    let (_ob_er_tx, _er_rx) = queues.ob_to_er.take().unwrap().queue.split();
     let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
     let (_ob_db_tx, _ob_db_rx) = queues.ob_to_db.take().unwrap().queue.split();
 

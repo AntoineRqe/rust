@@ -54,9 +54,13 @@ pub struct OrderBookEngine<'a, const N: usize> {
 impl<'a, const N: usize> OrderBookEngine<'a, N> {
     pub fn new(
         fifo_in: Consumer<'a, OrderEvent, N>,
-        execution_report_producer: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
+        execution_report_producer: Option<
+            Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>,
+        >,
         market_data_producer: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
-        database_persistence_producer: Option<Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>>,
+        database_persistence_producer: Option<
+            Arc<crossbeam_channel::Sender<(OrderEvent, OrderResult)>>,
+        >,
         control_rx: crossbeam_channel::Receiver<OrderBookControl>,
         order_book: OrderBook,
         snapshot_ptr: Option<Arc<ArcSwap<Snapshot>>>,

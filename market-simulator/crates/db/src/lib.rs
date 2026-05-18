@@ -66,7 +66,7 @@ impl DatabaseEngine {
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.shutdown.load(Ordering::Relaxed) {
-            match self.fifo_in.try_recv() {
+            match self.fifo_in.recv_timeout(Duration::from_millis(1)) {
                 Ok(exec_report) => {
                     let received_at = Instant::now();
                     if let Err(e) = self.persist_order_update(&exec_report.0, &exec_report.1) {
@@ -79,10 +79,8 @@ impl DatabaseEngine {
                         }
                     }
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_micros(100));
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     break;
                 }
             }

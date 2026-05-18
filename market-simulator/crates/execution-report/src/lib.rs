@@ -42,7 +42,10 @@ impl<const N: usize> ExecutionReportEngine<N> {
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.shutdown.load(Ordering::Relaxed) {
-            match self.fifo_in.try_recv() {
+            match self
+                .fifo_in
+                .recv_timeout(std::time::Duration::from_millis(1))
+            {
                 Ok(exec_report) => {
                     let received_at = Instant::now();
                     self.process_execution_report(&exec_report);
@@ -58,10 +61,8 @@ impl<const N: usize> ExecutionReportEngine<N> {
                         }
                     }
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_micros(100));
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     break;
                 }
             }
@@ -786,10 +787,10 @@ mod tests {
 
     #[test]
     fn test_execution_report_engine() {
-        let mut rb_in = spsc::spsc_lock_free::RingBuffer::<(OrderEvent, OrderResult), 1024>::new();
-        let mut rb_out =
-            spsc::spsc_lock_free::RingBuffer::<(EntityId, ExecutionReportMessage<1024>), 1024>::new();
-        let (fifo_in_tx, fifo_in_rx) = rb_in.split();
+        let (fifo_in_tx, fifo_in_rx) = crossbeam_channel::unbounded::<(OrderEvent, OrderResult)>();
+        let rb_out = Box::leak(Box::new(
+            spsc::spsc_lock_free::RingBuffer::<(EntityId, ExecutionReportMessage<1024>), 1024>::new(),
+        ));
         let (fifo_out_tx, fifo_out_rx) = rb_out.split();
 
         let shutdown_signal = Arc::new(AtomicBool::new(false));
@@ -823,7 +824,7 @@ mod tests {
                 ..Default::default()
             };
 
-            match fifo_in_tx.push((order_event.clone(), order_result)) {
+            match fifo_in_tx.send((order_event.clone(), order_result)) {
                 Ok(_) => {}
                 Err(e) => panic!("Failed to push order event into engine: {:?}", e),
             }
@@ -934,7 +935,7 @@ mod tests {
                 })
                 .expect("Failed to add trade to OrderResult");
 
-            match fifo_in_tx.push((sell_order_event, sell_order_result)) {
+            match fifo_in_tx.send((sell_order_event, sell_order_result)) {
                 Ok(_) => {}
                 Err(e) => panic!("Failed to push sell order event into engine: {:?}", e),
             }
@@ -1133,7 +1134,7 @@ mod tests {
             order_event.orig_cl_ord_id = Some(order_event.cl_ord_id); // Set OrigClOrdID for the cancel order event
             order_event.order_type = types::OrderType::CancelOrder;
 
-            match fifo_in_tx.push((order_event, cancel_order_result)) {
+            match fifo_in_tx.send((order_event, cancel_order_result)) {
                 Ok(_) => {}
                 Err(e) => panic!("Failed to push cancel order event into engine: {:?}", e),
             }
@@ -1174,7 +1175,7 @@ mod tests {
                 ..Default::default()
             };
 
-            match fifo_in_tx.push((order_event, cancel_reject_order_result)) {
+            match fifo_in_tx.send((order_event, cancel_reject_order_result)) {
                 Ok(_) => {}
                 Err(e) => panic!(
                     "Failed to push cancel reject order event into engine: {:?}",
@@ -1205,7 +1206,7 @@ mod tests {
             // Stop the engine
             shutdown_signal.store(true, Ordering::Relaxed);
 
-            match fifo_in_tx.push((OrderEvent::default(), OrderResult::default())) {
+            match fifo_in_tx.send((OrderEvent::default(), OrderResult::default())) {
                 Ok(_) => {}
                 Err(e) => panic!(
                     "Failed to push cancel reject order event into engine: {:?}",

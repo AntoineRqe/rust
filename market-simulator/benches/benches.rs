@@ -72,12 +72,12 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
     let start = Instant::now();
 
-    let mut rb_rx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new(); // Size of the ring buffer
-    let mut rb_tx = RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new(); // Size of the ring buffer
-    let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
+    let (er_inbound_tx, er_inbound_rx) = crossbeam::channel::unbounded::<(OrderEvent, OrderResult)>();
+    
+    let rb_tx = Box::leak(Box::new(RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new()));
+    let ts_rb = Box::leak(Box::new(RingBuffer::<Instant, RB_SIZE>::new()));
 
     thread::scope(|s| {
-        let (er_inbound_tx, er_rx) = rb_rx.split();
         let (er_tx, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
         let metrics = Arc::new(types::MarketMetrics::new());
@@ -85,7 +85,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
         let er_inbound_tx = Arc::new(er_inbound_tx);
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
 
-        let mut engine = ExecutionReportEngine::new(er_rx, er_tx, Arc::clone(&shutdown));
+        let mut engine = ExecutionReportEngine::new(er_inbound_rx, er_tx, Arc::clone(&shutdown));
         engine.set_metrics(Arc::clone(&metrics));
 
         let handle = s.spawn(move || {
@@ -139,7 +139,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
 
                 order_event.timestamp_ms = 0;
 
-                er_inbound_tx.push((order_event, order_result)).unwrap();
+                er_inbound_tx.send((order_event, order_result)).unwrap();
             }
         });
 
@@ -154,7 +154,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
             };
 
             loop {
-                if let Some(_) = er_outbound_rx.pop() {
+                if let Some(_) = er_outbound_rx.try_pop() {
                     break;
                 }
                 std::hint::spin_loop();
@@ -171,7 +171,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
         shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
 
         er_inbound_tx_clone
-            .push((
+            .send((
                 OrderEvent {
                     ..Default::default()
                 },
@@ -202,24 +202,23 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
     let start = Instant::now();
 
-    let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new(); // Size of the ring buffer
-    let mut rb_tx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new(); // Size of the ring buffer
-    let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new(); // Use Instant for homogeneous timing
+    let rb_rx = Box::leak(Box::new(RingBuffer::<OrderEvent, RB_SIZE>::new()));
+    let (ob_tx, ob_outbound_rx) = crossbeam::channel::unbounded::<(OrderEvent, OrderResult)>();
+    let ts_rb = Box::leak(Box::new(RingBuffer::<Instant, RB_SIZE>::new()));
 
     thread::scope(|s| {
-        let (er_inbound_tx, er_rx) = rb_rx.split();
-        let (er_tx, er_outbound_rx) = rb_tx.split();
+        let (ob_inbound_tx, ob_rx) = rb_rx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
 
-        let er_inbound_tx = Arc::new(er_inbound_tx);
-        let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
+        let ob_inbound_tx = Arc::new(ob_inbound_tx);
+        let ob_inbound_tx_clone = Arc::clone(&ob_inbound_tx);
 
         let control_rx = crossbeam::channel::bounded::<order_book::OrderBookControl>(RB_SIZE);
         let order_book = order_book::book::OrderBook::new("TEST".into());
 
         let mut engine = OrderBookEngine::new(
-            er_rx,
-            Some(er_tx),
+            ob_rx,
+            Some(Arc::new(ob_tx)),
             None,
             None,
             control_rx.1,
@@ -272,7 +271,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
 
                 order_event.timestamp_ms = 0;
                 loop {
-                    if let Err(ev_err) = er_inbound_tx.push(order_event) {
+                    if let Err(ev_err) = ob_inbound_tx.push(order_event) {
                         order_event = ev_err;
                         std::hint::spin_loop();
                     } else {
@@ -293,7 +292,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
             };
 
             loop {
-                if let Some(_) = er_outbound_rx.try_pop() {
+                if let Ok(_) = ob_outbound_rx.try_recv() {
                     break;
                 }
                 std::hint::spin_loop();
@@ -309,7 +308,7 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         // Send a dummy message to unblock the engine if it's waiting
         shutdown.store(true, std::sync::atomic::Ordering::Release); // Signal the engine to shut down gracefully
 
-        er_inbound_tx_clone
+        ob_inbound_tx_clone
             .push(OrderEvent {
                 sender_id: EntityId::from_ascii(""),
                 ..Default::default()
@@ -726,19 +725,16 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
     let net_to_fix_rx = Arc::new(net_to_fix_rx);
     let net_to_fix_tx = Arc::new(net_to_fix_tx);
     let net_to_fix_tx_clone = Arc::clone(&net_to_fix_tx);
-    let mut fix_to_ob = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut ob_to_er = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
-
-    // outbound: execution report → fix engine → network
-    let mut er_to_fix = RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new();
+    let (ob_tx, er_rx) = crossbeam::channel::unbounded::<(OrderEvent, OrderResult)>();
     let (response_tx, mut response_rx) = mpsc::channel::<ExecutionReportMessage<RB_SIZE>>(1024); // Channel for receiving responses from the FIX engine, if needed for future tests
 
-    let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
+    let fix_to_ob = Box::leak(Box::new(RingBuffer::<OrderEvent, RB_SIZE>::new()));
+    let er_to_fix = Box::leak(Box::new(RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new()));
+    let ts_rb = Box::leak(Box::new(RingBuffer::<Instant, RB_SIZE>::new()));
 
     thread::scope(|s| {
         let shutdown = Arc::clone(&shutdown);
         let (fix_tx, ob_rx) = fix_to_ob.split();
-        let (ob_tx, er_rx) = ob_to_er.split();
         let (er_tx, fix_resp_rx) = er_to_fix.split();
         let (ts_tx, ts_rx) = ts_rb.split();
 
@@ -757,7 +753,7 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         let order_book = order_book::book::OrderBook::new("TEST".into());
         let mut order_book_engine: OrderBookEngine<'_, 2048> = OrderBookEngine::new(
             ob_rx,
-            Some(ob_tx),
+            Some(Arc::new(ob_tx)),
             None,
             None,
             control_rx.1,
