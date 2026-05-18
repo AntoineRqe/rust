@@ -2186,7 +2186,18 @@ function computeSellCapacity(symbol) {
 
   const holding = currentHoldings[normalizedSymbol] || {};
   const ownedQty = Number(holding.quantity || 0);
-  const reservedSellQty = Object.keys(openOrders).reduce((sum, id) => {
+  const reservedSellQty = reservedSellQtyForSymbol(normalizedSymbol);
+
+  return {
+    available: Math.max(0, ownedQty - reservedSellQty),
+  };
+}
+
+function reservedSellQtyForSymbol(symbol) {
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  if (!normalizedSymbol) return 0;
+
+  return Object.keys(openOrders).reduce((sum, id) => {
     const order = openOrders[id];
     if (!order) return sum;
     if (String(order.side) !== '2') return sum;
@@ -2195,10 +2206,6 @@ function computeSellCapacity(symbol) {
     if (!Number.isFinite(qty) || qty <= 0) return sum;
     return sum + qty;
   }, 0);
-
-  return {
-    available: Math.max(0, ownedQty - reservedSellQty),
-  };
 }
 
 function renderHoldings() {
@@ -2216,7 +2223,9 @@ function renderHoldings() {
 
   list.innerHTML = `<div class="holdings-panel">${entries
     .map(([symbol, holding]) => {
-      const qty = Number((holding && holding.quantity) || 0);
+      const ownedQty = Number((holding && holding.quantity) || 0);
+      const reservedQty = reservedSellQtyForSymbol(symbol);
+      const qty = Math.max(0, ownedQty - reservedQty);
       const avgPrice = Number((holding && holding.avgPrice) || 0);
       return `<div class="holding-card">
         <div class="holding-top">
@@ -2579,6 +2588,7 @@ function renderOrders(marketName, immediate = false) {
   
   if (orderIds.length === 0) {
     list.innerHTML = '<span style="color:var(--muted);font-size:10px">No open orders</span>';
+    renderHoldings();
     renderBuyCapacityHint();
     renderOrderCostPreview();
     return;
@@ -2604,6 +2614,7 @@ function renderOrders(marketName, immediate = false) {
         : ''}
     </div>`;
   }).join('');
+  renderHoldings();
   renderBuyCapacityHint();
   renderOrderCostPreview();
 }
