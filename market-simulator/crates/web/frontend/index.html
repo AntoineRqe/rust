@@ -68,6 +68,7 @@
   .market-card-header{background:var(--panel);padding:10px 12px;border-bottom:1px solid var(--border);
                       display:flex;justify-content:space-between;align-items:center}
   .market-card-header h3{color:var(--teal);font-size:12px;font-weight:bold;margin:0;flex:1}
+  #mobile-markets-tabs{display:none;grid-column:1/-1;gap:6px;padding:0 2px 2px}
   .market-book{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}
   .market-book-layout{display:flex;flex-direction:column;height:100%;min-height:0}
   .market-book-section{display:flex;flex-direction:column;min-height:0;flex:1}
@@ -281,6 +282,8 @@
     #tabbar{display:flex}
     #body{flex-wrap:nowrap;flex-direction:column}
     #markets-container{grid-template-columns:1fr}
+    #mobile-markets-tabs{display:flex}
+    .market-card.mobile-market-hidden{display:none}
     #col-left,#col-book,#col-log,#markets-container{
       width:100%;min-width:0;height:100%;flex-shrink:0;
       border:none;max-height:none;display:none}
@@ -550,6 +553,7 @@ const PENDING_VISIBILITY_DELAY_MS = 250;
 const LOG_DEDUPE_WINDOW_MS = 10000;
 let currentPlayer = sessionStorage.getItem('auth_username') || null;
 let currentIsAdmin = sessionStorage.getItem('auth_is_admin') === 'true';
+let mobileActiveMarket = '';
 let currentPlayerSuffix = '';   // last-4 chars of password hash, used in ClOrdID
 let currentVisitorCount = 0;
 let currentTotalVisitorCount = 0;
@@ -1086,14 +1090,28 @@ function renderMarketsContainer() {
     .map(market => normalizeMarketName(market.name))
     .filter(name => markets[name]);
 
+  if (!mobileActiveMarket || !marketNames.includes(mobileActiveMarket)) {
+    mobileActiveMarket = marketNames[0] || '';
+  }
+
+  const mobileTabsHtml = marketNames.length > 0
+    ? `<div id="mobile-markets-tabs">${marketNames.map(name => {
+        const active = normalizeMarketName(name) === normalizeMarketName(mobileActiveMarket);
+        return `<button type="button" class="symbol-tab ${active ? 'active' : ''}" onclick="selectMobileMarket('${esc(name)}')">${esc(name)}</button>`;
+      }).join('')}</div>`
+    : '';
+
   const html = marketNames.map(name => {
     const m = markets[name];
     const symbol = normalizeMarketName(m.activeSymbol || m.book.symbol || DEFAULT_SYMBOL);
     const lastPrice = m.book.last != null ? fmt(m.book.last) : '—';
     const statusColor = m.connected ? 'var(--green)' : 'var(--muted)';
     const staleBadge = !m.connected ? '<span class="stale-badge" style="display:inline-block;margin-left:8px">STALE (DISCONNECTED)</span>' : '';
+    const hiddenOnMobile = mobileActiveMarket && normalizeMarketName(name) !== normalizeMarketName(mobileActiveMarket)
+      ? ' mobile-market-hidden'
+      : '';
     // Keep the last known book and chart visible, only update connection status and show stale badge if disconnected
-    return `<div class="market-card">
+    return `<div class="market-card${hiddenOnMobile}">
       <div class="market-card-header">
         <div>
           <h3>${esc(name)}</h3>
@@ -1117,8 +1135,16 @@ function renderMarketsContainer() {
       <p>NASDA / NYSE markets are not configured.</p>
     </div>`;
   } else {
-    container.innerHTML = html;
+    container.innerHTML = `${mobileTabsHtml}${html}`;
   }
+}
+
+function selectMobileMarket(marketName) {
+  const normalized = normalizeMarketName(marketName);
+  if (!normalized) return;
+  mobileActiveMarket = normalized;
+  renderMarketsContainer();
+  renderMarketBook(normalized);
 }
 
 
