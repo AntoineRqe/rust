@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use types::macros::{EntityId, OrderId, SymbolId};
-use types::{OrderEvent, OrderResult, Trades};
+use types::{OrderEvent, OrderResult, Trades, ExecutionReportMessage, ExecReportData};
 
 const PRODUCER_CORE_OFFSET: usize = 0; // Offset for producer core
 const CONSUMER_CORE_OFFSET: usize = 2; // Offset for consumer core
@@ -73,7 +73,7 @@ fn benchmark_latency_execution_report(iters: u64, histogram: &mut Histogram<u64>
     let start = Instant::now();
 
     let mut rb_rx = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new(); // Size of the ring buffer
-    let mut rb_tx = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new(); // Size of the ring buffer
+    let mut rb_tx = RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new(); // Size of the ring buffer
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
     thread::scope(|s| {
@@ -210,7 +210,6 @@ fn benchmark_latency_order_book(iters: u64, histogram: &mut Histogram<u64>) -> D
         let (er_inbound_tx, er_rx) = rb_rx.split();
         let (er_tx, er_outbound_rx) = rb_tx.split();
         let (ts_tx, ts_rx) = ts_rb.split();
-        let metrics = Arc::new(types::MarketMetrics::new());
 
         let er_inbound_tx = Arc::new(er_inbound_tx);
         let er_inbound_tx_clone = Arc::clone(&er_inbound_tx);
@@ -464,7 +463,7 @@ fn benchmark_latency_fix_inbound(iters: u64, histogram: &mut Histogram<u64>) -> 
     let start = Instant::now();
 
     let mut rb_rx = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut rb_tx = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
+    let mut rb_tx = RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new();
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
     thread::scope(|s| {
@@ -580,10 +579,10 @@ fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) ->
     let net_to_fix_tx_clone = Arc::clone(&net_to_fix_tx);
 
     let mut fix_to_ob = RingBuffer::<OrderEvent, RB_SIZE>::new();
-    let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
+    let mut er_to_fix = RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new();
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
-    let (response_tx, mut response_rx) = mpsc::channel::<FixRawMsg<RB_SIZE>>(1024);
+    let (response_tx, mut response_rx) = mpsc::channel::<ExecutionReportMessage<RB_SIZE>>(1024);
 
     thread::scope(|s| {
         let (fix_to_ob_tx, fix_to_ob_rx) = fix_to_ob.split();
@@ -637,15 +636,26 @@ fn benchmark_latency_fix_outbound(iters: u64, histogram: &mut Histogram<u64>) ->
         s.spawn(move || {
             core_affinity::set_for_current(producer_core);
 
-            let response_msg = FixRawMsg {
-                len: 5,
-                data: {
-                    let mut data = [0u8; 2048];
-                    data[..5].copy_from_slice(b"8=FIX");
-                    data
-                },
-                resp_queue: None,
+            let exec_data = ExecReportData {
+                order_id: 0,
+                cl_ord_id: "TEST".to_string(),
+                symbol: "EURUSD".to_string(),
+                side: 1,
+                ord_status: 2,
+                price: 1.23456,
+                qty: 1_000_000.0,
+                leaves_qty: 0.0,
             };
+            
+            let fix_msg = b"8=FIX.4.4\x019=0000\x0135=8\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20240219-12:30:00.000\x0139=2\x0110=123\x01";
+            let mut fix_data = [0u8; RB_SIZE];
+            fix_data[..fix_msg.len()].copy_from_slice(fix_msg);
+            
+            let response_msg = ExecutionReportMessage::new(
+                fix_msg.len() as u16,
+                fix_data,
+                exec_data,
+            );
 
             for i in 0..iters {
                 if i > 0 {
@@ -720,8 +730,8 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
     let mut ob_to_er = RingBuffer::<(OrderEvent, OrderResult), RB_SIZE>::new();
 
     // outbound: execution report → fix engine → network
-    let mut er_to_fix = RingBuffer::<(EntityId, FixRawMsg<RB_SIZE>), RB_SIZE>::new();
-    let (response_tx, mut response_rx) = mpsc::channel::<FixRawMsg<RB_SIZE>>(1024); // Channel for receiving responses from the FIX engine, if needed for future tests
+    let mut er_to_fix = RingBuffer::<(EntityId, ExecutionReportMessage<RB_SIZE>), RB_SIZE>::new();
+    let (response_tx, mut response_rx) = mpsc::channel::<ExecutionReportMessage<RB_SIZE>>(1024); // Channel for receiving responses from the FIX engine, if needed for future tests
 
     let mut ts_rb = RingBuffer::<Instant, RB_SIZE>::new();
 
@@ -762,11 +772,13 @@ fn benchmark_latency_all(iters: u64, histogram: &mut Histogram<u64>) -> Duration
         });
 
         // fix engine thread
+        let metrics = Arc::new(types::MarketMetrics::new());
         let fix_engine = FixEngine::new(
             Arc::clone(&net_to_fix_rx),
             fix_tx,
             fix_resp_rx,
             Arc::clone(&shutdown),
+            Arc::clone(&metrics),
         );
         let (mut inbound_engine, mut outbound_engine) = fix_engine.split();
 

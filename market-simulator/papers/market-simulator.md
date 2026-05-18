@@ -382,6 +382,7 @@ It also display the state of the order book, the spread, and all transaction mad
 
 I used `criterion` crate to benchmark the latency of each component in the market simulator. Each component is pinned on a non-isolated core and I measured the latency from the moment it enter and exit each component through the SPSC ring buffer channels. The results are as follows:
 
+Performance at 05/03/2026
 ```
 Name                 │   p50 (ns) │   p99 (ns) │  p999 (ns) │   vs base
 ────────────────────────────────────────────────────────────────────────
@@ -389,6 +390,18 @@ Order Book           │        681 │       1914 │       4371 │      1.00x
 Execution Report     │       1983 │       3899 │       7615 │      2.91x
 FIX Engine           │      10783 │      15015 │      50623 │     15.83x
 Overall              │      30047 │      39423 │     157055 │     44.12x
+```
+
+Performance at 18/05/2026
+```
+Name                 │   p50 (ns) │   p99 (ns) │  p999 (ns) │   vs base
+────────────────────────────────────────────────────────────────────────
+FIX Inbound          │       1082 │       1984 │       6523 │      1.00x
+Execution Report     │       3837 │       4499 │       8287 │      3.55x
+FIX Outbound         │       6715 │       8247 │      14247 │      6.21x
+Order Book           │       7407 │       9543 │      21855 │      6.85x
+Market Feed          │      10095 │      28015 │     151551 │      9.33x
+Overall              │      23215 │      29279 │      72639 │     21.46x
 ```
 
 The order book and execution report generator have very low latency, with p50 latencies of 681ns and 1983ns respectively. The FIX Engine has a higher latency, with a p50 latency of 10783ns, which is expected due to the complexity of parsing FIX messages and generating execution reports. The overall latency from receiving an order to sending back an execution report is around 30 microseconds at p50, which is quite good for a market simulator.
@@ -451,4 +464,3 @@ pub fn open_shared_queue<'a, const N: usize, T>(name: &str, create: bool) -> Sha
 In conclusion, I have implemented a market simulator in Rust that consists of several components working together to simulate a financial market. The architecture is designed to allow for modularity and separation of concerns, with each component running on a separate core to ensure low latency processing of orders and generation of execution reports.
 
 I plan to implement additional features in the future, such as support for more complex order types (e.g., stop orders, iceberg orders). I also want to implement Market Data Generator that can generate market data (e.g., price updates, order book snapshots) and send it to clients in real-time. This would allow clients to have a more realistic view of the market and make informed trading decisions based on the current state of the market
-
