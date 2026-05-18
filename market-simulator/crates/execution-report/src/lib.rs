@@ -527,10 +527,10 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
         let cumulative_fills: f64 = order_result
             .trades
             .iter()
-            .map(|t| t.quantity.raw() as f64 / 1_000_000.0) // Convert from fixed point
+            .map(|t| t.quantity.to_f64())
             .sum();
 
-        let qty = order_event.quantity.raw() as f64 / 1_000_000.0;
+        let qty = order_event.quantity.to_f64();
         let leaves_qty = qty - cumulative_fills;
 
         ExecReportData {
@@ -539,7 +539,7 @@ impl<'a, const N: usize> ExecutionReportEngine<'a, N> {
             symbol: order_event.symbol.to_string(),
             side,
             ord_status,
-            price: order_event.price.raw() as f64 / 1_000_000.0,
+            price: order_event.price.to_f64(),
             qty,
             leaves_qty,
         }
@@ -800,7 +800,7 @@ mod tests {
                 orig_cl_ord_id: None,
                 side: types::Side::Buy,
                 price: FixedPointArithmetic(123_456_000), // 123.456 in FIX price format (8 decimal places)
-                quantity: FixedPointArithmetic(1_000_000),
+                quantity: FixedPointArithmetic(100_000_000),
                 sender_id: EntityId::from_ascii("SENDER"),
                 target_id: EntityId::from_ascii("TARGET"),
                 symbol: SymbolId::from_ascii("TEST"),
@@ -898,7 +898,7 @@ mod tests {
                 orig_cl_ord_id: None,
                 side: Side::Sell,
                 price: FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
-                quantity: FixedPointArithmetic(1_000_000),
+                quantity: FixedPointArithmetic(100_000_000),
                 sender_id: EntityId::from_ascii("SENDER2"),
                 target_id: EntityId::from_ascii("TARGET2"),
                 symbol: SymbolId::from_ascii("TEST"),
@@ -916,7 +916,7 @@ mod tests {
                 .trades
                 .add_trade(Trade {
                     price: FixedPointArithmetic(12_345_600_000), // 123.456 in FIX price format (8 decimal places)
-                    quantity: FixedPointArithmetic(5_000_000_000), // 50 units in FIX quantity format (6 decimal places)
+                    quantity: FixedPointArithmetic(5_000_000_000), // 50 units in FIX quantity format (8 decimal places)
                     id: 0,
                     cl_ord_id: OrderId::from_ascii("CLORD12345"),
                     order_qty: FixedPointArithmetic(5_000_000_000),

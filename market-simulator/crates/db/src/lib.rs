@@ -14,6 +14,19 @@ use types::{FixedPointArithmetic, OrderEvent, OrderResult, OrderStatus, OrderTyp
 use url::Url;
 use utils::market_name;
 
+#[derive(Debug, Clone)]
+pub struct IdempotencyRecord {
+    pub status: String,
+    pub request_hash: Option<String>,
+    pub response: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub enum IdempotencyClaim {
+    Inserted,
+    Existing(IdempotencyRecord),
+}
+
 /// Database engine that consumes order events and results from the matching engine
 pub struct DatabaseEngine<'a, const N: usize> {
     /// Consumer for order events and results coming from the matching engine
@@ -788,6 +801,65 @@ pub async fn persist_order_update(
     sync_pending_orders(&mut tx, order_event, order_result, result_type).await?;
 
     tx.commit().await?;
+    Ok(())
+}
+
+pub async fn claim_idempotency_key(
+    pool: &PgPool,
+    key: &str,
+    request_hash: Option<&str>,
+) -> Result<IdempotencyClaim, sqlx::Error> {
+    let row = query(
+        r#"
+        INSERT INTO idempotency_keys (key, status, request_hash)
+        VALUES ($1, 'processing', $2)
+        ON CONFLICT (key) DO UPDATE SET
+            updated_at = NOW()
+        RETURNING
+            (xmax = 0) AS inserted,
+            status,
+            request_hash,
+            response
+        "#,
+    )
+    .bind(key)
+    .bind(request_hash)
+    .fetch_one(pool)
+    .await?;
+
+    let inserted: bool = row.get("inserted");
+    if inserted {
+        return Ok(IdempotencyClaim::Inserted);
+    }
+
+    Ok(IdempotencyClaim::Existing(IdempotencyRecord {
+        status: row.get("status"),
+        request_hash: row.get("request_hash"),
+        response: row.get("response"),
+    }))
+}
+
+pub async fn update_idempotency_key_response(
+    pool: &PgPool,
+    key: &str,
+    status: &str,
+    response: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    query(
+        r#"
+        UPDATE idempotency_keys
+        SET status = $2,
+            response = $3,
+            updated_at = NOW()
+        WHERE key = $1
+        "#,
+    )
+    .bind(key)
+    .bind(status)
+    .bind(response)
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 

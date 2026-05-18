@@ -21,6 +21,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
+use sqlx::PgPool;
 use types::consts::RB_SIZE;
 use utils::market_name;
 
@@ -55,6 +56,8 @@ pub struct AppState {
     pub fix_session_manager: FIXSessionManager,
     /// Recent trades for price chart initialization.
     pub trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
+    /// Shared market database pool used for idempotency and web reads.
+    pub market_db_pool: PgPool,
 }
 
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
@@ -151,35 +154,33 @@ async fn serve(
 
     // Load trades for price chart initialization
     let trades_queue = Arc::new(Mutex::new(VecDeque::new()));
-    match db::connect(&market_database_url).await {
-        Ok(pool) => match db::collect_last_n_trades(&pool, 10).await {
-            Ok(trades) => {
-                let mut queue = trades_queue.lock().unwrap();
-                for trade in trades {
-                    queue.push_back(TradeView {
-                        id: trade.id,
-                        price: trade.price.to_f64(),
-                        quantity: trade.quantity.to_f64(),
-                        cl_ord_id: trade.cl_ord_id.to_string(),
-                    });
-                }
-                tracing::info!(
-                    "[{}] Loaded {} trades from database for price chart",
-                    market_name(),
-                    queue.len()
-                );
+    let market_db_pool = db::connect(&market_database_url).await.map_err(|e| {
+        let detail = format_error_chain(&e);
+        Box::new(std::io::Error::other(format!(
+            "failed to connect to market database at '{}': {}",
+            market_database_url, detail
+        ))) as Box<dyn std::error::Error>
+    })?;
+    match db::collect_last_n_trades(&market_db_pool, 10).await {
+        Ok(trades) => {
+            let mut queue = trades_queue.lock().unwrap();
+            for trade in trades {
+                queue.push_back(TradeView {
+                    id: trade.id,
+                    price: trade.price.to_f64(),
+                    quantity: trade.quantity.to_f64(),
+                    cl_ord_id: trade.cl_ord_id.to_string(),
+                });
             }
-            Err(e) => {
-                tracing::warn!(
-                    "[{}] Failed to query trades from database: {}",
-                    market_name(),
-                    e
-                );
-            }
-        },
+            tracing::info!(
+                "[{}] Loaded {} trades from database for price chart",
+                market_name(),
+                queue.len()
+            );
+        }
         Err(e) => {
-            tracing::error!(
-                "[{}] Failed to connect to database for trades: {}",
+            tracing::warn!(
+                "[{}] Failed to query trades from database: {}",
                 market_name(),
                 e
             );
@@ -195,6 +196,7 @@ async fn serve(
         total_visitors: Arc::new(AtomicUsize::new(0)),
         fix_session_manager: FIXSessionManager::new(fix_tx),
         trades_queue,
+        market_db_pool,
     };
     state.bus.set_metrics(Arc::clone(&metrics));
 

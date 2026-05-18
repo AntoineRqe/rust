@@ -1,13 +1,13 @@
 use crate::order_book::L3OrderView;
 use players::players::{HoldingSummary, PendingOrder};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
 
 /// Trade data for WebSocket transmission
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeView {
     pub id: u64,
     pub price: f64,
@@ -17,7 +17,7 @@ pub struct TradeView {
 
 /// Every event the FIX engine produces that the browser needs to know about.
 /// This is a plain serializable type — no FIX internals leak into the web layer.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsEvent {
     /// A raw FIX message (exec report, market data, etc.)

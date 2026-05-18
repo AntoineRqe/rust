@@ -12,6 +12,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
+use sha2::{Digest, Sha256};
 use players::players::PendingOrder;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -584,6 +585,140 @@ async fn handle_browser_message(
         } => {
             let order_start_time = std::time::Instant::now();
 
+            let sender_id = sender
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("BROWSER"))
+                .unwrap_or_else(|| username.to_string());
+            let target_id = target
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "SERVER1".into());
+            let idempotency_key = order_idempotency_key(&sender_id, &clord_id);
+            let request_hash = order_request_hash(
+                &sender_id,
+                &clord_id,
+                &symbol,
+                &side,
+                qty,
+                price,
+                &target_id,
+            );
+
+            match db::claim_idempotency_key(
+                &state.market_db_pool,
+                &idempotency_key,
+                Some(request_hash.as_str()),
+            )
+            .await
+            {
+                Ok(db::IdempotencyClaim::Inserted) => {}
+                Ok(db::IdempotencyClaim::Existing(record)) => {
+                    if record.request_hash.as_deref() == Some(request_hash.as_str())
+                        || record.request_hash.is_none()
+                    {
+                        match record.status.as_str() {
+                            "processing" => {
+                                state.bus.publish(WsEvent::FixMessage {
+                                    label: format!("IN PROGRESS [{}]", clord_id),
+                                    body: "Order is already being processed.".into(),
+                                    tag: "info".into(),
+                                    recipient: Some(username.to_string()),
+                                });
+                            }
+                            "completed" | "failed" => {
+                                if let Some(response) = record.response {
+                                    match serde_json::from_value::<WsEvent>(response) {
+                                        Ok(event) => {
+                                            state.bus.publish(event);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "[{}] Failed to replay idempotent response for '{}': {}",
+                                                market_name(),
+                                                clord_id,
+                                                e
+                                            );
+                                            state.bus.publish(WsEvent::FixMessage {
+                                                label: "ERROR".into(),
+                                                body: "Stored idempotent response is invalid.".into(),
+                                                tag: "err".into(),
+                                                recipient: Some(username.to_string()),
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    state.bus.publish(WsEvent::FixMessage {
+                                        label: "ERROR".into(),
+                                        body: "Idempotent response is missing.".into(),
+                                        tag: "err".into(),
+                                        recipient: Some(username.to_string()),
+                                    });
+                                }
+                            }
+                            other => {
+                                tracing::warn!(
+                                    "[{}] Unknown idempotency status '{}' for key '{}'",
+                                    market_name(),
+                                    other,
+                                    idempotency_key
+                                );
+                                state.bus.publish(WsEvent::FixMessage {
+                                    label: "ERROR".into(),
+                                    body: "Order idempotency state is invalid.".into(),
+                                    tag: "err".into(),
+                                    recipient: Some(username.to_string()),
+                                });
+                            }
+                        }
+                        return;
+                    }
+
+                    tracing::warn!(
+                        "[{}] Idempotency key '{}' reused with different request hash",
+                        market_name(),
+                        idempotency_key
+                    );
+                    let event = WsEvent::FixMessage {
+                        label: format!("REJECTED ✕ [{}]", clord_id),
+                        body: "Idempotency key reused with a different order payload.".into(),
+                        tag: "err".into(),
+                        recipient: Some(username.to_string()),
+                    };
+                    let response = serde_json::to_value(&event).unwrap();
+                    if let Err(e) = db::update_idempotency_key_response(
+                        &state.market_db_pool,
+                        &idempotency_key,
+                        "failed",
+                        response,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "[{}] Failed to persist idempotency mismatch response: {}",
+                            market_name(),
+                            e
+                        );
+                    }
+                    state.bus.publish(event);
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "[{}] Failed to claim idempotency key for '{}': {}",
+                        market_name(),
+                        clord_id,
+                        e
+                    );
+                    state.bus.publish(WsEvent::FixMessage {
+                        label: "ERROR".into(),
+                        body: "Unable to reserve idempotency key.".into(),
+                        tag: "err".into(),
+                        recipient: Some(username.to_string()),
+                    });
+                    return;
+                }
+            }
+
             tracing::info!(
                 "[{}] Browser order: {} {} {} @ {}",
                 market_name(),
@@ -605,8 +740,6 @@ async fn handle_browser_message(
                 let required_notional = qty * price;
                 if required_notional.is_finite() && required_notional > 0.0 {
                     if let Some(player) = &player_state {
-                        // Calculate the notional value of the player's existing pending BUY orders to determine how many tokens are currently reserved.
-                        // This ensures that the player cannot exceed their token balance by placing multiple pending orders.
                         let reserved_notional: f64 = player
                             .pending_orders
                             .iter()
@@ -616,7 +749,7 @@ async fn handle_browser_message(
 
                         let available_tokens = player.tokens - reserved_notional;
                         if available_tokens + 1e-9 < required_notional {
-                            state.bus.publish(WsEvent::FixMessage {
+                            let event = WsEvent::FixMessage {
                                 label: format!("REJECTED ✕ [{}]", clord_id),
                                 body: format!(
                                     "Insufficient tokens for BUY order: required {:.2}, available {:.2}.",
@@ -625,14 +758,29 @@ async fn handle_browser_message(
                                 ),
                                 tag: "err".into(),
                                 recipient: Some(username.to_string()),
-                            });
+                            };
+                            let response = serde_json::to_value(&event).unwrap();
+                            if let Err(e) = db::update_idempotency_key_response(
+                                &state.market_db_pool,
+                                &idempotency_key,
+                                "failed",
+                                response,
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    "[{}] Failed to persist BUY rejection response: {}",
+                                    market_name(),
+                                    e
+                                );
+                            }
+                            state.bus.publish(event);
                             return;
                         }
                     }
                 }
             } else if side == "2" {
                 if qty.is_finite() && qty > 0.0 {
-                    // Admin bypass: admins can generate SELL orders without owning inventory
                     if !is_admin {
                         if let Some(player) = &player_state {
                             let normalized_symbol = symbol.to_uppercase();
@@ -653,7 +801,7 @@ async fn handle_browser_message(
 
                             let available_qty = (owned_qty - reserved_sell_qty).max(0.0);
                             if available_qty + 1e-9 < qty {
-                                state.bus.publish(WsEvent::FixMessage {
+                                let event = WsEvent::FixMessage {
                                     label: format!("REJECTED ✕ [{}]", clord_id),
                                     body: format!(
                                         "Insufficient equity inventory for SELL {}: required {:.0}, available {:.0}.",
@@ -663,7 +811,23 @@ async fn handle_browser_message(
                                     ),
                                     tag: "err".into(),
                                     recipient: Some(username.to_string()),
-                                });
+                                };
+                                let response = serde_json::to_value(&event).unwrap();
+                                if let Err(e) = db::update_idempotency_key_response(
+                                    &state.market_db_pool,
+                                    &idempotency_key,
+                                    "failed",
+                                    response,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        "[{}] Failed to persist SELL rejection response: {}",
+                                        market_name(),
+                                        e
+                                    );
+                                }
+                                state.bus.publish(event);
                                 return;
                             }
                         }
@@ -671,32 +835,49 @@ async fn handle_browser_message(
                 }
             }
 
-            let sender_id = sender
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("BROWSER"))
-                .unwrap_or_else(|| username.to_string());
-            let target_id = target
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "SERVER1".into());
-
             // Record the order in the player's pending list.
             // Token balance is updated only on transaction (execution reports).
-            state
-                .player_client
-                .lock()
-                .await
-                .add_pending_order(
-                    username,
-                    PendingOrder {
-                        cl_ord_id: clord_id.clone(),
-                        symbol: symbol.clone(),
-                        side: side.clone(),
-                        qty,
-                        price,
-                    },
+            let pending_order_added = {
+                let mut client = state.player_client.lock().await;
+                client
+                    .add_pending_order(
+                        username,
+                        PendingOrder {
+                            cl_ord_id: clord_id.clone(),
+                            symbol: symbol.clone(),
+                            side: side.clone(),
+                            qty,
+                            price,
+                        },
+                    )
+                    .await
+            };
+
+            if !pending_order_added {
+                let event = WsEvent::FixMessage {
+                    label: format!("REJECTED ✕ [{}]", clord_id),
+                    body: "Unable to record pending order.".into(),
+                    tag: "err".into(),
+                    recipient: Some(username.to_string()),
+                };
+                let response = serde_json::to_value(&event).unwrap();
+                if let Err(e) = db::update_idempotency_key_response(
+                    &state.market_db_pool,
+                    &idempotency_key,
+                    "failed",
+                    response,
                 )
-                .await;
+                .await
+                {
+                    tracing::error!(
+                        "[{}] Failed to persist pending-order rejection response: {}",
+                        market_name(),
+                        e
+                    );
+                }
+                state.bus.publish(event);
+                return;
+            }
 
             // Track the order event for metrics and latency
             metrics
@@ -721,8 +902,7 @@ async fn handle_browser_message(
                 "[{}] Built FIX message for browser order, injecting into FIX engine...",
                 market_name()
             );
-            // Log it to the browser as a SENT message
-            state.bus.publish(WsEvent::FixMessage {
+            let sent_event = WsEvent::FixMessage {
                 label: format!(
                     "SENT ▶  ({} {} {} @ {})",
                     if side == "1" { "BUY" } else { "SELL" },
@@ -733,7 +913,9 @@ async fn handle_browser_message(
                 body: pretty_fix(&fix_bytes),
                 tag: "send".into(),
                 recipient: Some(username.to_string()),
-            });
+            };
+            // Log it to the browser as a SENT message
+            state.bus.publish(sent_event);
 
             match state
                 .fix_session_manager
@@ -741,6 +923,7 @@ async fn handle_browser_message(
                     &username,
                     &fix_bytes,
                     state.player_client.clone(),
+                    state.market_db_pool.clone(),
                     &state.bus,
                     Arc::clone(metrics),
                     state.order_book.clone(),
@@ -763,15 +946,35 @@ async fn handle_browser_message(
                         username,
                         e
                     );
-                    state.bus.publish(WsEvent::FixMessage {
+                    state
+                        .player_client
+                        .lock()
+                        .await
+                        .remove_pending_order(username, &clord_id)
+                        .await;
+                    let error_event = WsEvent::FixMessage {
                         label: "ERROR".into(),
                         body: format!("Failed to send FIX order: {}", e),
                         tag: "error".into(),
                         recipient: Some(username.to_string()),
-                    });
+                    };
+                    if let Err(e) = db::update_idempotency_key_response(
+                        &state.market_db_pool,
+                        &idempotency_key,
+                        "failed",
+                        serde_json::to_value(&error_event).unwrap(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "[{}] Failed to persist failed idempotency response: {}",
+                            market_name(),
+                            e
+                        );
+                    }
+                    state.bus.publish(error_event);
                 }
             }
-
             tracing::debug!("[{}] Browser order injected into FIX engine", market_name());
         }
 
@@ -813,6 +1016,7 @@ async fn handle_browser_message(
                     &username,
                     &fix_bytes,
                     state.player_client.clone(),
+                    state.market_db_pool.clone(),
                     &state.bus,
                     Arc::clone(metrics),
                     state.order_book.clone(),
@@ -982,6 +1186,40 @@ async fn handle_browser_message(
             );
         }
     }
+}
+
+fn order_idempotency_key(sender_id: &str, clord_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(sender_id.as_bytes());
+    hasher.update(b"/");
+    hasher.update(clord_id.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn order_request_hash(
+    sender_id: &str,
+    clord_id: &str,
+    symbol: &str,
+    side: &str,
+    qty: f64,
+    price: f64,
+    target_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(sender_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(clord_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(symbol.as_bytes());
+    hasher.update(b"|");
+    hasher.update(side.as_bytes());
+    hasher.update(b"|");
+    hasher.update(format!("{qty:.10}").as_bytes());
+    hasher.update(b"|");
+    hasher.update(format!("{price:.10}").as_bytes());
+    hasher.update(b"|");
+    hasher.update(target_id.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 // ── FIX message builders ──────────────────────────────────────────────────────

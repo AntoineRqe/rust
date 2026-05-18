@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use crossbeam_channel::TrySendError;
 use fix::engine::FixRawMsg;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
+use sqlx::PgPool;
 use types::consts::RB_SIZE;
 use types::{ExecutionReportMessage, ExecReportData};
 
@@ -104,6 +106,7 @@ impl FIXSessionManager {
         &self,
         username: &str,
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
+        market_db_pool: PgPool,
         bus: &EventBus,
         metrics: Arc<Metrics>,
         order_book: Arc<Mutex<OrderBookState>>,
@@ -135,6 +138,7 @@ impl FIXSessionManager {
             let metrics = Arc::clone(&metrics);
             let order_book = order_book.clone();
             let trades_queue = trades_queue.clone();
+            let market_db_pool = market_db_pool.clone();
             let session_key = session_key.clone();
 
             // Spawn the background reader task for this session.
@@ -159,7 +163,7 @@ impl FIXSessionManager {
 
                                 // Reconstruct raw FIX bytes for gRPC call (client display)
                                 let raw_msg = exec_msg.fix_data[..exec_msg.fix_len as usize].to_vec();
-                                let body = pretty_fix(&raw_msg);
+                                let body = pretty_fix_for_display(&raw_msg);
 
                                 // Apply execution report via gRPC to player service
                                 let mut client = player_client.lock().await;
@@ -181,6 +185,28 @@ impl FIXSessionManager {
                                     );
                                 }
                                 drop(client); // Release lock before publishing
+
+                                // Persist the latest FIX response for idempotent replays.
+                                let response_event = WsEvent::FixMessage {
+                                    label: classify_fix_msg(&raw_msg),
+                                    body: body.clone(),
+                                    tag: "feed".into(),
+                                    recipient: Some(username.clone()),
+                                };
+                                if let Err(e) = db::update_idempotency_key_response(
+                                    &market_db_pool,
+                                    &idempotency_key_for(&username, &exec_data.cl_ord_id),
+                                    "completed",
+                                    serde_json::to_value(&response_event).unwrap(),
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        "[{}] Failed to persist FIX response for idempotency: {}",
+                                        market_name(),
+                                        e
+                                    );
+                                }
 
                                 // Update backend order book using pre-parsed data (no FIX parsing!)
                                 update_backend_order_book_from_exec_report(exec_data, &order_book);
@@ -219,12 +245,7 @@ impl FIXSessionManager {
                                 }
 
                                 // Broadcast so connected browser clients can display it.
-                                bus.publish(WsEvent::FixMessage {
-                                    label: classify_fix_msg(&raw_msg),
-                                    body,
-                                    tag: "feed".into(),
-                                    recipient: Some(username.clone()),
-                                });
+                                bus.publish(response_event);
                             },
                             None => {
                                 tracing::info!(
@@ -270,6 +291,7 @@ impl FIXSessionManager {
         username: &str,
         bytes: &[u8],
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
+        market_db_pool: PgPool,
         bus: &EventBus,
         metrics: Arc<Metrics>,
         order_book: Arc<Mutex<OrderBookState>>,
@@ -286,6 +308,7 @@ impl FIXSessionManager {
         let response_tx = self.get_or_create_session(
             username,
             player_client,
+            market_db_pool,
             bus,
             metrics,
             order_book,
@@ -324,9 +347,50 @@ impl FIXSessionManager {
 
 // ── FIX helpers ───────────────────────────────────────────────────────────────
 
+fn idempotency_key_for(username: &str, clord_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(username.as_bytes());
+    hasher.update(b"/");
+    hasher.update(clord_id.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// Pipe-delimited human-readable FIX string.
 pub fn pretty_fix(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).replace('\x01', " │ ")
+}
+
+/// Human-friendly FIX string for browser display.
+///
+/// Execution reports use fixed-point fields with 8 fractional digits in the
+/// protocol payload, but the UI should show trimmed decimals.
+pub fn pretty_fix_for_display(raw: &[u8]) -> String {
+    let s = String::from_utf8_lossy(raw);
+    s.split('\x01')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let Some((tag, value)) = part.split_once('=') else {
+                return part.to_string();
+            };
+
+            let value = match tag {
+                "6" | "14" | "31" | "32" | "38" | "44" | "151" => trim_fixed_decimal(value),
+                _ => value.to_string(),
+            };
+
+            format!("{tag}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join(" │ ")
+}
+
+fn trim_fixed_decimal(value: &str) -> String {
+    let trimmed = value.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Short label for a FIX message.
@@ -427,4 +491,3 @@ fn update_backend_order_book_from_exec_report(
         _ => {} // Unknown status, ignore
     }
 }
-
