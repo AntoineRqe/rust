@@ -121,6 +121,30 @@
   .spin-wrap input{flex:1;min-width:0}
   .frow input:focus{border-color:var(--blue)}
   .frow input:disabled{opacity:.4;cursor:not-allowed}
+  .symbol-row{align-items:flex-start}
+  .symbol-tabs{display:flex;flex-wrap:wrap;gap:6px;flex:1;min-width:0}
+  .symbol-tab{
+    padding:6px 10px;
+    background:#0e1520;
+    color:var(--muted);
+    border:1px solid var(--border);
+    border-radius:4px;
+    font-size:10px;
+    font-weight:bold;
+    letter-spacing:.05em;
+    text-transform:uppercase;
+    min-height:28px;
+    white-space:nowrap;
+  }
+  .symbol-tab.active{
+    color:var(--green);
+    border-color:var(--green);
+    background:rgba(0,230,118,.08);
+  }
+  .symbol-tab:disabled{
+    opacity:.4;
+    cursor:not-allowed;
+  }
   button{font-family:'Courier New',monospace;cursor:pointer;border:none;outline:none}
   button:disabled{opacity:.4;cursor:not-allowed}
   .btn{display:block;width:calc(100% - 28px);margin:4px 14px;
@@ -300,10 +324,14 @@
 <!-- LEFT: order entry -->
 <div id="col-left" class="panel">
   <div class="stitle">ORDER ENTRY</div><div class="ssep"></div>
-  <div class="frow"><label>Market</label>
-    <select id="o-market"></select>
+  <div class="frow symbol-row"><label>Market</label>
+    <div id="market-tabs" class="symbol-tabs"></div>
+    <select id="o-market" style="display:none"></select>
   </div>
-  <div class="frow"><label>Symbol</label>     <select id="o-sym"></select></div>
+  <div class="frow symbol-row"><label>Symbol</label>
+    <div id="symbol-tabs" class="symbol-tabs"></div>
+    <select id="o-sym" style="display:none"></select>
+  </div>
   <div class="frow"><label>Quantity</label>
     <div class="spin-wrap">
       <input id="o-qty" type="number" step="1" min="1" max="200" value="100">
@@ -623,8 +651,45 @@ function populateOrderMarketOptions() {
   if (preferred) {
     sel.value = normalizeMarketName(preferred.name);
   }
+  renderMarketTabs();
   populateOrderSymbolOptions();
   updateTargetMarketControls();
+}
+
+function renderMarketTabs() {
+  const host = ge('market-tabs');
+  if (!host) return;
+  const options = resolveSplitMarketConfigs()
+    .map(market => normalizeMarketName(market.name))
+    .filter(Boolean);
+  const selected = getSelectedOrderMarketName();
+
+  if (options.length === 0) {
+    host.innerHTML = '';
+    return;
+  }
+
+  host.innerHTML = options.map(name => {
+    const active = normalizeMarketName(name) === normalizeMarketName(selected);
+    return `<button type="button" class="symbol-tab ${active ? 'active' : ''}" data-market="${esc(name)}">${esc(name)}</button>`;
+  }).join('');
+
+  host.querySelectorAll('button[data-market]').forEach(btn => {
+    btn.onclick = () => selectOrderMarket(btn.dataset.market || '');
+  });
+}
+
+function selectOrderMarket(marketName) {
+  const sel = ge('o-market');
+  if (!sel) return;
+  const nextMarket = normalizeMarketName(marketName);
+  if (!nextMarket) return;
+  sel.value = nextMarket;
+  renderMarketTabs();
+  populateOrderSymbolOptions();
+  updateTargetMarketControls();
+  renderMarketBook(getSelectedOrderMarketName());
+  renderOrders(null, true);
 }
 
 function getOrderMarketConfig(marketName) {
@@ -633,11 +698,46 @@ function getOrderMarketConfig(marketName) {
 }
 
 function getOrderSymbolsForMarket(marketName) {
-  const market = getOrderMarketConfig(marketName);
-  const symbols = Array.isArray(market && market.stocks) ? market.stocks : [];
-  return symbols
-    .map(symbol => String(symbol || '').trim().toUpperCase())
-    .filter((symbol, idx, arr) => symbol && arr.indexOf(symbol) === idx);
+  return getConfiguredSymbolsForMarket(marketName);
+}
+
+function renderSymbolTabs() {
+  const host = ge('symbol-tabs');
+  if (!host) return;
+
+  const marketName = getSelectedOrderMarketName();
+  const symbols = getOrderSymbolsForMarket(marketName);
+  const activeSymbol = getActiveMarketSymbol(marketName);
+
+  if (symbols.length === 0) {
+    host.innerHTML = '';
+    return;
+  }
+
+  host.innerHTML = symbols.map(symbol => {
+    const active = normalizeMarketName(symbol) === normalizeMarketName(activeSymbol);
+    return `<button type="button" class="symbol-tab ${active ? 'active' : ''}" data-symbol="${esc(symbol)}">${esc(symbol)}</button>`;
+  }).join('');
+
+  host.querySelectorAll('button[data-symbol]').forEach(btn => {
+    btn.onclick = () => selectMarketSymbol(marketName, btn.dataset.symbol || '');
+  });
+}
+
+function selectMarketSymbol(marketName, symbol) {
+  const mn = normalizeMarketName(marketName);
+  const nextSymbol = normalizeMarketName(symbol);
+  if (!mn || !nextSymbol) return;
+
+  const market = markets[mn];
+  if (!market) return;
+
+  setActiveMarketSymbol(mn, nextSymbol);
+  renderSymbolTabs();
+  renderMarketBook(mn);
+  mergeClientOpenOrdersFromBook(mn, nextSymbol);
+  renderOrders(null, true);
+  updateDynamicQtyLimit();
 }
 
 function populateOrderSymbolOptions() {
@@ -651,10 +751,15 @@ function populateOrderSymbolOptions() {
 
   sel.innerHTML = options.map(symbol => `<option value="${esc(symbol)}">${esc(symbol)}</option>`).join('');
 
-  const preferred = options[0] || '';
+  const market = markets[normalizeMarketName(marketName)];
+  const preferred = (market && market.activeSymbol && options.includes(market.activeSymbol))
+    ? market.activeSymbol
+    : (options[0] || '');
   if (preferred) {
     sel.value = preferred;
   }
+  setActiveMarketSymbol(marketName, sel.value || preferred);
+  renderSymbolTabs();
 }
 
 function updateTargetMarketControls() {
@@ -834,13 +939,82 @@ function createMarketState() {
   };
 }
 
+function getConfiguredSymbolsForMarket(marketName) {
+  const normalized = normalizeMarketName(marketName);
+  const market = (Array.isArray(KNOWN_MARKETS) ? KNOWN_MARKETS : [])
+    .find(candidate => normalizeMarketName(candidate && candidate.name) === normalized);
+  const fallback = normalizeMarketName(DEFAULT_SYMBOL);
+  const symbols = Array.isArray(market && market.stocks) ? market.stocks : [];
+  const unique = symbols
+    .map(symbol => normalizeMarketName(symbol))
+    .filter((symbol, idx, arr) => symbol && arr.indexOf(symbol) === idx);
+  if (unique.length > 0) return unique;
+  return fallback ? [fallback] : [];
+}
+
+function ensureMarketBook(market, symbol) {
+  if (!market) return null;
+  const normalizedSymbol = normalizeMarketName(symbol);
+  if (!normalizedSymbol) return null;
+  if (!market.books) market.books = {};
+  if (!market.books[normalizedSymbol]) {
+    market.books[normalizedSymbol] = createMarketState();
+  }
+  market.books[normalizedSymbol].symbol = normalizedSymbol;
+  return market.books[normalizedSymbol];
+}
+
+function getActiveMarketSymbol(marketName) {
+  const market = markets[normalizeMarketName(marketName)];
+  if (!market) return normalizeMarketName(DEFAULT_SYMBOL);
+  if (market.activeSymbol) return market.activeSymbol;
+  const configured = getConfiguredSymbolsForMarket(marketName);
+  const fallback = configured[0] || normalizeMarketName(DEFAULT_SYMBOL);
+  market.activeSymbol = fallback;
+  return fallback;
+}
+
+function setActiveMarketSymbol(marketName, symbol) {
+  const mn = normalizeMarketName(marketName);
+  const market = markets[mn];
+  if (!market) return null;
+  const nextSymbol = normalizeMarketName(symbol) || getConfiguredSymbolsForMarket(mn)[0] || normalizeMarketName(DEFAULT_SYMBOL);
+  const bookState = ensureMarketBook(market, nextSymbol);
+  market.activeSymbol = nextSymbol;
+  market.book = bookState || createMarketState();
+  if (mn === getSelectedOrderMarketName()) {
+    Object.assign(book, market.book);
+  }
+  if (mn === getSelectedOrderMarketName()) {
+    const sel = ge('o-sym');
+    if (sel && sel.value !== nextSymbol) sel.value = nextSymbol;
+    renderSymbolTabs();
+    renderBuyCapacityHint();
+    renderOrderCostPreview();
+    renderBook(true);
+  }
+  return market.book;
+}
+
+function getMarketBookForSymbol(marketName, symbol) {
+  const market = markets[normalizeMarketName(marketName)];
+  if (!market) return null;
+  const normalizedSymbol = normalizeMarketName(symbol) || getActiveMarketSymbol(marketName);
+  return ensureMarketBook(market, normalizedSymbol);
+}
+
 function addMarket(marketName) {
   if (markets[marketName]) return; // Already added
+  const initialSymbol = getConfiguredSymbolsForMarket(marketName)[0] || normalizeMarketName(DEFAULT_SYMBOL);
+  const initialBook = createMarketState();
+  initialBook.symbol = initialSymbol;
   
   markets[marketName] = {
     name: marketName,
     ws: null,
-    book: createMarketState(),
+    books: { [initialSymbol]: initialBook },
+    book: initialBook,
+    activeSymbol: initialSymbol,
     openOrders: {},
     openOrderFirstSeen: {},
     orderTimeouts: {},
@@ -903,7 +1077,7 @@ function renderMarketsContainer() {
 
   const html = marketNames.map(name => {
     const m = markets[name];
-    const symbol = m.book.symbol;
+    const symbol = normalizeMarketName(m.activeSymbol || m.book.symbol || DEFAULT_SYMBOL);
     const lastPrice = m.book.last != null ? fmt(m.book.last) : '—';
     const statusColor = m.connected ? 'var(--green)' : 'var(--muted)';
     const staleBadge = !m.connected ? '<span class="stale-badge" style="display:inline-block;margin-left:8px">STALE (DISCONNECTED)</span>' : '';
@@ -1041,11 +1215,20 @@ resolveSplitMarketConfigs().forEach(market => addMarket(normalizeMarketName(mark
 populateOrderMarketOptions();
 if (ge('o-market')) {
   ge('o-market').addEventListener('change', () => {
+    renderMarketTabs();
     populateOrderSymbolOptions();
+    renderSymbolTabs();
     updateTargetMarketControls();
+    renderMarketBook(getSelectedOrderMarketName());
+    renderOrders(null, true);
   });
 }
 populateOrderSymbolOptions();
+if (ge('o-sym')) {
+  ge('o-sym').addEventListener('change', () => {
+    selectMarketSymbol(getSelectedOrderMarketName(), ge('o-sym').value);
+  });
+}
 ['o-sym', 'o-qty', 'o-price'].forEach(id => {
   const input = ge(id);
   if (!input) return;
@@ -1351,6 +1534,9 @@ function applyOrderBookSnapshot(msg, marketName) {
   const mn = normalizeMarketName(marketName || getPrimaryMarketName());
   const market = markets[mn];
   if (!market) return;
+  const symbol = normalizeMarketName(msg.symbol || market.activeSymbol || DEFAULT_SYMBOL);
+  const bookState = getMarketBookForSymbol(mn, symbol);
+  if (!bookState) return;
 
   console.log(`[BOOK SNAPSHOT] Received snapshot for ${mn}:`, { 
     bidCount: (msg.bids || []).length, 
@@ -1359,7 +1545,7 @@ function applyOrderBookSnapshot(msg, marketName) {
     trackingLocations: Object.keys(orderIdToBookLocation)
   });
 
-  market.book.symbol = msg.symbol || market.book.symbol;
+  bookState.symbol = symbol;
   
   // Filter out orders with terminal status before applying snapshot
   const filterTerminal = (rows, side) => {
@@ -1397,19 +1583,26 @@ function applyOrderBookSnapshot(msg, marketName) {
     return filtered;
   };
   
-  market.book.bids = filterTerminal(msg.bids, '1');
-  market.book.asks = filterTerminal(msg.asks, '2');
+  bookState.bids = filterTerminal(msg.bids, '1');
+  bookState.asks = filterTerminal(msg.asks, '2');
   
-  console.log(`[BOOK SNAPSHOT] After filtering: bids=${market.book.bids.length}, asks=${market.book.asks.length}`);
+  console.log(`[BOOK SNAPSHOT] After filtering: bids=${bookState.bids.length}, asks=${bookState.asks.length}`);
 
-  mergeClientOpenOrdersFromBook(mn, market.book.symbol);
+  if (!market.activeSymbol) {
+    setActiveMarketSymbol(mn, symbol);
+  }
 
-  if (mn === getPrimaryMarketName()) {
-    Object.assign(book, market.book);
+  mergeClientOpenOrdersFromBook(mn, symbol);
+
+  if (mn === getSelectedOrderMarketName() && symbol === getActiveMarketSymbol(mn)) {
+    Object.assign(book, bookState);
     renderBook(true);
   }
 
-  renderMarketBook(mn);
+  if (symbol === getActiveMarketSymbol(mn)) {
+    market.book = bookState;
+    renderMarketBook(mn);
+  }
 }
 
 function applyTradesSnapshot(msg, marketName) {
@@ -1429,11 +1622,14 @@ function applyTradesSnapshot(msg, marketName) {
     console.warn('[applyTradesSnapshot] Market not found:', mn);
     return;
   }
+  const symbol = normalizeMarketName(msg.symbol || market.activeSymbol || DEFAULT_SYMBOL);
+  const bookState = getMarketBookForSymbol(mn, symbol);
+  if (!bookState) return;
   
   if (msg.trades.length > 0) {
     // Convert API trades to book trade format [price, qty, side, ts]
     // The API returns {id, price, quantity, cl_ord_id}
-    market.book.trades = msg.trades.map(t => [
+    bookState.trades = msg.trades.map(t => [
       Number(t.price) || 0,
       Number(t.quantity) || 0,
       'B',  // Default to buy side (we don't have the actual side in the snapshot)
@@ -1441,13 +1637,16 @@ function applyTradesSnapshot(msg, marketName) {
       '—',  // Owner (unknown from snapshot)
       false  // resolved flag
     ]);
-    console.log('[applyTradesSnapshot] Updated market ' + mn + ' book.trades with ' + market.book.trades.length + ' trades');
+    console.log('[applyTradesSnapshot] Updated market ' + mn + ' book.trades with ' + bookState.trades.length + ' trades');
   } else {
     console.log('[applyTradesSnapshot] Empty trades snapshot, skipping');
   }
   
   // Re-render the market book with the new trades
-  renderMarketBook(mn);
+  if (symbol === getActiveMarketSymbol(mn)) {
+    market.book = bookState;
+    renderMarketBook(mn);
+  }
 }
 
 function isOrderOwnedByCurrentUser(clordId) {
@@ -1474,6 +1673,9 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
   const mn = normalizeMarketName(marketName);
   const market = markets[mn];
   if (!market) return;
+  const activeSymbol = normalizeMarketName(symbol || market.activeSymbol || DEFAULT_SYMBOL);
+  const bookState = getMarketBookForSymbol(mn, activeSymbol);
+  if (!bookState) return;
 
   const presentOwnedIds = new Set();
   const knownOwnedOrderIds = new Set();
@@ -1582,8 +1784,8 @@ function mergeClientOpenOrdersFromBook(marketName, symbol) {
     });
   };
 
-  mergeRows(market.book.bids, '1');
-  mergeRows(market.book.asks, '2');
+  mergeRows(bookState.bids, '1');
+  mergeRows(bookState.asks, '2');
 
   Object.keys(openOrders).forEach(clOrdId => {
     const order = openOrders[clOrdId];
@@ -1765,7 +1967,8 @@ function handlePlayerState(msg) {
     const existing = openOrders[id];
     if (normalizeMarketName(existing?.market) !== primaryMarketName) return;
     const marketForOrder = markets[normalizeMarketName(existing?.market)] || null;
-    const isStillPendingLocally = !!(marketForOrder && marketForOrder.book && marketForOrder.book.pending && marketForOrder.book.pending[id]);
+    const bookState = marketForOrder ? getMarketBookForSymbol(marketForOrder.name, existing?.symbol || marketForOrder.activeSymbol || DEFAULT_SYMBOL) : null;
+    const isStillPendingLocally = !!(bookState && bookState.pending && bookState.pending[id]);
     if (!nextOpenOrders[id]) {
       // Do not aggressively remove confirmed/book-derived orders when a single
       // player_state snapshot is temporarily missing this id.
@@ -1773,16 +1976,12 @@ function handlePlayerState(msg) {
       const isLocalOnly = !source || source === 'local';
 
       if (!isLocalOnly) {
-        if (isStillPendingLocally && marketForOrder && marketForOrder.book && marketForOrder.book.pending) {
-          delete marketForOrder.book.pending[id];
-        }
+        if (isStillPendingLocally && bookState) delete bookState.pending[id];
         clearPendingTimeout(id);
         return;
       }
 
-      if (isStillPendingLocally && marketForOrder && marketForOrder.book && marketForOrder.book.pending) {
-        delete marketForOrder.book.pending[id];
-      }
+      if (isStillPendingLocally && bookState) delete bookState.pending[id];
       clearPendingTimeout(id);
       delete openOrders[id];
       delete openOrderFirstSeen[id];
@@ -1803,13 +2002,13 @@ function handlePlayerState(msg) {
   });
 
   const primaryMarket = markets[normalizeMarketName(primaryMarketName)];
-  mergeClientOpenOrdersFromBook(primaryMarketName, (primaryMarket && primaryMarket.book.symbol) || DEFAULT_SYMBOL);
+  mergeClientOpenOrdersFromBook(primaryMarketName, (primaryMarket && primaryMarket.activeSymbol) || DEFAULT_SYMBOL);
   
   // Also sync secondary markets with the updated openOrders
   Object.keys(markets).forEach(marketName => {
     if (normalizeMarketName(marketName) !== normalizeMarketName(primaryMarketName)) {
       const market = markets[marketName];
-      mergeClientOpenOrdersFromBook(marketName, (market && market.book.symbol) || DEFAULT_SYMBOL);
+      mergeClientOpenOrdersFromBook(marketName, (market && market.activeSymbol) || DEFAULT_SYMBOL);
     }
   });
   
@@ -2154,6 +2353,7 @@ function sendOrder() {
   const targetMarketName = getSelectedOrderMarketName();
   const targetMarket = markets[targetMarketName];
   const symbol = ge('o-sym').value.trim().toUpperCase();
+  const bookState = getMarketBookForSymbol(targetMarketName, symbol);
   const qty    = parseFloat(ge('o-qty').value);
   const price  = parseFloat(ge('o-price').value);
   const s      = side === 'BUY' ? '1' : '2';
@@ -2224,10 +2424,12 @@ function sendOrder() {
     }
   }
 
-  targetMarket.book.pending[clordId] = { price, qty, side: s };
+  if (bookState) {
+    bookState.pending[clordId] = { price, qty, side: s };
+  }
   openOrders[clordId] = { symbol, qty, price, side: s, market: targetMarketName, source: 'local' };
   openOrderFirstSeen[clordId] = Date.now();
-  schedulePendingTimeout(clordId, targetMarketName);
+  schedulePendingTimeout(clordId, targetMarketName, symbol);
   refreshTokenBalanceDisplay();
   renderOrders(null, true);
 
@@ -2260,7 +2462,13 @@ function resetClientMarketView(marketName) {
     const market = markets[normalizeMarketName(marketName)];
     if (!market) return;
     Object.keys(market.orderTimeouts).forEach(id => clearTimeout(market.orderTimeouts[id]));
+    const symbols = getConfiguredSymbolsForMarket(market.name);
+    market.books = {};
+    const activeSymbol = symbols[0] || normalizeMarketName(DEFAULT_SYMBOL);
     market.book = createMarketState();
+    market.book.symbol = activeSymbol;
+    market.books[activeSymbol] = market.book;
+    market.activeSymbol = activeSymbol;
     market.openOrders = {};
     market.openOrderFirstSeen = {};
     market.chartPts = [];
@@ -2287,13 +2495,15 @@ function resetClientMarketView(marketName) {
   renderBook();
 }
 
-function schedulePendingTimeout(clordId, marketName) {
+function schedulePendingTimeout(clordId, marketName, symbol) {
   clearPendingTimeout(clordId);
   orderTimeouts[clordId] = setTimeout(() => {
     delete orderTimeouts[clordId];
-    const targetMarket = markets[normalizeMarketName(marketName)] || { book };
-    if (!targetMarket.book.pending[clordId]) return;
-    delete targetMarket.book.pending[clordId];
+    const targetMarket = markets[normalizeMarketName(marketName)];
+    if (!targetMarket) return;
+    const bookState = getMarketBookForSymbol(targetMarket.name, symbol || targetMarket.activeSymbol || DEFAULT_SYMBOL);
+    if (!bookState || !bookState.pending[clordId]) return;
+    delete bookState.pending[clordId];
     appendLog({
       ts: now(),
       label: 'INFO',
@@ -2310,9 +2520,11 @@ function renderOrders(marketName, immediate = false) {
     immediate = marketName;
     marketName = null;
   }
-  
-  // Only render orders panel for primary-market events.
-  if (marketName && normalizeMarketName(marketName) !== getPrimaryMarketName()) return;
+  const selectedMarketName = normalizeMarketName(marketName || getSelectedOrderMarketName());
+  const selectedSymbol = getActiveMarketSymbol(selectedMarketName);
+
+  // Only render orders panel for the currently selected market.
+  if (marketName && normalizeMarketName(marketName) !== selectedMarketName) return;
   
   if (!immediate) {
     clearTimeout(openOrdersRenderTimer);
@@ -2325,6 +2537,8 @@ function renderOrders(marketName, immediate = false) {
   const orderIds = Object.keys(openOrders).filter(id => {
     const order = openOrders[id];
     if (order?.source !== 'local') return true;
+    if (normalizeMarketName(order.market) !== selectedMarketName) return false;
+    if (normalizeMarketName(order.symbol) !== selectedSymbol) return false;
     const firstSeen = openOrderFirstSeen[id] || nowMs;
     return (nowMs - firstSeen) >= PENDING_VISIBILITY_DELAY_MS;
   });
@@ -2334,7 +2548,9 @@ function renderOrders(marketName, immediate = false) {
   const hiddenIds = Object.keys(openOrders).filter(id => {
     if (orderIds.includes(id)) return false;
     const order = openOrders[id];
-    return order?.source === 'local';
+    return order?.source === 'local' &&
+      normalizeMarketName(order.market) === selectedMarketName &&
+      normalizeMarketName(order.symbol) === selectedSymbol;
   });
   if (hiddenIds.length > 0) {
     const maxAge = Math.max(...hiddenIds.map(id => nowMs - (openOrderFirstSeen[id] || nowMs)));
@@ -2353,7 +2569,8 @@ function renderOrders(marketName, immediate = false) {
     const o = openOrders[clordId];
     const isSell = o.side === '2';
     const market = markets[normalizeMarketName(o.market)] || null;
-    const leaves = (market && market.book.orderState[clordId]?.leaves) || o.qty;
+    const bookState = market ? getMarketBookForSymbol(normalizeMarketName(o.market), normalizeMarketName(o.symbol)) : null;
+    const leaves = (bookState && bookState.orderState[clordId]?.leaves) || o.qty;
     const cancelClOrdId = o.cl_ord_id || clordId;
     const canCancel = o.cancelable !== false;
     return `<div class="order-row ${isSell ? 'sell' : ''}">
@@ -2600,6 +2817,9 @@ function applyOrderLeavesForMarket(market, clordId, side, price, newLeaves) {
 
 function cleanupOrderStateForMarket(market, clordId) {
   if (!clordId) return;
+  const existingOrder = openOrders[clordId] || Object.values(openOrders).find(order => order && (order.order_id === clordId || order.cl_ord_id === clordId));
+  const bookSymbol = existingOrder ? (existingOrder.symbol || market.activeSymbol || DEFAULT_SYMBOL) : (market.activeSymbol || DEFAULT_SYMBOL);
+  const bookState = getMarketBookForSymbol(market.name, bookSymbol);
   
   // clordId might be orderId or clOrdId depending on the message source
   // Try direct match first
@@ -2618,8 +2838,10 @@ function cleanupOrderStateForMarket(market, clordId) {
     }
   }
   
-  delete market.book.pending[clordId];
-  delete market.book.orderState[clordId];
+  if (bookState) {
+    delete bookState.pending[clordId];
+    delete bookState.orderState[clordId];
+  }
 }
 
 
@@ -2721,17 +2943,27 @@ function renderMarketBook(marketName) {
   
   const container = ge(`market-${esc(marketName)}`);
   if (!container) return;
-  
-  const b = market.book;
+
+  const activeSymbol = getActiveMarketSymbol(marketName);
+  const b = getMarketBookForSymbol(marketName, activeSymbol) || market.book || createMarketState();
   const bids = [...(b.bids || [])]
-                     .sort((a,b)=>Number(b.price)-Number(a.price));
+                    .sort((a,b)=>Number(b.price)-Number(a.price));
   const asks = [...(b.asks || [])]
-                     .sort((a,b)=>Number(a.price)-Number(b.price));
+                    .sort((a,b)=>Number(a.price)-Number(b.price));
+
+  const symbols = getOrderSymbolsForMarket(marketName);
+  const symbolTabsHtml = symbols.length > 0
+   ? `<div class="symbol-tabs" style="margin:0 6px 6px">${symbols.map(symbol => {
+       const active = normalizeMarketName(symbol) === normalizeMarketName(activeSymbol);
+       return `<button type="button" class="symbol-tab ${active ? 'active' : ''}" onclick="selectMarketSymbol('${esc(marketName)}', '${esc(symbol)}')">${esc(symbol)}</button>`;
+     }).join('')}</div>`
+   : '';
   
   const allQ = [...bids,...asks].map(r=>Number(r.quantity) || 0);
   const maxQ = allQ.length ? Math.max(...allQ) : 1;
   
   let bookLevelsHtml = '';
+  bookLevelsHtml += symbolTabsHtml;
   bookLevelsHtml += `<div class="book-cols compact"><span class="col-maker">MAKER</span><span class="col-qty">QTY</span><span class="col-px">PRICE</span></div>`;
   
   // Asks
@@ -2785,6 +3017,7 @@ function renderMarketBook(marketName) {
 
   container.innerHTML = `<div class="market-book-layout">
     <div class="market-book-section">
+      <div class="market-chart-title" style="padding:0 4px 6px">SYMBOLS</div>
       <div class="market-levels">${bookLevelsHtml}</div>
     </div>
     <div class="market-chart">
