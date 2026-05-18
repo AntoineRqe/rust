@@ -593,6 +593,18 @@ async fn handle_browser_message(
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "SERVER1".into());
+            let symbol = normalize_symbol(&symbol);
+            if !state.supported_symbols.contains(&symbol) {
+                let event = WsEvent::FixMessage {
+                    label: format!("REJECTED ✕ [{}]", clord_id),
+                    body: format!("Unsupported symbol '{}'.", symbol),
+                    tag: "err".into(),
+                    recipient: Some(username.to_string()),
+                };
+                state.bus.publish(event);
+                return;
+            }
+
             let idempotency_key = order_idempotency_key(&sender_id, &clord_id);
             let request_hash = order_request_hash(
                 &sender_id,
@@ -879,6 +891,11 @@ async fn handle_browser_message(
                 return;
             }
 
+            {
+                let mut keys = state.idempotency_keys.lock().unwrap();
+                keys.insert(clord_id.clone(), idempotency_key.clone());
+            }
+
             // Track the order event for metrics and latency
             metrics
                 .order_events
@@ -924,6 +941,7 @@ async fn handle_browser_message(
                     &fix_bytes,
                     state.player_client.clone(),
                     state.market_db_pool.clone(),
+                    state.idempotency_keys.clone(),
                     &state.bus,
                     Arc::clone(metrics),
                     state.order_book.clone(),
@@ -952,6 +970,10 @@ async fn handle_browser_message(
                         .await
                         .remove_pending_order(username, &clord_id)
                         .await;
+                    {
+                        let mut keys = state.idempotency_keys.lock().unwrap();
+                        keys.remove(&clord_id);
+                    }
                     let error_event = WsEvent::FixMessage {
                         label: "ERROR".into(),
                         body: format!("Failed to send FIX order: {}", e),
@@ -983,7 +1005,16 @@ async fn handle_browser_message(
             symbol,
             qty,
         } => {
-            let symbol = symbol.unwrap_or_else(|| "AAPL".into());
+            let symbol = normalize_symbol(&symbol.unwrap_or_else(|| "AAPL".into()));
+            if !state.supported_symbols.contains(&symbol) {
+                state.bus.publish(WsEvent::FixMessage {
+                    label: format!("REJECTED ✕ [{}]", clord_id),
+                    body: format!("Unsupported symbol '{}'.", symbol),
+                    tag: "err".into(),
+                    recipient: Some(username.to_string()),
+                });
+                return;
+            }
             let qty = qty.unwrap_or(0.0);
 
             // Drop the pending order. Token balance is not changed on cancel.
@@ -1017,6 +1048,7 @@ async fn handle_browser_message(
                     &fix_bytes,
                     state.player_client.clone(),
                     state.market_db_pool.clone(),
+                    state.idempotency_keys.clone(),
                     &state.bus,
                     Arc::clone(metrics),
                     state.order_book.clone(),
@@ -1220,6 +1252,10 @@ fn order_request_hash(
     hasher.update(b"|");
     hasher.update(target_id.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn normalize_symbol(symbol: &str) -> String {
+    symbol.trim().to_uppercase()
 }
 
 // ── FIX message builders ──────────────────────────────────────────────────────

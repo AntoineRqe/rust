@@ -55,6 +55,7 @@ impl ThreadHandles {
 
 pub struct MarketSimulator {
     config: MarketConfig,
+    supported_symbols: Vec<String>,
     player_service_addr: String,
     metrics: Arc<Metrics>,
     thread_handles: Arc<Mutex<ThreadHandles>>,
@@ -129,6 +130,7 @@ fn start_market(
     let mut queues = QueueHandle::new(&config.name);
 
     let net_to_fix_tx = queues.net_to_fix_tx.as_ref().unwrap().clone();
+    let supported_symbols = market_simulator.supported_symbols.clone();
     let (fix_tx, ob_rx) = queues.fix_to_ob.take().unwrap().queue.split();
     let (ob_er_tx, er_rx) = queues.ob_to_er.take().unwrap().queue.split();
     let (er_tx, fix_resp_rx) = queues.er_to_fix.take().unwrap().queue.split();
@@ -193,6 +195,7 @@ fn start_market(
         &mut market_simulator,
         Arc::clone(&order_book),
         database_url.clone(),
+        supported_symbols,
         bus.clone(),
         metrics,
         Arc::clone(&global_shutdown),
@@ -274,6 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let market_config = config.market.clone();
+    let supported_symbols = market_config.normalized_stocks();
     let (err_tx, err_rx) = crossbeam_channel::bounded::<String>(32);
     let err_tx = Arc::new(err_tx);
 
@@ -284,6 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let simulator = Arc::new(Mutex::new(MarketSimulator {
         config: market_config,
+        supported_symbols,
         player_service_addr,
         metrics: Arc::new(Metrics::new()),
         thread_handles: Arc::new(Mutex::new(ThreadHandles::new())),

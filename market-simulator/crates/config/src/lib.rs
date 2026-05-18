@@ -32,6 +32,8 @@ pub struct PlayerServiceConfig {
 pub struct MarketConfig {
     pub name: String,
     pub database_url_env: String,
+    #[serde(default)]
+    pub stocks: Vec<String>,
     pub web: Connection,
     pub grpc: Connection,
     pub proxy: Connection,
@@ -49,6 +51,18 @@ impl MarketConfig {
                 self.database_url_env, self.name
             )
         })
+    }
+
+    pub fn normalized_stocks(&self) -> Vec<String> {
+        let mut stocks = Vec::new();
+        for symbol in &self.stocks {
+            let normalized = symbol.trim().to_uppercase();
+            if normalized.is_empty() || stocks.contains(&normalized) {
+                continue;
+            }
+            stocks.push(normalized);
+        }
+        stocks
     }
 }
 

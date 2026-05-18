@@ -243,57 +243,58 @@ pub fn start_order_book_engine(
     pending_orders: Vec<OrderEvent>,
     order_book_core_id: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: Handle multiple symbols per market
-    let symbols = vec!["AAAPL"];
+    let symbols = market_simulator.supported_symbols.clone();
+    if symbols.is_empty() {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no supported symbols configured for market",
+        )));
+    }
 
-    for symbol in symbols {
-        tracing::info!(
-            "[{}] Initializing market for symbol '{}'",
-            market_name(),
-            symbol
-        );
+    let symbol = symbols[0].clone();
+    tracing::info!(
+        "[{}] Initializing market for symbol '{}'",
+        market_name(),
+        symbol
+    );
 
-        // Create shared order book instance.
-        let order_book = order_book::book::OrderBook::new(&symbol);
+    // Create shared order book instance.
+    let order_book = order_book::book::OrderBook::new(&symbol);
 
-        // Book engine thread
-        let mut order_book_engine = order_book::engine::OrderBookEngine::new(
-            ob_rx,
-            Some(ob_er_tx),
-            None,
-            Some(ob_db_tx),
-            ob_control_rx,
-            order_book,
-            None,
-            Arc::clone(&global_shutdown),
-        );
-        order_book_engine.set_metrics(Arc::clone(&metrics));
+    // Book engine thread
+    let mut order_book_engine = order_book::engine::OrderBookEngine::new(
+        ob_rx,
+        Some(ob_er_tx),
+        None,
+        Some(ob_db_tx),
+        ob_control_rx,
+        order_book,
+        None,
+        Arc::clone(&global_shutdown),
+    );
+    order_book_engine.set_metrics(Arc::clone(&metrics));
 
-        // Import initial order book state from the database before starting the engine.
-        // This ensures that the engine starts with the correct state and can process new orders/events in the context of existing pending orders.
-        order_book_engine.import_order_book(pending_orders);
+    // Import initial order book state from the database before starting the engine.
+    // This ensures that the engine starts with the correct state and can process new orders/events in the context of existing pending orders.
+    order_book_engine.import_order_book(pending_orders);
 
-        let err_tx = Arc::clone(&market_simulator.err_tx);
+    let err_tx = Arc::clone(&market_simulator.err_tx);
 
-        let _ob_thread = std::thread::spawn(move || {
-            core_affinity::set_for_current(core_affinity::CoreId {
-                id: order_book_core_id,
-            });
-            match order_book_engine.run() {
-                Ok(_) => (),
-                Err(e) => {
-                    tracing::error!("[{}] Order book engine error: {e:#}", utils::market_name());
-                    let _ = err_tx.send(format!("Order book engine error: {e:#}"));
-                }
-            }
+    let _ob_thread = std::thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId {
+            id: order_book_core_id,
         });
-
-        {
-            market_simulator.add_thread_handle(_ob_thread);
+        match order_book_engine.run() {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("[{}] Order book engine error: {e:#}", utils::market_name());
+                let _ = err_tx.send(format!("Order book engine error: {e:#}"));
+            }
         }
+    });
 
-        // TODO : Handle multiple symbols per market (currently we just hardcode one symbol and ignore the symbol field in the orders/events, but in a real implementation we'd want to support multiple symbols per market and route orders/events to the correct order book based on the symbol).
-        break;
+    {
+        market_simulator.add_thread_handle(_ob_thread);
     }
 
     Ok(())
@@ -304,6 +305,7 @@ pub fn start_web_server(
     market_simulator: &mut crate::MarketSimulator,
     order_book: Arc<Mutex<OrderBookState>>,
     market_database_url: String,
+    supported_symbols: Vec<String>,
     bus: EventBus,
     metrics: Arc<backend::server::Metrics>,
     global_shutdown: Arc<AtomicBool>,
@@ -335,6 +337,7 @@ pub fn start_web_server(
                 &web_ip,
                 web_port,
                 web_market_database_url,
+                supported_symbols,
                 web_shutdown,
                 order_book,
                 player_service_addr,

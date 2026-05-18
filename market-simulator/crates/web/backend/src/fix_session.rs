@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use crossbeam_channel::TrySendError;
 use fix::engine::FixRawMsg;
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use sqlx::PgPool;
 use types::consts::RB_SIZE;
@@ -107,6 +106,7 @@ impl FIXSessionManager {
         username: &str,
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         market_db_pool: PgPool,
+        idempotency_keys: Arc<Mutex<HashMap<String, String>>>,
         bus: &EventBus,
         metrics: Arc<Metrics>,
         order_book: Arc<Mutex<OrderBookState>>,
@@ -139,6 +139,7 @@ impl FIXSessionManager {
             let order_book = order_book.clone();
             let trades_queue = trades_queue.clone();
             let market_db_pool = market_db_pool.clone();
+            let idempotency_keys = Arc::clone(&idempotency_keys);
             let session_key = session_key.clone();
 
             // Spawn the background reader task for this session.
@@ -187,25 +188,36 @@ impl FIXSessionManager {
                                 drop(client); // Release lock before publishing
 
                                 // Persist the latest FIX response for idempotent replays.
+                                let cl_ord_id = exec_data.cl_ord_id.clone();
                                 let response_event = WsEvent::FixMessage {
                                     label: classify_fix_msg(&raw_msg),
                                     body: body.clone(),
                                     tag: "feed".into(),
                                     recipient: Some(username.clone()),
                                 };
-                                if let Err(e) = db::update_idempotency_key_response(
-                                    &market_db_pool,
-                                    &idempotency_key_for(&username, &exec_data.cl_ord_id),
-                                    "completed",
-                                    serde_json::to_value(&response_event).unwrap(),
-                                )
-                                .await
-                                {
-                                    tracing::error!(
-                                        "[{}] Failed to persist FIX response for idempotency: {}",
-                                        market_name(),
-                                        e
-                                    );
+                                let idempotency_key = {
+                                    let map = idempotency_keys.lock().unwrap();
+                                    map.get(&cl_ord_id).cloned()
+                                };
+                                if let Some(idempotency_key) = idempotency_key {
+                                    if let Err(e) = db::update_idempotency_key_response(
+                                        &market_db_pool,
+                                        &idempotency_key,
+                                        "completed",
+                                        serde_json::to_value(&response_event).unwrap(),
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(
+                                            "[{}] Failed to persist FIX response for idempotency: {}",
+                                            market_name(),
+                                            e
+                                        );
+                                    }
+                                    if is_terminal_ord_status(exec_data.ord_status) {
+                                        let mut map = idempotency_keys.lock().unwrap();
+                                        map.remove(&cl_ord_id);
+                                    }
                                 }
 
                                 // Update backend order book using pre-parsed data (no FIX parsing!)
@@ -292,6 +304,7 @@ impl FIXSessionManager {
         bytes: &[u8],
         player_client: Arc<tokio::sync::Mutex<PlayerClient>>,
         market_db_pool: PgPool,
+        idempotency_keys: Arc<Mutex<HashMap<String, String>>>,
         bus: &EventBus,
         metrics: Arc<Metrics>,
         order_book: Arc<Mutex<OrderBookState>>,
@@ -309,6 +322,7 @@ impl FIXSessionManager {
             username,
             player_client,
             market_db_pool,
+            idempotency_keys,
             bus,
             metrics,
             order_book,
@@ -347,17 +361,13 @@ impl FIXSessionManager {
 
 // ── FIX helpers ───────────────────────────────────────────────────────────────
 
-fn idempotency_key_for(username: &str, clord_id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(username.as_bytes());
-    hasher.update(b"/");
-    hasher.update(clord_id.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
 /// Pipe-delimited human-readable FIX string.
 pub fn pretty_fix(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).replace('\x01', " │ ")
+}
+
+fn is_terminal_ord_status(ord_status: u8) -> bool {
+    matches!(ord_status, 2 | 3 | 4 | 8)
 }
 
 /// Human-friendly FIX string for browser display.

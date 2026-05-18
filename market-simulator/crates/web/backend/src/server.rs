@@ -12,7 +12,7 @@ use axum::{
 };
 use db;
 use fix::engine::FixRawMsg;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -58,6 +58,10 @@ pub struct AppState {
     pub trades_queue: Arc<Mutex<VecDeque<TradeView>>>,
     /// Shared market database pool used for idempotency and web reads.
     pub market_db_pool: PgPool,
+    /// Uppercased symbols supported by this market.
+    pub supported_symbols: HashSet<String>,
+    /// Map from client ClOrdID to idempotency key for FIX response updates.
+    pub idempotency_keys: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Start the web server on the given port, serving the trading terminal and API endpoints. This will block the current thread until shutdown is requested.
@@ -78,6 +82,7 @@ pub fn run_web_server(
     ip: &str,
     port: u16,
     market_database_url: String,
+    supported_symbols: Vec<String>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
     player_service_addr: String,
@@ -99,6 +104,7 @@ pub fn run_web_server(
             ip,
             port,
             market_database_url,
+            supported_symbols,
             shutdown,
             order_book,
             player_service_addr,
@@ -121,6 +127,7 @@ async fn serve(
     ip: &str,
     port: u16,
     market_database_url: String,
+    supported_symbols: Vec<String>,
     shutdown: Arc<AtomicBool>,
     order_book: Arc<Mutex<OrderBookState>>,
     player_service_addr: String,
@@ -197,6 +204,8 @@ async fn serve(
         fix_session_manager: FIXSessionManager::new(fix_tx),
         trades_queue,
         market_db_pool,
+        supported_symbols: supported_symbols.into_iter().collect(),
+        idempotency_keys: Arc::new(Mutex::new(HashMap::new())),
     };
     state.bus.set_metrics(Arc::clone(&metrics));
 
