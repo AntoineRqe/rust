@@ -8,7 +8,7 @@
       "name": "NASDAQ",
       "url": "http://market-nasdaq:9870",
       "public_url": "http://127.0.0.1:19870",
-      "stocks": ["AAPL"]
+      "stocks": ["AAPL", "GE", "BA", "CAT", "KO"]
     },
     {
       "name": "NYSE",

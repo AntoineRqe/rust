@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Connects to both markets and submits one BUY order at the current lowest ask for AAPL.
+Reads symbol list from market config files and submits BUY orders at current lowest ask.
 
 Usage:
     python aapl_buy_once.py --password PASS [--gateway-url URL]
                             [--nasdaq-ws-url URL] [--nyse-ws-url URL]
-                            [--username USER] [--symbol SYMBOL] [--qty QTY]
+                            [--username USER] [--qty QTY]
+                            [--nasdaq-config PATH] [--nyse-config PATH]
 
 Defaults connect to https://www.marketsim.site.
 Requires: pip install websockets
@@ -14,15 +15,54 @@ Requires: pip install websockets
 import argparse
 import asyncio
 import json
+import random
 import ssl
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from urllib import request as urllib_request
 
 try:
     import websockets
 except ImportError:
     raise SystemExit("Missing dependency: pip install websockets")
+
+
+# Global counter for unique cli_ord_id generation
+_cli_ord_id_counter = 0
+_cli_ord_id_lock = asyncio.Lock()
+
+
+async def generate_unique_cli_ord_id(prefix: str) -> str:
+    """Generate a unique cli_ord_id using timestamp and counter."""
+    global _cli_ord_id_counter
+    async with _cli_ord_id_lock:
+        ts_ms = int(time.time() * 1000)
+        _cli_ord_id_counter += 1
+        # Format: PREFIX + timestamp + counter + random 3-digit suffix
+        # e.g., BNA1779182348286001234 ensures uniqueness even with concurrent calls
+        random_suffix = random.randint(0, 999)
+        cli_ord_id = f"{prefix}{ts_ms}{_cli_ord_id_counter:03d}{random_suffix:03d}"
+        return cli_ord_id
+
+
+def load_market_config(config_path: str) -> Dict:
+    """Load market configuration from JSON file."""
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load market config from {config_path}: {e}")
+
+
+def get_symbols_from_config(config_path: str) -> List[str]:
+    """Extract symbol list from market config."""
+    try:
+        config = load_market_config(config_path)
+        stocks = config.get("market", {}).get("stocks", [])
+        return [s.upper() for s in stocks]
+    except Exception as e:
+        print(f"Warning: Could not read symbols from {config_path}: {e}")
+        return []
 
 
 def gateway_login(gateway_url: str, username: str, password: str) -> Dict[str, str]:
@@ -83,6 +123,33 @@ def _best_ask_price(asks: object) -> Optional[float]:
     return min(candidates)
 
 
+async def discover_symbols(ws, timeout_s: float = 3.0) -> List[str]:
+    """Dynamically discover available symbols from order_book messages."""
+    symbols = set()
+    start_time = asyncio.get_event_loop().time()
+    
+    try:
+        while asyncio.get_event_loop().time() - start_time < timeout_s:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                msg = json.loads(raw)
+                
+                if msg.get("type") == "order_book":
+                    symbol = str(msg.get("symbol", "")).upper()
+                    if symbol and symbol not in symbols:
+                        symbols.add(symbol)
+                        # Stop after discovering enough unique symbols
+                        if len(symbols) >= 5:
+                            return sorted(symbols)
+            except asyncio.TimeoutError:
+                if symbols:
+                    return sorted(symbols)
+    except Exception as e:
+        pass
+    
+    return sorted(symbols) if symbols else []
+
+
 async def fetch_lowest_ask(ws, symbol: str, timeout_s: float = 5.0) -> float:
     """Wait for order_book messages and return the lowest ask for the symbol."""
     target_symbol = symbol.upper()
@@ -124,9 +191,9 @@ async def buy_once_on_market(
         except (RuntimeError, TimeoutError):
             print(f"[{market_name}] No ask liquidity for {symbol}; skipping")
             return
-        ts_ms = int(time.time() * 1000)
+        
         market_tag = "".join(ch for ch in market_name.upper() if ch.isalnum())[:2] or "MK"
-        cl_ord_id = f"B{market_tag}{ts_ms}"
+        cl_ord_id = await generate_unique_cli_ord_id(f"B{market_tag}")
 
         order_cmd = json.dumps(
             {
@@ -161,7 +228,45 @@ async def buy_once_on_market(
 
 
 async def main_async(args: argparse.Namespace) -> None:
-    symbol = args.symbol.upper()
+    # Define standard config file locations
+    nasdaq_config_paths = [
+        args.nasdaq_config,
+        "./crates/config/markets/nasdaq.json",
+        "../config/markets/nasdaq.json",
+        "crates/config/markets/nasdaq.json",
+    ]
+    nyse_config_paths = [
+        args.nyse_config,
+        "./crates/config/markets/nyse.json",
+        "../config/markets/nyse.json",
+        "crates/config/markets/nyse.json",
+    ]
+    
+    # Try to load symbols from config files
+    nasdaq_symbols = []
+    nyse_symbols = []
+    
+    for config_path in nasdaq_config_paths:
+        if config_path:
+            nasdaq_symbols = get_symbols_from_config(config_path)
+            if nasdaq_symbols:
+                print(f"✓ Loaded NASDAQ symbols from {config_path}: {nasdaq_symbols}")
+                break
+    
+    for config_path in nyse_config_paths:
+        if config_path:
+            nyse_symbols = get_symbols_from_config(config_path)
+            if nyse_symbols:
+                print(f"✓ Loaded NYSE symbols from {config_path}: {nyse_symbols}")
+                break
+    
+    symbols = sorted(set(nasdaq_symbols + nyse_symbols))
+    
+    if not symbols:
+        # Fallback to command-line symbol if no config loaded
+        print("No symbols loaded from config files, using provided symbols")
+        symbols = [args.symbol.upper()]
+    
     print(f"Logging in via gateway {args.gateway_url}...")
     tokens = gateway_login(args.gateway_url, args.username, args.password)
 
@@ -171,30 +276,52 @@ async def main_async(args: argparse.Namespace) -> None:
     if not nasdaq_token or not nyse_token:
         raise RuntimeError("Missing market token(s) for NASDAQ/NYSE")
 
-    print(f"\nPlacing BUY {args.qty} {symbol} at current lowest ask on both markets...")
-    await asyncio.gather(
-        buy_once_on_market(
-            market_name="NASDAQ",
-            ws_url=args.nasdaq_ws_url,
-            token=nasdaq_token,
-            username=args.username,
-            symbol=symbol,
-            qty=args.qty,
-        ),
-        buy_once_on_market(
-            market_name="NYSE",
-            ws_url=args.nyse_ws_url,
-            token=nyse_token,
-            username=args.username,
-            symbol=symbol,
-            qty=args.qty,
-        ),
-    )
+    # Discover symbols dynamically from market if very few symbols loaded
+    if len(symbols) < 2:
+        print("\nDiscovering additional symbols from market...")
+        full_url_nasdaq = f"{args.nasdaq_ws_url}?token={nasdaq_token}&username={args.username}"
+        ssl_ctx = ssl.create_default_context() if args.nasdaq_ws_url.startswith("wss://") else None
+        
+        try:
+            async with websockets.connect(full_url_nasdaq, ssl=ssl_ctx) as ws:
+                discovered = await discover_symbols(ws, timeout_s=3.0)
+                if discovered:
+                    print(f"✓ Discovered symbols from market: {', '.join(discovered)}")
+                    symbols = sorted(set(symbols + discovered))
+        except Exception as e:
+            print(f"Could not discover symbols dynamically: {e}")
+    
+    print(f"\nPlacing BUY {args.qty} for symbols: {', '.join(symbols)} on both markets...\n")
+    
+    tasks = []
+    for symbol in symbols:
+        tasks.append(
+            buy_once_on_market(
+                market_name="NASDAQ",
+                ws_url=args.nasdaq_ws_url,
+                token=nasdaq_token,
+                username=args.username,
+                symbol=symbol,
+                qty=args.qty,
+            )
+        )
+        tasks.append(
+            buy_once_on_market(
+                market_name="NYSE",
+                ws_url=args.nyse_ws_url,
+                token=nyse_token,
+                username=args.username,
+                symbol=symbol,
+                qty=args.qty,
+            )
+        )
+    
+    await asyncio.gather(*tasks)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Buy once on both markets at each market's lowest current ask"
+        description="Place BUY orders for all configured symbols on both markets at current lowest ask"
     )
     parser.add_argument(
         "--gateway-url",
@@ -211,9 +338,19 @@ def main() -> None:
         default="wss://www.marketsim.site/nyse/ws",
         help="WebSocket URL for NYSE (default: wss://www.marketsim.site/nyse/ws)",
     )
+    parser.add_argument(
+        "--nasdaq-config",
+        default=None,
+        help="Path to NASDAQ market config JSON (optional)",
+    )
+    parser.add_argument(
+        "--nyse-config",
+        default=None,
+        help="Path to NYSE market config JSON (optional)",
+    )
     parser.add_argument("--username", default="admin", help="Login username (default: admin)")
     parser.add_argument("--password", required=True, help="Login password")
-    parser.add_argument("--symbol", default="AAPL", help="Symbol to buy (default: AAPL)")
+    parser.add_argument("--symbol", default="AAPL", help="Fallback symbol if config not provided (default: AAPL)")
     parser.add_argument("--qty", type=int, default=1, help="Buy quantity (default: 1)")
 
     args = parser.parse_args()
