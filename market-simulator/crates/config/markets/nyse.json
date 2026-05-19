@@ -11,7 +11,7 @@
   "market": {
     "name": "NYSE",
     "database_url_env": "DATABASE_URL_NYSE",
-    "stocks": ["AAPL", "GE", "BA", "CAT", "KO"],
+    "stocks": ["SBFM", "BTM", "GOVX", "VRAX", "AIM"],
     "web": {
       "ip": "0.0.0.0",
       "port": 9885

@@ -8,13 +8,13 @@
       "name": "NASDAQ",
       "url": "http://market-nasdaq:9870",
       "public_url": "http://127.0.0.1:19870",
-      "stocks": ["AAPL", "GE", "BA", "CAT", "KO"]
+      "stocks": ["SBFM", "BTM", "GOVX", "VRAX", "AIM"]
     },
     {
       "name": "NYSE",
       "url": "http://market-nyse:9885",
       "public_url": "http://127.0.0.1:19885",
-      "stocks": ["AAPL", "GE", "BA", "CAT", "KO"]
+      "stocks": ["SBFM", "BTM", "GOVX", "VRAX", "AIM"]
     }
   ]
 }

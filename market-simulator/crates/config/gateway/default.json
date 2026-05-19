@@ -7,12 +7,12 @@
     {
       "name": "NASDAQ",
       "url": "http://127.0.0.1:9870",
-      "stocks": ["AAPL", "GE", "BA", "CAT", "KO"]
+      "stocks": ["SBFM", "BTM", "GOVX", "VRAX", "AIM"]
     },
     {
       "name": "NYSE",
       "url": "http://127.0.0.1:9885",
-      "stocks": ["AAPL", "GE", "BA", "CAT", "KO"]
+      "stocks": ["SBFM", "BTM", "GOVX", "VRAX", "AIM"]
     }
   ]
 }

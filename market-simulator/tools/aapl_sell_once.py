@@ -54,6 +54,31 @@ def load_market_config(config_path: str) -> Dict:
         raise RuntimeError(f"Failed to load market config from {config_path}: {e}")
 
 
+def ensure_min_price(price: float, min_price: float = 10.0) -> float:
+    """Ensure price is at least min_price by multiplying if needed.
+    
+    Preserves decimal precision throughout calculation:
+    - If price >= min_price: return as-is
+    - If price < min_price: multiply by 10, then by 10 again if still too low
+    - Ensures precision is kept during multiplication before any rounding
+    """
+    if price >= min_price:
+        return price
+    
+    # Multiply by 10 to bring low prices up (e.g., 1.5 -> 15.0)
+    adjusted = price * 10.0
+    
+    # If still below minimum, multiply by 10 again (e.g., 0.5 -> 5 -> 50)
+    if adjusted < min_price:
+        adjusted = adjusted * 10.0
+    
+    # If somehow still below (should not happen), clamp to minimum
+    if adjusted < min_price:
+        adjusted = min_price
+    
+    return adjusted
+
+
 def get_symbols_from_config(config_path: str) -> List[str]:
     """Extract symbol list from market config."""
     try:
@@ -179,7 +204,7 @@ async def send_sell_order(
             "side": "2",  # SELL
         })
         await ws.send(order_cmd)
-        print(f"Sent SELL {qty} {symbol} @ {price:.4f}")
+        print(f"Sent SELL {qty} {symbol} @ {price}")
         
         # Wait for execution report
         try:
@@ -265,19 +290,22 @@ async def main_async(args: argparse.Namespace) -> None:
             print(f"Could not discover symbols dynamically: {e}")
 
     print(f"\nFetching live prices and sending SELL orders for: {', '.join(symbols)}\n")
-
-    print(f"Fetching live prices and sending SELL orders for: {', '.join(symbols)}\n")
-    
+     
     tasks = []
     for symbol in symbols:
         try:
             nasdaq_price = fetch_nasdaq_price(symbol)
-            print(f"[{symbol}] NASDAQ price: {nasdaq_price:.4f}")
+            # Ensure price is at least $10
+            nasdaq_price = ensure_min_price(nasdaq_price)
+            print(f"[{symbol}] NASDAQ price: {nasdaq_price}")
             
-            # Apply delta to NYSE price
-            delta = nasdaq_price * (args.delta_percent / 100.0)
+            # Apply random +/- 5% delta to NYSE price for market realism
+            # Randomly choose between -5% and +5%
+            delta_percent = random.uniform(-5.0, 5.0)
+            delta = nasdaq_price * (delta_percent / 100.0)
             nyse_price = nasdaq_price + delta
-            print(f"[{symbol}] NYSE price: {nyse_price:.4f} (+{args.delta_percent}%)\n")
+            delta_sign = "+" if delta_percent >= 0 else ""
+            print(f"[{symbol}] NYSE price: {nyse_price} ({delta_sign}{delta_percent:.2f}%)\n")
             
             # Create tasks for both markets
             tasks.append(
@@ -328,8 +356,8 @@ def main() -> None:
     parser.add_argument("--password", required=True, help="Login password")
     parser.add_argument("--symbol", default="AAPL", help="Fallback symbol if config not provided (default: AAPL)")
     parser.add_argument("--qty", type=int, default=10, help="Sell quantity (default: 10)")
-    parser.add_argument("--delta-percent", type=float, default=0.01,
-                        help="Percent delta applied to NYSE price vs NASDAQ (default: 0.01)")
+    parser.add_argument("--delta-max", type=float, default=5.0,
+                        help="Max +/- price difference between NASDAQ and NYSE in percent (default: 5)")
     args = parser.parse_args()
     asyncio.run(main_async(args))
 

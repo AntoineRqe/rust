@@ -54,6 +54,31 @@ def load_market_config(config_path: str) -> Dict:
         raise RuntimeError(f"Failed to load market config from {config_path}: {e}")
 
 
+def ensure_min_price(price: float, min_price: float = 10.0) -> float:
+    """Ensure price is at least min_price by multiplying if needed.
+    
+    Preserves decimal precision throughout calculation:
+    - If price >= min_price: return as-is
+    - If price < min_price: multiply by 10, then by 10 again if still too low
+    - Ensures precision is kept during multiplication before any rounding
+    """
+    if price >= min_price:
+        return price
+    
+    # Multiply by 10 to bring low prices up (e.g., 1.5 -> 15.0)
+    adjusted = price * 10.0
+    
+    # If still below minimum, multiply by 10 again (e.g., 0.5 -> 5 -> 50)
+    if adjusted < min_price:
+        adjusted = adjusted * 10.0
+    
+    # If somehow still below (should not happen), clamp to minimum
+    if adjusted < min_price:
+        adjusted = min_price
+    
+    return adjusted
+
+
 def get_symbols_from_config(config_path: str) -> List[str]:
     """Extract symbol list from market config."""
     try:
@@ -192,6 +217,9 @@ async def buy_once_on_market(
             print(f"[{market_name}] No ask liquidity for {symbol}; skipping")
             return
         
+        # Ensure price is at least $10
+        lowest_ask = ensure_min_price(lowest_ask)
+        
         market_tag = "".join(ch for ch in market_name.upper() if ch.isalnum())[:2] or "MK"
         cl_ord_id = await generate_unique_cli_ord_id(f"B{market_tag}")
 
@@ -206,7 +234,7 @@ async def buy_once_on_market(
             }
         )
         await ws.send(order_cmd)
-        print(f"[{market_name}] Sent BUY {qty} {symbol} @ {lowest_ask:.4f}")
+        print(f"[{market_name}] Sent BUY {qty} {symbol} @ {lowest_ask}")
 
         try:
             async with asyncio.timeout(5):
