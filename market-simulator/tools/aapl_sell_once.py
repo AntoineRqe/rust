@@ -177,6 +177,47 @@ def gateway_login(gateway_url: str, username: str, password: str) -> Dict[str, s
     return {"NASDAQ": token, "NYSE": token}
 
 
+async def check_order_book_sell_side_empty(
+    ws,
+    symbol: str,
+    timeout_s: float = 3.0,
+) -> bool:
+    """Check if order book sell side (asks) is empty for the given symbol.
+    
+    Returns True if no asks found, False if sells exist.
+    """
+    target_symbol = symbol.upper()
+    start_time = asyncio.get_event_loop().time()
+    
+    try:
+        while asyncio.get_event_loop().time() - start_time < timeout_s:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                msg = json.loads(raw)
+                
+                if msg.get("type") != "order_book":
+                    continue
+                
+                msg_symbol = str(msg.get("symbol", "")).upper()
+                if msg_symbol != target_symbol:
+                    continue
+                
+                # Check if asks (sell side) is empty
+                asks = msg.get("asks", [])
+                if not asks:
+                    return True  # Sell side is empty
+                else:
+                    return False  # Sell side has offers
+                    
+            except asyncio.TimeoutError:
+                continue
+    except Exception as e:
+        print(f"Error checking order book: {e}")
+    
+    # Default to False (assume there are sellers) if we can't determine
+    return False
+
+
 async def send_sell_order(
     market_name: str,
     ws_url: str,
@@ -186,12 +227,22 @@ async def send_sell_order(
     qty: int,
     price: float,
 ) -> None:
-    """Connect to market WebSocket and send a SELL order."""
+    """Connect to market WebSocket and send a SELL order only if sell side is empty."""
     full_url = f"{ws_url}?token={token}&username={username}"
     
     ssl_ctx = ssl.create_default_context() if ws_url.startswith("wss://") else None
     
     async with websockets.connect(full_url, ssl=ssl_ctx) as ws:
+        # First, check if order book sell side is empty
+        print(f"[{market_name}] Checking if sell side is empty for {symbol}...")
+        is_sell_side_empty = await check_order_book_sell_side_empty(ws, symbol, timeout_s=3.0)
+        
+        if not is_sell_side_empty:
+            print(f"[{market_name}] Sell side not empty for {symbol}; skipping order")
+            return
+        
+        print(f"[{market_name}] Sell side is empty for {symbol}; proceeding with order")
+        
         # Send the SELL order
         market_tag = "".join(ch for ch in market_name.upper() if ch.isalnum())[:2] or "MK"
         cl_ord_id = await generate_unique_cli_ord_id(f"S{market_tag}")
