@@ -628,6 +628,12 @@ function getNextMarket() {
   return KNOWN_MARKETS[(currentIndex + 1) % KNOWN_MARKETS.length] || null;
 }
 
+function getOtherMarket(marketName) {
+  const normalized = normalizeMarketName(marketName);
+  const options = resolveSplitMarketConfigs();
+  return options.find(m => normalizeMarketName(m.name) !== normalized) || null;
+}
+
 function updateMarketSwitchButton() {
   const btn = ge('market-switch');
   if (!btn) return;
@@ -753,6 +759,21 @@ function selectMarketSymbol(marketName, symbol) {
   mergeClientOpenOrdersFromBook(mn, nextSymbol);
   renderOrders(null, true);
   updateDynamicQtyLimit();
+  
+  // Sync symbol to other market (for split view)
+  const otherMarket = getOtherMarket(mn);
+  if (otherMarket) {
+    const otherMarketName = normalizeMarketName(otherMarket.name);
+    setActiveMarketSymbol(otherMarketName, nextSymbol);
+    renderMarketBook(otherMarketName);
+    mergeClientOpenOrdersFromBook(otherMarketName, nextSymbol);
+  }
+  
+  // Update order entry form to reflect the selected symbol
+  const sel = ge('o-sym');
+  if (sel && sel.value !== nextSymbol) {
+    sel.value = nextSymbol;
+  }
 }
 
 function populateOrderSymbolOptions() {

@@ -184,7 +184,9 @@ async def check_order_book_sell_side_empty(
 ) -> bool:
     """Check if order book sell side (asks) is empty for the given symbol.
     
-    Returns True if no asks found, False if sells exist.
+    Returns True if no asks found or on any error/timeout, False if sells exist.
+    This ensures orders are placed when sell side is empty, even if we can't
+    fully validate the order book.
     """
     target_symbol = symbol.upper()
     start_time = asyncio.get_event_loop().time()
@@ -205,17 +207,18 @@ async def check_order_book_sell_side_empty(
                 # Check if asks (sell side) is empty
                 asks = msg.get("asks", [])
                 if not asks:
-                    return True  # Sell side is empty
+                    return True  # Sell side is empty - proceed with order
                 else:
-                    return False  # Sell side has offers
+                    return False  # Sell side has offers - skip order
                     
             except asyncio.TimeoutError:
                 continue
     except Exception as e:
-        print(f"Error checking order book: {e}")
+        print(f"Warning: Could not validate order book ({e}), proceeding anyway")
     
-    # Default to False (assume there are sellers) if we can't determine
-    return False
+    # Default to True (proceed with order) if we can't determine
+    # This ensures orders are placed even if order book is not available
+    return True
 
 
 async def send_sell_order(
